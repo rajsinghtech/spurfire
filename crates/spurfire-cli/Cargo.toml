@@ -1,0 +1,20 @@
+[package]
+name = "spurfire-cli"
+description = "spurfire-ctl: lobby lifecycle CLI for Spurfire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "spurfire-ctl"
+path = "src/main.rs"
+
+[dependencies]
+spurfire-control = { path = "../spurfire-control" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
