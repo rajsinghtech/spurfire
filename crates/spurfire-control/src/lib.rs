@@ -68,6 +68,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub addresses: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default, rename = "lastSeen")]
     pub last_seen: Option<String>,
 }
