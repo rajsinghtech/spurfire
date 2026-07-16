@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: fmt / clippy / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  e2e:
+    name: e2e (Tailscale API, manual)
+    # Manual trigger only — never runs on PRs or pushes. Requires the
+    # TS_CLIENT_ID / TS_CLIENT_SECRET repository secrets to be configured.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Write .env from secrets
+        env:
+          TS_CLIENT_ID: ${{ secrets.TS_CLIENT_ID }}
+          TS_CLIENT_SECRET: ${{ secrets.TS_CLIENT_SECRET }}
+        run: |
+          if [ -z "$TS_CLIENT_ID" ] || [ -z "$TS_CLIENT_SECRET" ]; then
+            echo "::error::TS_CLIENT_ID / TS_CLIENT_SECRET secrets are not configured"
+            exit 1
+          fi
+          umask 077
+          printf 'TS_CLIENT_ID=%s\nTS_CLIENT_SECRET=%s\nTS_API_BASE=https://api.tailscale.com/api/v2\n' \
+            "$TS_CLIENT_ID" "$TS_CLIENT_SECRET" > .env
+
+      - name: Run e2e smoke test
+        run: scripts/ts-api.sh token
