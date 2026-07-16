@@ -1,7 +1,7 @@
 [package]
 name = "spurfire-control"
 description = "Control plane for Spurfire lobbies: Tailscale tailnet/key lifecycle"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

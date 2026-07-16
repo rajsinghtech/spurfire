@@ -1,7 +1,7 @@
 [package]
 name = "spurfire-cli"
 description = "spurfire-ctl: lobby lifecycle CLI for Spurfire"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
