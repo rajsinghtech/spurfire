@@ -13,12 +13,15 @@ keep recent state snapshots for authority migration.
 
 ## D2 — Tailnet-per-lobby with shared-tailnet fallback
 
-**Status:** provisional — pending Tailscale API verification
+**Status:** provisional — API verification blocked tailnet-per-lobby; fallback needs broader scopes
 
-Each lobby gets its own tailnet for isolation. Multiple tailnets is an **alpha** Tailscale
-capability; one tailnet per match requires confirmed API access, quotas, and reliable cleanup.
-**Fallback:** one managed game tailnet with lobby-specific tags + ACLs (changes the isolation
-model).
+Tailnet-per-lobby remains the preferred isolation model, but verified singular and plural create
+probes returned 404: no tested alpha tailnet-create route is available. The implemented
+`TailnetPerLobby` mode therefore reports a clear unavailable error. **Fallback:** one managed game
+tailnet with lobby-specific tags + ACLs. `SharedTailnet` is implemented and is the nearer viable
+mode, but the tested OAuth client received 403 for auth-key, device-list, and ACL operations. Keep
+this decision provisional until broader scopes and end-to-end key issuance, policy, and cleanup
+have been verified; see `docs/tailscale-api.md`.
 
 ## D3 — Rust monorepo for the control plane
 
@@ -49,4 +52,4 @@ witness/replay-validation service. No mechanism selected yet.
 4. Starting loadout vs found weapons?
 5. Horse: persistent named companion vs per-match pick?
 6. Friends-only party game vs public ranked?
-7. Confirmed Tailnet Create API access?
+7. Will Tailscale expose and authorize a tailnet-create API for this deployment?
