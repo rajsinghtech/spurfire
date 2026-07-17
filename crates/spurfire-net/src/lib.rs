@@ -9,6 +9,7 @@ use spurfire_protocol::{
 };
 use thiserror::Error;
 
+pub mod replication;
 #[cfg(feature = "rustscale")]
 pub mod rustscale;
 

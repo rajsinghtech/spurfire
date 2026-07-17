@@ -22,7 +22,8 @@ docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
 docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
-docs/p2p-networking.md       Peer protocol, Godot adapter, and live UDP proof
+docs/p2p-networking.md       Peer protocol, replication, migration, and live UDP proof
+docs/testing.md              Local, Godot, manual, and live test steps
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
 docs/asset-licenses.md     Verified provenance and licenses for imported game assets

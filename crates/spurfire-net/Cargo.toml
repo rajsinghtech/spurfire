@@ -25,3 +25,8 @@ zeroize.workspace = true
 name = "spurfire-p2p-smoke"
 path = "src/bin/p2p_smoke.rs"
 required-features = ["rustscale"]
+
+[[bin]]
+name = "spurfire-migration-smoke"
+path = "src/bin/migration_smoke.rs"
+required-features = ["rustscale"]

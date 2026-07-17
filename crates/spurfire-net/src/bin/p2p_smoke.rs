@@ -38,12 +38,14 @@ fn argument(name: &str) -> Result<String, String> {
 }
 
 fn read_key(path: &str) -> Result<Zeroizing<String>, String> {
-    let value = fs::read_to_string(path).map_err(|error| format!("read key file: {error}"))?;
-    let value = value.trim().to_owned();
-    if value.is_empty() {
+    let value = Zeroizing::new(
+        fs::read_to_string(path).map_err(|error| format!("read key file: {error}"))?,
+    );
+    let trimmed = Zeroizing::new(value.trim().to_owned());
+    if trimmed.is_empty() {
         return Err("auth key file was empty".into());
     }
-    Ok(Zeroizing::new(value))
+    Ok(trimmed)
 }
 
 #[tokio::main]

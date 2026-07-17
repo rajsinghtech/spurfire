@@ -12,7 +12,8 @@ const REQUIRED_NODES := [
 	"TestCourse/SlalomPost_0", "TestCourse/TurnCircle_0", "WorldEnvironment",
 	"Sun", "KillResetZone", "HorseSpawn", "Horse/HeadProxy", "Horse/FrontLeftLeg",
 	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
-	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "NetworkLayer/Panel/Margin/Label"
+	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "RemoteRider", "NetworkReplication",
+	"NetworkLayer/Panel/Margin/Label"
 ]
 
 func _ready() -> void:
@@ -20,6 +21,24 @@ func _ready() -> void:
 	for action in REQUIRED_ACTIONS:
 		if not InputMap.has_action(action):
 			failures.append("missing InputMap action: %s" % action)
+	if not ClassDB.class_exists(&"NetworkRider"):
+		failures.append("native class NetworkRider is unavailable")
+	else:
+		var network_rider := ClassDB.instantiate(&"NetworkRider") as Node3D
+		if network_rider == null:
+			failures.append("NetworkRider could not be instantiated")
+		else:
+			if not bool(network_rider.call("push_snapshot", 10, Vector3.ZERO, Vector3(6, 0, 0), 350.0)):
+				failures.append("NetworkRider rejected first valid snapshot")
+			if not bool(network_rider.call("push_snapshot", 14, Vector3(4, 0, 0), Vector3(6, 0, 0), 10.0)):
+				failures.append("NetworkRider rejected second valid snapshot")
+			var sample := network_rider.call("sample_at", 12.0) as Dictionary
+			if absf((sample.get("position", Vector3.ZERO) as Vector3).x - 2.0) > 0.001:
+				failures.append("NetworkRider interpolation did not bridge jittered snapshots")
+			var correction := network_rider.call("reconciliation", 14, Vector3.ZERO, Vector3(3, 0, 0)) as Dictionary
+			if not bool(correction.get("snap", false)):
+				failures.append("NetworkRider failed large prediction reconciliation")
+			network_rider.free()
 	if not ClassDB.class_exists(&"PeerSession"):
 		failures.append("native class PeerSession is unavailable")
 	else:
@@ -27,7 +46,7 @@ func _ready() -> void:
 		if peer_session == null:
 			failures.append("PeerSession could not be instantiated")
 		else:
-			for method in ["configure_session", "make_heartbeat", "make_rider_input", "accept_packet", "connect_rustscale", "send_packet", "shutdown"]:
+			for method in ["configure_session", "make_heartbeat", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "connect_rustscale", "send_packet", "shutdown"]:
 				if not peer_session.has_method(method):
 					failures.append("PeerSession lacks %s" % method)
 			if not peer_session.has_signal("packet_received"):
@@ -47,6 +66,10 @@ func _ready() -> void:
 					failures.append("PeerSession heartbeat codec/validation failed")
 				elif int(peer_session.call("accept_packet", heartbeat, 2)) != 1:
 					failures.append("PeerSession failed to reject a replayed heartbeat")
+				var snapshot := peer_session.call("make_rider_snapshot", 2, Vector3(1, 2, 3), Vector3(4, 0, -2), 45.0) as PackedByteArray
+				var decoded := peer_session.call("decode_packet", snapshot) as Dictionary
+				if decoded.get("type", "") != "rider_snapshot" or decoded.get("position", Vector3.ZERO) != Vector3(1, 2, 3):
+					failures.append("PeerSession snapshot codec omitted rider state")
 			peer_session.free()
 	if not ClassDB.class_exists(&"HorseController"):
 		failures.append("native class HorseController is unavailable")

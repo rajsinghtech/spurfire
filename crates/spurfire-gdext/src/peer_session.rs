@@ -215,6 +215,137 @@ impl PeerSession {
         )
     }
 
+    /// Build a quantized authority rider snapshot.
+    #[func]
+    fn make_rider_snapshot(
+        &mut self,
+        tick: i64,
+        position: Vector3,
+        velocity: Vector3,
+        yaw_degrees: f64,
+    ) -> PackedByteArray {
+        fn millimetres(value: f32) -> Option<i32> {
+            let scaled = f64::from(value) * 1_000.0;
+            scaled
+                .is_finite()
+                .then_some(scaled.round())
+                .and_then(|value| {
+                    (value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+                        .then_some(value as i32)
+                })
+        }
+        let Some(position_mm) = [position.x, position.y, position.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(velocity_mmps) = [velocity.x, velocity.y, velocity.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let yaw = yaw_degrees * 1_000.0;
+        if !yaw.is_finite() || yaw < f64::from(i32::MIN) || yaw > f64::from(i32::MAX) {
+            return PackedByteArray::new();
+        }
+        self.make_packet(
+            tick,
+            PeerPayload::RiderSnapshot {
+                position_mm: [position_mm[0], position_mm[1], position_mm[2]],
+                velocity_mmps: [velocity_mmps[0], velocity_mmps[1], velocity_mmps[2]],
+                yaw_millidegrees: yaw.round() as i32,
+            },
+        )
+    }
+
+    /// Decode presentation fields after `accept_packet` has accepted the packet.
+    #[func]
+    fn decode_packet(&self, packet: PackedByteArray) -> VarDictionary {
+        let Ok(envelope) = decode(&packet.to_vec()) else {
+            return VarDictionary::new();
+        };
+        let mut result = VarDictionary::new();
+        result.set("sender", envelope.sender.to_string());
+        result.set(
+            "sequence",
+            i64::try_from(envelope.sequence).unwrap_or(i64::MAX),
+        );
+        result.set(
+            "tick",
+            i64::try_from(envelope.simulation_tick).unwrap_or(i64::MAX),
+        );
+        result.set(
+            "authority_epoch",
+            i64::try_from(envelope.authority_epoch).unwrap_or(i64::MAX),
+        );
+        match envelope.payload {
+            PeerPayload::Heartbeat => result.set("type", "heartbeat"),
+            PeerPayload::Hello { hostname } => {
+                result.set("type", "hello");
+                result.set("hostname", hostname);
+            }
+            PeerPayload::RiderInput {
+                throttle_milli,
+                steer_milli,
+                buttons,
+            } => {
+                result.set("type", "rider_input");
+                result.set("throttle_milli", i64::from(throttle_milli));
+                result.set("steer_milli", i64::from(steer_milli));
+                result.set("buttons", i64::from(buttons));
+            }
+            PeerPayload::RiderSnapshot {
+                position_mm,
+                velocity_mmps,
+                yaw_millidegrees,
+            } => {
+                result.set("type", "rider_snapshot");
+                result.set(
+                    "position",
+                    Vector3::new(
+                        position_mm[0] as f32 / 1_000.0,
+                        position_mm[1] as f32 / 1_000.0,
+                        position_mm[2] as f32 / 1_000.0,
+                    ),
+                );
+                result.set(
+                    "velocity",
+                    Vector3::new(
+                        velocity_mmps[0] as f32 / 1_000.0,
+                        velocity_mmps[1] as f32 / 1_000.0,
+                        velocity_mmps[2] as f32 / 1_000.0,
+                    ),
+                );
+                result.set("yaw_degrees", f64::from(yaw_millidegrees) / 1_000.0);
+            }
+            PeerPayload::ShotCommand { .. } => result.set("type", "shot_command"),
+            PeerPayload::ShotResult { .. } => result.set("type", "shot_result"),
+            PeerPayload::Authority { authority, epoch } => {
+                result.set("type", "authority");
+                result.set("authority", authority.to_string());
+                result.set("epoch", i64::try_from(epoch).unwrap_or(i64::MAX));
+            }
+            PeerPayload::MigrationSnapshot {
+                authority,
+                epoch,
+                tick,
+                state_hash,
+            } => {
+                result.set("type", "migration_snapshot");
+                result.set("authority", authority.to_string());
+                result.set("epoch", i64::try_from(epoch).unwrap_or(i64::MAX));
+                result.set("snapshot_tick", i64::try_from(tick).unwrap_or(i64::MAX));
+                result.set("state_hash", state_hash);
+            }
+            PeerPayload::Leave => result.set("type", "leave"),
+        }
+        result
+    }
+
     /// Validate one received packet. 0=accepted, 1=replay, 2=wrong lobby, 3=stale epoch, -1=invalid.
     #[func]
     fn accept_packet(&mut self, packet: PackedByteArray, now_ms: i64) -> i64 {

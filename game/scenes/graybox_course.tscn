@@ -1,4 +1,4 @@
-[gd_scene load_steps=30 format=3]
+[gd_scene load_steps=31 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -16,6 +16,7 @@
 [ext_resource type="PackedScene" path="res://combat/combat_effects.tscn" id="14_effects"]
 [ext_resource type="Script" path="res://scripts/combat_player.gd" id="15_combat_player"]
 [ext_resource type="Script" path="res://scripts/network_status.gd" id="16_network_status"]
+[ext_resource type="Script" path="res://scripts/multiplayer_replication.gd" id="17_replication"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -260,6 +261,18 @@ visible = false
 horse_path = NodePath("../../Horse")
 
 [node name="PeerSession" type="PeerSession" parent="."]
+
+[node name="RemoteRider" type="NetworkRider" parent="."]
+visible = false
+
+[node name="Body" type="MeshInstance3D" parent="RemoteRider"]
+mesh = SubResource("BoxMesh_body")
+
+[node name="NetworkReplication" type="Node" parent="." node_paths=PackedStringArray("peer_session", "local_horse", "remote_rider")]
+script = ExtResource("17_replication")
+peer_session = NodePath("../PeerSession")
+local_horse = NodePath("../Horse")
+remote_rider = NodePath("../RemoteRider")
 
 [node name="NetworkLayer" type="CanvasLayer" parent="." node_paths=PackedStringArray("peer_session")]
 layer = 4

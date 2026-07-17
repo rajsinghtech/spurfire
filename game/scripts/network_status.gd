@@ -19,6 +19,10 @@ func _refresh() -> void:
 	label.text = "NET  %s" % state
 	if not ip.is_empty():
 		label.text += "  %s:%d" % [ip, port]
+	var authority := str(peer_session.get("authority_player_id"))
+	var epoch := int(peer_session.get("authority_epoch"))
+	if not authority.is_empty():
+		label.text += "  HOST %s…  E%d" % [authority.left(8), epoch]
 
 func _on_connected(_ip: String, _port: int) -> void:
 	_refresh()

@@ -84,10 +84,17 @@ mint_key() {
 }
 mint_key "$TMP/key-a"
 mint_key "$TMP/key-b"
+mint_key "$TMP/migration-a"
+mint_key "$TMP/migration-b"
+mint_key "$TMP/migration-c"
 unset CHILD_TOKEN ORG_TOKEN
 
-cargo run --quiet -p spurfire-net --features rustscale --bin spurfire-p2p-smoke -- \
+cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-p2p-smoke -- \
   --key-a "$TMP/key-a" --key-b "$TMP/key-b"
+mkdir "$TMP/migration"
+cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-migration-smoke -- \
+  --key-a "$TMP/migration-a" --key-b "$TMP/migration-b" --key-c "$TMP/migration-c" \
+  --dir "$TMP/migration"
 
 # Cleanup now (the trap remains a fallback) and fail if exact deletion did not succeed.
 cleanup
