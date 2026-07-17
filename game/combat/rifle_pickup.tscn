@@ -1,0 +1,49 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://scripts/combat_rifle_pickup.gd" id="1"]
+[ext_resource type="PackedScene" path="res://combat/mounted_rifle.tscn" id="2"]
+[sub_resource type="StandardMaterial3D" id="CrateMat"]
+albedo_color = Color(0.45, 0.24, 0.11, 1)
+roughness = 0.9
+[sub_resource type="StandardMaterial3D" id="OutlineMat"]
+albedo_color = Color(1, 0.64, 0.2, 0.35)
+transparency = 1
+emission_enabled = true
+emission = Color(1, 0.36, 0.05, 1)
+emission_energy_multiplier = 2.0
+[sub_resource type="BoxMesh" id="CrateMesh"]
+material = SubResource("CrateMat")
+size = Vector3(1.45, 0.7, 0.95)
+[sub_resource type="BoxMesh" id="OutlineMesh"]
+material = SubResource("OutlineMat")
+size = Vector3(1.54, 0.79, 1.04)
+[sub_resource type="BoxShape3D" id="AreaShape"]
+size = Vector3(6, 3, 6)
+
+[node name="RiflePickup" type="Area3D"]
+script = ExtResource("1")
+
+[node name="Outline" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.37, 0)
+mesh = SubResource("OutlineMesh")
+
+[node name="Crate" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.37, 0)
+mesh = SubResource("CrateMesh")
+
+[node name="Rifle" parent="." instance=ExtResource("2")]
+position = Vector3(0, 0.98, 0)
+rotation = Vector3(0, -1.5708, 0)
+scale = Vector3(0.75, 0.75, 0.75)
+
+[node name="InteractionShape" type="CollisionShape3D" parent="."]
+shape = SubResource("AreaShape")
+
+[node name="Prompt" type="Label3D" parent="."]
+unique_name_in_owner = true
+position = Vector3(0, 1.85, 0)
+text = "[E] TAKE SF-C30 DUSTWALKER"
+font_size = 42
+outline_size = 10
+billboard = 1
+no_depth_test = true
