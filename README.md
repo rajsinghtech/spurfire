@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/spurfire-logo.svg" alt="Spurfire logo" width="120"></p>
+
 # Spurfire
 
 *High noon. Low ping.*
@@ -15,6 +17,7 @@ crates/spurfire-server/    spurfire-server Axum lobby control service
 crates/spurfire-cli/       spurfire-ctl development and operations CLI
 crates/spurfire-gdext/     Rust gameplay classes for Godot
 game/                      Godot 4.7.1 project and graybox tests
+assets/                    Brand assets (canonical Spurfire rowel mark)
 charts/spurfire-control/   Hardened OCI-published Helm deployment chart
 scripts/                   API probes and game build/test helpers
 Dockerfile                 Multi-stage, non-root spurfire-server image
