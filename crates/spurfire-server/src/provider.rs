@@ -647,9 +647,10 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
         ControlError::Http { status: 403, .. } => ProviderError::InsufficientScopes { operation },
         ControlError::Http { status, .. } => ProviderError::Upstream { operation, status },
         ControlError::ProvisioningUnavailable(_) => ProviderError::ModeUnavailable,
-        ControlError::Env(_) | ControlError::Reqwest(_) | ControlError::Json(_) => {
-            ProviderError::Unavailable { operation }
-        }
+        ControlError::Env(_)
+        | ControlError::InvalidTailnetName(_)
+        | ControlError::Reqwest(_)
+        | ControlError::Json(_) => ProviderError::Unavailable { operation },
     }
 }
 
