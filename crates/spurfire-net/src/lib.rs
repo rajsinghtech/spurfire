@@ -95,6 +95,7 @@ pub enum CodecError {
 }
 
 pub fn encode(envelope: &Envelope) -> Result<Vec<u8>, CodecError> {
+    validate_payload(&envelope.payload)?;
     let encoded =
         serde_json::to_vec(envelope).map_err(|error| CodecError::Malformed(error.to_string()))?;
     if encoded.len() > MAX_DATAGRAM_BYTES {
@@ -112,15 +113,20 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
     if !CURRENT_WIRE_VERSION.is_compatible_with(envelope.wire_version) {
         return Err(CodecError::IncompatibleVersion);
     }
+    validate_payload(&envelope.payload)?;
+    Ok(envelope)
+}
+
+fn validate_payload(payload: &PeerPayload) -> Result<(), CodecError> {
     if matches!(
-        envelope.payload,
-        PeerPayload::RiderInput { buttons, .. } if buttons & RIDER_INPUT_RESERVED_MASK != 0
+        payload,
+        PeerPayload::RiderInput { buttons, .. } if *buttons & RIDER_INPUT_RESERVED_MASK != 0
     ) {
         return Err(CodecError::Malformed(
             "rider input contains reserved button bits".to_owned(),
         ));
     }
-    Ok(envelope)
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,6 +537,7 @@ mod tests {
             steer_milli: 0,
             buttons: 1 << 2,
         });
+        assert!(matches!(encode(&reserved), Err(CodecError::Malformed(_))));
         assert!(matches!(
             decode(&serde_json::to_vec(&reserved).unwrap()),
             Err(CodecError::Malformed(_))

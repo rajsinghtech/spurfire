@@ -544,7 +544,7 @@ impl CombatKernel {
         prelaunch_horizontal_velocity_mmps: [i32; 2],
         nominal_airtime_ticks: u64,
     ) -> Result<(), DiveContextError> {
-        let elapsed = launch_tick
+        launch_tick
             .checked_duration_since(self.last_advanced_tick)
             .ok_or(DiveContextError::TickReplay)?;
         if launch_weapon != self.equipped {
@@ -556,12 +556,26 @@ impl CombatKernel {
         {
             return Err(DiveContextError::DiveAlreadyOpen);
         }
+        if self.riding.stance != RiderStance::Mounted || !self.riding.is_consistent() {
+            return Err(DiveContextError::ContextMismatch);
+        }
 
-        let mut launch_handling = self.riding;
-        launch_handling.stance = RiderStance::Mounted;
-        launch_handling.dive_id = None;
+        let launch_handling = self.riding;
+        // A jump in absolute ticks still completes reload boundaries strictly
+        // before launch. A reload whose boundary is the launch tick is canceled
+        // because accepted E processing precedes same-tick reload processing.
+        if launch_tick > self.last_advanced_tick {
+            let prelaunch_tick = SimulationTick::new(launch_tick.as_u64() - 1);
+            if prelaunch_tick > self.last_advanced_tick {
+                self.advance_to(prelaunch_tick, launch_handling)
+                    .expect("prelaunch tick was validated as monotonic");
+            }
+            let final_elapsed = launch_tick
+                .checked_duration_since(self.last_advanced_tick)
+                .expect("prelaunch advance cannot pass launch");
+            self.recoil.recover(final_elapsed, self.tick_rate);
+        }
         self.reload = None;
-        self.recoil.recover(elapsed, self.tick_rate);
         self.last_advanced_tick = launch_tick;
         self.riding.stance = RiderStance::SaddleDiveAirborne;
         self.riding.dive_id = Some(dive_id);
@@ -2801,6 +2815,9 @@ mod tests {
             assert!(kernel.equip_weapon(weapon));
             let second_dive = DiveId::new(2).unwrap();
             kernel
+                .advance_to(SimulationTick::new(cap_tick + cadence), riding())
+                .unwrap();
+            kernel
                 .begin_saddle_dive(
                     second_dive,
                     SimulationTick::new(cap_tick + cadence),
@@ -2864,6 +2881,33 @@ mod tests {
             Err(PickupError::Airborne)
         );
         assert_eq!(kernel, before_reload);
+
+        let required = WeaponId::Dustwalker.stats().reload_ticks(60);
+        for (launch_tick, expected_magazine) in [(required, 10), (required + 1, 30)] {
+            let mut boundary =
+                CombatKernel::with_weapon(60, LOBBY_SEED, player(1), WeaponId::Dustwalker).unwrap();
+            boundary.set_ammo(
+                WeaponId::Dustwalker,
+                WeaponAmmo {
+                    magazine: 10,
+                    reserve: 120,
+                },
+            );
+            boundary
+                .request_reload(SimulationTick::new(0), riding())
+                .unwrap();
+            boundary
+                .begin_saddle_dive(
+                    DiveId::new(2).unwrap(),
+                    SimulationTick::new(launch_tick),
+                    WeaponId::Dustwalker,
+                    [0, -8_000],
+                    45,
+                )
+                .unwrap();
+            assert_eq!(boundary.equipped_ammo().magazine, expected_magazine);
+            assert_eq!(boundary.reload(), None);
+        }
     }
 
     #[test]

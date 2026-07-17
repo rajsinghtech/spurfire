@@ -454,7 +454,10 @@ impl AcceptedShotMetadata {
     #[must_use]
     pub const fn is_consistent(self) -> bool {
         matches!(self.stance, RiderStance::SaddleDiveAirborne) == self.dive_id.is_some()
-            && !matches!(self.stance, RiderStance::Unknown(_))
+            && matches!(
+                self.stance,
+                RiderStance::Mounted | RiderStance::SaddleDiveAirborne
+            )
     }
 }
 
@@ -832,6 +835,15 @@ impl RiderHealthKernel {
         Some(self.apply_amount(observation.amount))
     }
 
+    /// Marks an externally observed death without inventing a damage amount.
+    pub fn observe_death(&mut self) -> bool {
+        if self.health == 0 {
+            return false;
+        }
+        self.health = 0;
+        true
+    }
+
     /// Explicit course reset; this is not a normal retrieval path.
     pub fn reset(&mut self) {
         self.health = PROTOTYPE_RIDER_HEALTH;
@@ -1150,6 +1162,8 @@ impl SaddleDiveKernel {
             return effects;
         };
         if shot.tick < record.row.launch_tick
+            || shot.weapon_id != record.row.launch_weapon
+            || shot.prelaunch_horizontal_velocity_mmps != record.row.prelaunch_velocity_mmps
             || record
                 .row
                 .landing_tick
@@ -1237,6 +1251,7 @@ impl SaddleDiveKernel {
     /// Records an externally observed death once.
     pub fn observe_death(&mut self, tick: SimulationTick) -> SaddleDiveEffects {
         let mut effects = SaddleDiveEffects::default();
+        self.health.observe_death();
         self.observe_death_internal(tick, &mut effects);
         effects
     }
@@ -1259,6 +1274,10 @@ impl SaddleDiveKernel {
         let dive_id = self.state_dive_id;
         self.state = SaddleDiveState::Mounted;
         self.state_enter_tick = tick;
+        if self.current_tick.is_none_or(|current| tick > current) {
+            self.current_tick = Some(tick);
+        }
+        self.motion_resolved = true;
         self.state_dive_id = None;
         self.airborne = None;
         self.landing = None;
@@ -2747,6 +2766,61 @@ mod tests {
             ledger.observe_result(7, &mounted_result).events[0].kind,
             GameplayEventKind::FullGallopHit
         );
+
+        let body_forward = AcceptedShotMetadata {
+            shooter: player(),
+            tick: SimulationTick::new(61),
+            accepted_shot_index: 14,
+            weapon_id: WeaponId::Dustwalker,
+            stance: RiderStance::SaddleDiveAirborne,
+            gait: CombatGait::Gallop,
+            dive_id: Some(dive_id),
+            prelaunch_horizontal_velocity_mmps: [0, -8_000],
+        };
+        assert!(ledger.record_accepted(body_forward));
+        let mut body_result = mounted_result.clone();
+        body_result.tick = body_forward.tick;
+        body_result.outcome = ShotOutcome::Hit;
+        body_result.hit_zone = Some(HitZone::Body);
+        body_result.resolved_direction = Some(QuantizedDirection::new(0, 0, -DIRECTION_UNITS));
+        assert!(ledger.observe_result(7, &body_result).events.is_empty());
+
+        let miss = AcceptedShotMetadata {
+            tick: SimulationTick::new(62),
+            accepted_shot_index: 15,
+            ..body_forward
+        };
+        assert!(ledger.record_accepted(miss));
+        let mut miss_result = body_result.clone();
+        miss_result.tick = miss.tick;
+        miss_result.outcome = ShotOutcome::Miss;
+        miss_result.hit_zone = Some(HitZone::Head);
+        miss_result.resolved_direction = Some(QuantizedDirection::new(0, 0, DIRECTION_UNITS));
+        assert!(ledger.observe_result(7, &miss_result).events.is_empty());
+
+        let ordinary_jump = AcceptedShotMetadata {
+            tick: SimulationTick::new(63),
+            accepted_shot_index: 16,
+            stance: RiderStance::MountedAirborne,
+            dive_id: None,
+            ..body_forward
+        };
+        assert!(!ledger.record_accepted(ordinary_jump));
+        let mut jump_result = body_result.clone();
+        jump_result.tick = ordinary_jump.tick;
+        assert!(ledger.observe_result(7, &jump_result).events.is_empty());
+
+        let unknown = AcceptedShotMetadata {
+            tick: SimulationTick::new(64),
+            accepted_shot_index: 17,
+            stance: RiderStance::Unknown(200),
+            dive_id: None,
+            ..body_forward
+        };
+        assert!(!ledger.record_accepted(unknown));
+        let mut unlinked = body_result;
+        unlinked.tick = SimulationTick::new(999);
+        assert!(ledger.observe_result(7, &unlinked).events.is_empty());
     }
 
     #[test]
@@ -2774,6 +2848,111 @@ mod tests {
             }
         }
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn k15_instrumentation_records_late_results_and_inclusive_damage_window() {
+        let (mut kernel, dive_id) = launch_kernel();
+        let launch = kernel.instrumentation_row(dive_id).unwrap();
+        assert_eq!(launch.schema_version, 1);
+        assert_eq!(launch.authority_epoch, 7);
+        assert_eq!(launch.launch_tick, SimulationTick::new(10));
+        assert_eq!(launch.prelaunch_velocity_mmps, [0, -8_000]);
+        assert_eq!(launch.prelaunch_speed_mmps, 8_000);
+        assert_eq!(launch.horizontal_impulse_mmps, 6_000);
+        assert_eq!(launch.vertical_pop_mmps, 6_000);
+        assert_eq!(launch.launch_height_mm, 1_600);
+        assert_eq!(launch.nominal_airtime_ticks, 45);
+
+        kernel.begin_tick(tick_input(11, 0, false)).unwrap();
+        assert_eq!(
+            kernel
+                .record_shot_attempt(SimulationTick::new(11))
+                .telemetry_updates
+                .len(),
+            1
+        );
+        assert!(kernel
+            .record_shot_attempt(SimulationTick::new(11))
+            .telemetry_updates
+            .is_empty());
+        let accepted = AcceptedShotMetadata {
+            shooter: player(),
+            tick: SimulationTick::new(11),
+            accepted_shot_index: 3,
+            weapon_id: WeaponId::Dustwalker,
+            stance: RiderStance::SaddleDiveAirborne,
+            gait: CombatGait::Gallop,
+            dive_id: Some(dive_id),
+            prelaunch_horizontal_velocity_mmps: [0, -8_000],
+        };
+        assert_eq!(
+            kernel
+                .record_accepted_shot(accepted)
+                .telemetry_updates
+                .len(),
+            1
+        );
+        assert!(kernel
+            .record_accepted_shot(accepted)
+            .telemetry_updates
+            .is_empty());
+
+        land(&mut kernel, 20, 30_000, LandingTerrain::Riverbed);
+        let mut ledger = ShotAttributionLedger::default();
+        assert!(ledger.record_accepted(accepted));
+        let result = ShotResult {
+            tick: accepted.tick,
+            shooter_peer_id: player(),
+            weapon_id: accepted.weapon_id,
+            outcome: ShotOutcome::Hit,
+            rejection_reason: None,
+            resolved_direction: Some(QuantizedDirection::new(0, 0, DIRECTION_UNITS)),
+            target_id: Some(EntityId(8)),
+            hit_zone: Some(HitZone::Head),
+            damage: 28,
+            distance_mm: Some(25_000),
+            eliminated: false,
+        };
+        let attribution = ledger.observe_result(7, &result);
+        let result_effects = kernel.record_authority_result(&attribution);
+        assert_eq!(result_effects.events.len(), 2);
+        assert!(kernel
+            .record_authority_result(&ledger.observe_result(7, &result))
+            .telemetry_updates
+            .is_empty());
+
+        let damage = |tick, sequence, amount| DamageObservation {
+            id: DamageObservationId {
+                authority_epoch: 7,
+                actor: player(),
+                tick: SimulationTick::new(tick),
+                sequence,
+            },
+            amount,
+        };
+        let at_landing = damage(20, 1, 5);
+        kernel.apply_external_damage(at_landing);
+        assert!(kernel
+            .apply_external_damage(at_landing)
+            .telemetry_updates
+            .is_empty());
+        kernel.apply_external_damage(damage(200, 2, 7));
+        kernel.apply_external_damage(damage(201, 3, 9));
+
+        let row = kernel.instrumentation_row(dive_id).unwrap();
+        assert_eq!(row.airtime_ticks, Some(10));
+        assert_eq!(row.shot_attempts, 1);
+        assert_eq!(row.shots_fired, 1);
+        assert_eq!(row.shots_hit, 1);
+        assert_eq!(row.headshots, 1);
+        assert_eq!(row.reversal_hits, 1);
+        assert_eq!(row.damage_dealt, 28);
+        assert_eq!(row.landing_terrain, Some(LandingTerrain::Riverbed));
+        assert_eq!(row.landing_outcome, Some(LandingOutcome::Good));
+        assert_eq!(row.landing_damage, 0);
+        assert_eq!(row.damage_taken_landing_through_3s, 12);
+        assert_eq!(kernel.rider_health(), 79);
     }
 
     #[test]
@@ -2830,6 +3009,7 @@ mod tests {
 
         let (mut airborne_death, dive_id) = launch_kernel();
         airborne_death.observe_death(SimulationTick::new(11));
+        assert_eq!(airborne_death.rider_health(), 0);
         assert_eq!(
             airborne_death
                 .instrumentation_row(dive_id)
