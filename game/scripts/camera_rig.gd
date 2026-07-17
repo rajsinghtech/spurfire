@@ -27,12 +27,17 @@ func _ready() -> void:
 			target.telemetry_updated.connect(_on_telemetry)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed(&"release_mouse"):
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		else:
+			get_tree().quit()
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_orbit_yaw -= event.relative.x * mouse_sensitivity
 		_pitch = clampf(_pitch - event.relative.y * mouse_sensitivity, deg_to_rad(-35.0), deg_to_rad(35.0))
-	if event.is_action_pressed(&"release_mouse"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	elif event is InputEventMouseButton and event.pressed:
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _process(delta: float) -> void:

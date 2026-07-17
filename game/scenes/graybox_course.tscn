@@ -164,4 +164,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "W/S throttle & brake  •  A/D steer  •  Shift/Ctrl gait\nAlt hard brake  •  Space jump  •  R reset  •  Mouse/right stick orbit"
+text = "W forward (auto-walk) / S brake & reverse  •  A/D steer  •  Shift/Ctrl gait\nAlt hard brake  •  Space jump  •  R reset  •  Esc release mouse / Esc again quit"

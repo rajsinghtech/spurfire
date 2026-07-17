@@ -17,3 +17,7 @@ godot --headless --path game --scene res://scenes/headless_smoke.tscn
 Without a native library, the normal bootstrap displays a clear diagnostic and the
 smoke test intentionally exits nonzero. Telemetry is shown in the HUD and written
 to `user://m0_telemetry.csv`.
+
+Controls: W/S move and brake/reverse, A/D steer, Shift/Ctrl change gait, Option/Alt
+hard-brakes, Space jumps, and R resets. Escape releases the captured mouse; press
+Escape again to quit. Left-click recaptures the mouse.

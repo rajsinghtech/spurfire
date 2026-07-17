@@ -71,6 +71,12 @@ fi
 cargo_bin="${CARGO:-cargo}"
 
 printf 'Building spurfire-gdext (%s) for %s/%s...\n' "$profile" "$platform" "$arch"
+# After a Rust source/layout change, Cargo's incremental macOS cdylib relink can occasionally
+# produce a Mach-O that passes codesign verification but is killed by the loader. Cleaning only
+# this package is fast and prevents copying that stale artifact into Godot.
+if [[ "$platform" == "macos" ]]; then
+  "$cargo_bin" clean -p spurfire-gdext
+fi
 "$cargo_bin" build --locked -p spurfire-gdext "${cargo_profile_args[@]}"
 
 if [[ ! -f "$source_path" ]]; then

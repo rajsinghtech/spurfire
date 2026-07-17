@@ -120,6 +120,8 @@ impl Gait {
 pub enum TransitionReason {
     PlayerUp,
     PlayerDown,
+    /// Forward input from rest automatically enters Walk so the primary movement key always moves.
+    ThrottleStart,
     AutoDownshift,
     Reset,
 }
@@ -698,6 +700,9 @@ impl HorseKernel {
         let (new, reason) = match (input.gait_up, input.gait_down) {
             (true, false) => (self.state.gait.up(), TransitionReason::PlayerUp),
             (false, true) => (self.state.gait.down(), TransitionReason::PlayerDown),
+            (false, false) if self.state.gait == Gait::Idle && input.throttle > 0.0 => {
+                (Gait::Walk, TransitionReason::ThrottleStart)
+            }
             _ => return None,
         };
         if new == self.state.gait {
@@ -754,7 +759,9 @@ impl HorseKernel {
         } else {
             self.tuning.air_control
         };
-        let target_yaw_rate = self.state.steering_axis
+        // Godot's positive Y rotation turns local -Z toward -X (left). Input steering is
+        // right-positive, so right input must produce a negative Godot yaw rate.
+        let target_yaw_rate = -self.state.steering_axis
             * self.tuning.yaw_rate_degrees(self.state.gait).to_radians()
             * control;
         let blend = 1.0 - (-self.tuning.steering_response * delta).exp();
@@ -898,11 +905,12 @@ impl HorseKernel {
 }
 
 fn heading_forward(yaw_radians: f64) -> Vec3 {
-    Vec3::new(yaw_radians.sin(), 0.0, -yaw_radians.cos())
+    // Godot convention: local forward is -Z and positive Y rotation turns it toward -X.
+    Vec3::new(-yaw_radians.sin(), 0.0, -yaw_radians.cos())
 }
 
 fn heading_right(yaw_radians: f64) -> Vec3 {
-    Vec3::new(yaw_radians.cos(), 0.0, yaw_radians.sin())
+    Vec3::new(yaw_radians.cos(), 0.0, -yaw_radians.sin())
 }
 
 fn move_towards(current: f64, target: f64, maximum_delta: f64) -> f64 {
@@ -1046,6 +1054,53 @@ mod tests {
             assert!((pair[0].horizontal_speed() - pair[1].horizontal_speed()).abs() < 0.03);
             assert!((pair[0].yaw_radians - pair[1].yaw_radians).abs() < 0.04);
             assert!((pair[0].position - pair[1].position).length() < 0.5);
+        }
+    }
+
+    #[test]
+    fn forward_from_idle_enters_walk_and_moves_along_godot_forward() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            let first = step(
+                &mut horse,
+                InputFrame {
+                    throttle: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            assert_eq!(
+                first.gait_transition,
+                Some(GaitTransition {
+                    old: Gait::Idle,
+                    new: Gait::Walk,
+                    reason: TransitionReason::ThrottleStart,
+                })
+            );
+            assert!(first.velocity.z < 0.0, "{hz} Hz forward must be local -Z");
+            assert!(first.velocity.x.abs() < 1.0e-9);
+        }
+    }
+
+    #[test]
+    fn right_input_turns_visual_and_velocity_toward_positive_x() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            for _ in 0..hz {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert!(horse.state().yaw_radians < 0.0, "{hz} Hz Godot right yaw");
+            assert!(horse.state().position.x > 0.0, "{hz} Hz rightward movement");
         }
     }
 
@@ -1198,7 +1253,7 @@ mod tests {
                 "{hz} Hz radius {}",
                 telemetry.turn_radius_m
             );
-            assert!((telemetry.yaw_rate_degrees - 35.0).abs() < 0.1);
+            assert!((telemetry.yaw_rate_degrees + 35.0).abs() < 0.1);
 
             let mut walk = kernel();
             step(

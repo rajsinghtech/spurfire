@@ -539,7 +539,7 @@ impl HorseController {
 }
 
 fn heading_forward(yaw_radians: f64) -> KernelVec3 {
-    KernelVec3::new(yaw_radians.sin(), 0.0, -yaw_radians.cos())
+    KernelVec3::new(-yaw_radians.sin(), 0.0, -yaw_radians.cos())
 }
 
 fn from_godot_vector(value: Vector3) -> KernelVec3 {

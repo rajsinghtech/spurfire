@@ -55,6 +55,18 @@ The extension is copied to `game/bin/windows/spurfire_godot.<profile>.<arch>.dll
 
 Set `GODOT_BIN` when the executable is not named `godot4` or `godot`. Headless commands default to a 120-second limit; override it with `GODOT_TIMEOUT_SECONDS`. Build output under `game/bin/` is generated and gitignored. Never commit native libraries, import caches, editor state, or telemetry CSV files.
 
+## Controls
+
+- **W / left stick up:** move forward; automatically enters Walk from Idle.
+- **S / left stick down:** brake, then reverse after stopping.
+- **A/D / left stick:** steer left/right using Godot's visual yaw convention.
+- **Shift/Ctrl / shoulder buttons:** increase/decrease gait.
+- **Option (Alt) / left trigger:** hard brake.
+- **Space / bottom face button:** jump.
+- **R / Start:** reset to spawn.
+- **Mouse / right stick:** orbit camera.
+- **Escape once:** release mouse capture. **Escape again:** quit the prototype. Left-click recaptures.
+
 ## M0 contract
 
 The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz.
