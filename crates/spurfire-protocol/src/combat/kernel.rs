@@ -1761,6 +1761,32 @@ mod tests {
     }
 
     #[test]
+    fn equal_wall_time_sway_and_spread_match_at_all_supported_rates() {
+        let mut reference = None;
+        for hz in HZ_VALUES {
+            let mut gallop = riding();
+            gallop.gait = CombatGait::Gallop;
+            gallop.planar_speed_mmps = 14_000;
+            gallop.gait_top_speed_mmps = 14_000;
+            let mut kernel = kernel(hz, WeaponId::Rattler);
+            let shot = kernel
+                .request_fire(SimulationTick::new(u64::from(hz)), forward(), gallop)
+                .unwrap();
+            let sample = (
+                shot.spread_seed,
+                shot.resolved_direction,
+                shot.spread_millidegrees,
+                shot.sway,
+            );
+            if let Some(reference) = reference {
+                assert_eq!(sample, reference, "{hz} Hz deterministic handling");
+            } else {
+                reference = Some(sample);
+            }
+        }
+    }
+
+    #[test]
     fn spread_ads_gallop_turn_and_airborne_penalties_are_deterministic() {
         for weapon in WeaponId::ALL {
             let stats = *weapon.stats();
@@ -1864,6 +1890,126 @@ mod tests {
                 reserve: 72,
             }
         );
+    }
+
+    #[test]
+    fn authority_enforces_cadence_ammo_and_reload_at_all_supported_rates() {
+        let shooter = player(1);
+        let muzzle = QuantizedOrigin::new(0, 1_600, 0);
+        for hz in HZ_VALUES {
+            let mut targets = TargetRegistry::new(hz).unwrap();
+
+            let mut cadence_authority = CombatAuthority::new(hz, LOBBY_SEED).unwrap();
+            cadence_authority.register_shooter(shooter, WeaponId::Dustwalker);
+            let first = command(
+                &cadence_authority,
+                shooter,
+                WeaponId::Dustwalker,
+                100,
+                muzzle,
+                forward(),
+            );
+            assert_eq!(
+                cadence_authority
+                    .validate_shot(
+                        &first,
+                        SimulationTick::new(100),
+                        rider_snapshot(shooter, 100, muzzle),
+                        &mut targets,
+                    )
+                    .result
+                    .outcome,
+                ShotOutcome::Miss
+            );
+            let too_fast_tick = 100 + WeaponId::Dustwalker.stats().cadence_ticks(hz) - 1;
+            let too_fast = command(
+                &cadence_authority,
+                shooter,
+                WeaponId::Dustwalker,
+                too_fast_tick,
+                muzzle,
+                forward(),
+            );
+            assert_eq!(
+                cadence_authority
+                    .validate_shot(
+                        &too_fast,
+                        SimulationTick::new(too_fast_tick),
+                        rider_snapshot(shooter, too_fast_tick, muzzle),
+                        &mut targets,
+                    )
+                    .result
+                    .rejection_reason,
+                Some(ShotRejectionReason::Rate)
+            );
+
+            let mut empty_authority = CombatAuthority::new(hz, LOBBY_SEED).unwrap();
+            empty_authority.register_shooter(shooter, WeaponId::Dustwalker);
+            empty_authority
+                .shooter_kernel_mut(shooter)
+                .unwrap()
+                .set_ammo(
+                    WeaponId::Dustwalker,
+                    WeaponAmmo {
+                        magazine: 0,
+                        reserve: 120,
+                    },
+                );
+            let empty = command(
+                &empty_authority,
+                shooter,
+                WeaponId::Dustwalker,
+                100,
+                muzzle,
+                forward(),
+            );
+            assert_eq!(
+                empty_authority
+                    .validate_shot(
+                        &empty,
+                        SimulationTick::new(100),
+                        rider_snapshot(shooter, 100, muzzle),
+                        &mut targets,
+                    )
+                    .result
+                    .rejection_reason,
+                Some(ShotRejectionReason::Empty)
+            );
+
+            let mut reload_authority = CombatAuthority::new(hz, LOBBY_SEED).unwrap();
+            reload_authority.register_shooter(shooter, WeaponId::Dustwalker);
+            let reload_kernel = reload_authority.shooter_kernel_mut(shooter).unwrap();
+            reload_kernel.set_ammo(
+                WeaponId::Dustwalker,
+                WeaponAmmo {
+                    magazine: 1,
+                    reserve: 120,
+                },
+            );
+            reload_kernel
+                .request_reload(SimulationTick::new(99), riding())
+                .unwrap();
+            let reloading = command(
+                &reload_authority,
+                shooter,
+                WeaponId::Dustwalker,
+                100,
+                muzzle,
+                forward(),
+            );
+            assert_eq!(
+                reload_authority
+                    .validate_shot(
+                        &reloading,
+                        SimulationTick::new(100),
+                        rider_snapshot(shooter, 100, muzzle),
+                        &mut targets,
+                    )
+                    .result
+                    .rejection_reason,
+                Some(ShotRejectionReason::Reloading)
+            );
+        }
     }
 
     #[test]
@@ -2038,6 +2184,41 @@ mod tests {
         );
         assert_eq!(result.result.outcome, ShotOutcome::Miss);
         assert_eq!(far_targets.health(EntityId(1)), Some(100));
+    }
+
+    #[test]
+    fn target_registry_enforces_the_exact_hitscan_clamp() {
+        let shooter = player(1);
+        let origin = QuantizedOrigin::new(0, 1_650, 0);
+        let mut targets = TargetRegistry::new(60).unwrap();
+        register_target(&mut targets, 1, 2, 100);
+        targets
+            .record_pose(target_pose(1, 10, -150_500, 1_650))
+            .unwrap();
+
+        assert!(targets
+            .nearest_hit(
+                SimulationTick::new(10),
+                origin,
+                forward(),
+                150_000,
+                shooter,
+                TeamId(1),
+            )
+            .is_none());
+        let hit = targets
+            .nearest_hit(
+                SimulationTick::new(10),
+                origin,
+                forward(),
+                151_000,
+                shooter,
+                TeamId(1),
+            )
+            .expect("target enters the longer clamp");
+        assert_eq!(hit.target_id, EntityId(1));
+        assert_eq!(hit.hit_zone, HitZone::Head);
+        assert_eq!(hit.distance_mm, 150_300);
     }
 
     #[test]
