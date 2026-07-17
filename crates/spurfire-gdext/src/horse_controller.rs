@@ -670,9 +670,6 @@ fn archetype_stats_dictionary(stats: &HorseStats) -> VarDictionary {
     row.set("stagger_threshold", stats.stagger_threshold);
     row.set("sidestep_mps", stats.sidestep_mps);
     row.set("sidestep_ramp_s", stats.sidestep_ramp_s);
-    // Future combat/physics metadata is exposed without implementing either system.
-    row.set("mass", stats.mass.name());
-    row.set("mass_class", stats.mass as i64);
     row
 }
 
