@@ -11,6 +11,10 @@ use thiserror::Error;
 
 use crate::PlayerId;
 
+mod kernel;
+
+pub use kernel::*;
+
 /// Origin precision on the wire: one integer unit is one millimetre.
 pub const ORIGIN_UNITS_PER_METER: f64 = 1_000.0;
 /// Direction precision on the wire: one unit is one millionth of a unit vector.
@@ -88,7 +92,9 @@ pub struct EntityId(pub u64);
 pub struct TeamId(pub u16);
 
 /// The three fictional Spurfire rifle sidegrades.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum WeaponId {
