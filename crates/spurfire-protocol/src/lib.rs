@@ -1,0 +1,31 @@
+//! Engine-independent wire types and deterministic lobby rules for Spurfire.
+//!
+//! This crate is intentionally pure Rust and contains no game-engine, runtime,
+//! networking, or platform dependency. Protocol decisions that must agree on
+//! every peer—wire compatibility, lifecycle transitions, map radius, authority
+//! scoring, tie-breaking, and canonical input hashing—live here.
+
+#![forbid(unsafe_code)]
+
+mod api;
+mod credential;
+mod election;
+mod id;
+mod model;
+mod radius;
+mod state;
+mod time;
+mod version;
+
+pub use api::*;
+pub use credential::{JoinCredential, DRY_RUN_AUTH_KEY};
+pub use election::*;
+pub use id::{IdValidationError, LobbyId, PlayerId};
+pub use model::*;
+pub use radius::{playable_radius_m, MAX_PLAYABLE_RADIUS_M, MIN_PLAYABLE_RADIUS_M};
+pub use state::{LobbyState, LobbyTransitionError};
+pub use time::UnixMillis;
+pub use version::{
+    is_wire_compatible, WireCompatibility, WireVersion, WireVersionMismatch, WireVersionParseError,
+    CURRENT_WIRE_VERSION, WIRE_VERSION,
+};
