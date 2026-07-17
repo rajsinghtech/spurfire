@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod api;
+mod combat;
 mod credential;
 mod election;
 mod id;
@@ -18,6 +19,7 @@ mod time;
 mod version;
 
 pub use api::*;
+pub use combat::*;
 pub use credential::{JoinCredential, DRY_RUN_AUTH_KEY};
 pub use election::*;
 pub use id::{IdValidationError, LobbyId, PlayerId};
