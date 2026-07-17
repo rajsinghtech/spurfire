@@ -1,0 +1,91 @@
+//! Typed, secret-safe HTTP errors.
+
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use spurfire_protocol::{ApiErrorResponse, ApiValidationError, ResponseMetadata};
+
+/// HTTP status paired with the stable protocol error body.
+#[derive(Clone, Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    body: ApiErrorResponse,
+}
+
+impl ApiError {
+    /// Creates a real-mode error with no state reason.
+    #[must_use]
+    pub fn new(status: StatusCode, code: &str, message: &str) -> Self {
+        Self {
+            status,
+            body: ApiErrorResponse {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                state_reason: None,
+                metadata: ResponseMetadata::default(),
+            },
+        }
+    }
+
+    /// Marks the response as simulated without exposing provider details.
+    #[must_use]
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.body.metadata.dry_run = dry_run;
+        self
+    }
+
+    /// Adds a stable machine-readable lobby state reason.
+    #[must_use]
+    pub fn state_reason(mut self, reason: impl Into<String>) -> Self {
+        self.body.state_reason = Some(reason.into());
+        self
+    }
+
+    /// Maps protocol validation to stable status and code values.
+    #[must_use]
+    pub fn validation(error: &ApiValidationError, dry_run: bool) -> Self {
+        let (status, code, message) = match error {
+            ApiValidationError::ModeUnavailable => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "mode_unavailable",
+                "tailnet_per_lobby is unavailable because tested create routes returned 404",
+            ),
+            ApiValidationError::WireVersionIncompatible(_) => (
+                StatusCode::CONFLICT,
+                "wire_version_incompatible",
+                "client and service wire major versions are incompatible",
+            ),
+            ApiValidationError::InvalidConnectivitySample(_) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_measurements",
+                "measurement values do not describe the current roster",
+            ),
+            ApiValidationError::MixedAuthorityFormula { .. } => (
+                StatusCode::CONFLICT,
+                "authority_formula_incompatible",
+                "roster contains incompatible authority formula versions",
+            ),
+            ApiValidationError::RosterWireVersionIncompatible { .. } => (
+                StatusCode::CONFLICT,
+                "wire_version_incompatible",
+                "roster contains incompatible wire major versions",
+            ),
+            ApiValidationError::EmptyDisplayName
+            | ApiValidationError::DisplayNameTooLong
+            | ApiValidationError::InvalidMaxPlayers { .. } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                "request fields failed validation",
+            ),
+        };
+        Self::new(status, code, message).dry_run(dry_run)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body)).into_response()
+    }
+}
