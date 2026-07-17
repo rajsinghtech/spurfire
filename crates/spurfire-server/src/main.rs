@@ -1,6 +1,6 @@
 //! `spurfire-server` binary.
 
-use std::{future::pending, sync::Arc};
+use std::{future::pending, sync::Arc, time::Duration};
 
 use spurfire_server::{
     build_router, AppState, Config, DryRunProvider, InMemoryStore, NetworkProvider,
@@ -19,15 +19,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let state = AppState::new(config.clone(), Arc::new(InMemoryStore::new()), provider);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+    let reaper = tokio::spawn(expiry_reaper(state.clone()));
 
     eprintln!(
         "spurfire-server listening on {} (mode={:?}, dry_run={})",
         config.bind_addr, config.provisioning_mode, config.force_dry_run
     );
-    axum::serve(listener, build_router(state))
+    let result = axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    reaper.abort();
+    result?;
     Ok(())
+}
+
+async fn expiry_reaper(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let _ = state.cleanup_expired_now().await;
+    }
 }
 
 async fn shutdown_signal() {

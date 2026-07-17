@@ -89,6 +89,10 @@ impl AppState {
     /// Runs deterministic expiry transitions and best-effort teardown.
     pub async fn cleanup_expired_at(&self, now: UnixMillis) -> Vec<LobbyId> {
         let _operation = self.operations.lock().await;
+        self.cleanup_expired_locked(now).await
+    }
+
+    async fn cleanup_expired_locked(&self, now: UnixMillis) -> Vec<LobbyId> {
         let lobby_ids = self.store.cleanup_expired(now).await;
         for lobby_id in &lobby_ids {
             let Some(mut stored) = self.store.get(*lobby_id).await else {
@@ -124,7 +128,6 @@ impl fmt::Debug for AppState {
 }
 
 /// Builds the complete HTTP router.
-#[must_use]
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -150,7 +153,6 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Alias that reads naturally in embedders.
-#[must_use]
 pub fn router(state: AppState) -> Router {
     build_router(state)
 }
@@ -169,17 +171,14 @@ async fn create_lobby(
     headers: HeaderMap,
     payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers)?;
+    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let request = parse_json(payload, state.config.force_dry_run || header_dry_run)?;
-    let idempotency_key = require_idempotency_key(&headers)?;
-    request.validate().map_err(|error| {
-        ApiError::validation(
-            &error,
-            effective_request_dry_run(&state, &request, header_dry_run),
-        )
-    })?;
-
     let effective_dry_run = effective_request_dry_run(&state, &request, header_dry_run);
+    let idempotency_key = require_idempotency_key(&headers, effective_dry_run)?;
+    request
+        .validate()
+        .map_err(|error| ApiError::validation(&error, effective_dry_run))?;
+
     if request.max_players > state.config.max_players {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -194,7 +193,7 @@ async fn create_lobby(
     } else {
         request.provisioning_mode
     };
-    let fingerprint = fingerprint(&(request.clone(), effective_mode))?;
+    let fingerprint = fingerprint(&(request.clone(), effective_mode), effective_dry_run)?;
     let now = state.clock.now();
     let lobby_id = new_lobby_id();
     let prepared = state
@@ -230,7 +229,11 @@ async fn create_lobby(
             absolute_expires_at,
         },
         wire_version: WIRE_VERSION,
-        provisioning_mode: effective_mode,
+        provisioning_mode: if prepared.dry_run {
+            ProvisioningMode::DryRun
+        } else {
+            effective_mode
+        },
         created_at: now,
     };
     let tag = lobby_tag(lobby_id);
@@ -266,8 +269,9 @@ async fn get_lobby(
     Path(lobby_id): Path<String>,
 ) -> Result<Json<LobbyResponse>, ApiError> {
     let lobby_id = parse_lobby_id(&lobby_id, state.config.force_dry_run)?;
+    let _operation = state.operations.lock().await;
     let now = state.clock.now();
-    let _ = state.store.cleanup_expired(now).await;
+    let _ = state.cleanup_expired_locked(now).await;
     let stored = state
         .store
         .get(lobby_id)
@@ -285,22 +289,22 @@ async fn join_lobby(
     headers: HeaderMap,
     payload: Result<Json<JoinLobbyRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers)?;
+    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
     let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
     let request = parse_json(payload, dry_hint)?;
-    let idempotency_key = require_idempotency_key(&headers)?;
-    let fingerprint = fingerprint(&(request.clone(), dry_hint))?;
 
     let _operation = state.operations.lock().await;
     let now = state.clock.now();
-    let _ = state.store.cleanup_expired(now).await;
+    let _ = state.cleanup_expired_locked(now).await;
     let mut stored = state
         .store
         .get(lobby_id)
         .await
         .ok_or_else(|| lobby_not_found(dry_hint))?;
     let dry_run = stored.dry_run || dry_hint;
+    let idempotency_key = require_idempotency_key(&headers, dry_run)?;
+    let fingerprint = fingerprint(&(request.clone(), dry_run), dry_run)?;
 
     if let Some(replay) = stored.join_replays.get(&idempotency_key) {
         if replay.fingerprint != fingerprint || replay.player_id != request.player_id {
@@ -397,6 +401,11 @@ async fn join_lobby(
             stored.lobby.state = LobbyState::Failed;
             stored.lobby.state_reason = Some(reason.clone());
             stored.lobby.authority = None;
+            stored.cleanup_pending = true;
+            for player in &mut stored.lobby.roster {
+                player.cleanup_pending = true;
+                player.join_state = PlayerJoinState::CleanupPending;
+            }
             state
                 .store
                 .replace(stored)
@@ -493,14 +502,14 @@ async fn submit_measurements(
     headers: HeaderMap,
     payload: Result<Json<SubmitMeasurementsRequest>, JsonRejection>,
 ) -> Result<Json<SubmitMeasurementsResponse>, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers)?;
+    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
     let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
     let request = parse_json(payload, dry_hint)?;
 
     let _operation = state.operations.lock().await;
     let now = state.clock.now();
-    let _ = state.store.cleanup_expired(now).await;
+    let _ = state.cleanup_expired_locked(now).await;
     let mut stored = state
         .store
         .get(lobby_id)
@@ -582,13 +591,13 @@ async fn authority_handler(
     lobby_id: String,
     headers: HeaderMap,
 ) -> Result<Json<AuthorityEnvelope>, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers)?;
+    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
     let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
 
     let _operation = state.operations.lock().await;
     let now = state.clock.now();
-    let _ = state.store.cleanup_expired(now).await;
+    let _ = state.cleanup_expired_locked(now).await;
     let mut stored = state
         .store
         .get(lobby_id)
@@ -630,13 +639,13 @@ async fn delete_lobby(
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<DestroyLobbyResponse>, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers)?;
+    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
     let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
 
     let _operation = state.operations.lock().await;
     let now = state.clock.now();
-    let _ = state.store.cleanup_expired(now).await;
+    let _ = state.cleanup_expired_locked(now).await;
     let mut stored = state
         .store
         .get(lobby_id)
@@ -745,13 +754,14 @@ fn parse_lobby_id(value: &str, dry_run: bool) -> Result<LobbyId, ApiError> {
     })
 }
 
-fn require_idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
+fn require_idempotency_key(headers: &HeaderMap, dry_run: bool) -> Result<String, ApiError> {
     let value = headers.get(IDEMPOTENCY_KEY).ok_or_else(|| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             "missing_idempotency_key",
             "Idempotency-Key header is required",
         )
+        .dry_run(dry_run)
     })?;
     let value = value.to_str().map_err(|_| {
         ApiError::new(
@@ -759,18 +769,20 @@ fn require_idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
             "invalid_idempotency_key",
             "Idempotency-Key must contain visible UTF-8 text",
         )
+        .dry_run(dry_run)
     })?;
     if value.trim().is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_BYTES {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_idempotency_key",
             "Idempotency-Key must contain 1 to 128 bytes",
-        ));
+        )
+        .dry_run(dry_run));
     }
     Ok(value.to_owned())
 }
 
-fn parse_dry_run_header(headers: &HeaderMap) -> Result<bool, ApiError> {
+fn parse_dry_run_header(headers: &HeaderMap, force_dry_run: bool) -> Result<bool, ApiError> {
     let Some(value) = headers.get(DRY_RUN_HEADER) else {
         return Ok(false);
     };
@@ -780,7 +792,8 @@ fn parse_dry_run_header(headers: &HeaderMap) -> Result<bool, ApiError> {
             StatusCode::BAD_REQUEST,
             "invalid_dry_run_header",
             "X-Spurfire-Dry-Run must be exactly 1 when present",
-        )),
+        )
+        .dry_run(force_dry_run)),
     }
 }
 
@@ -794,8 +807,8 @@ fn effective_request_dry_run(
         || request.provisioning_mode == ProvisioningMode::DryRun
 }
 
-fn fingerprint<T: Serialize>(value: &T) -> Result<Vec<u8>, ApiError> {
-    serde_json::to_vec(value).map_err(|_| internal_error(false))
+fn fingerprint<T: Serialize>(value: &T, dry_run: bool) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(value).map_err(|_| internal_error(dry_run))
 }
 
 fn new_lobby_id() -> LobbyId {
@@ -965,6 +978,11 @@ fn apply_cleanup_result(stored: &mut StoredLobby, result: Result<CleanupOutcome,
         player.cleanup_pending = stored.cleanup_pending;
         if stored.cleanup_pending {
             player.join_state = PlayerJoinState::CleanupPending;
+        } else if matches!(
+            stored.lobby.state,
+            LobbyState::Closing | LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+        ) {
+            player.join_state = PlayerJoinState::Left;
         }
     }
 }

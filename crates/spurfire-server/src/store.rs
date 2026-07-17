@@ -261,6 +261,7 @@ impl LobbyStore for InMemoryStore {
                 }
                 _ => None,
             };
+            let mut needs_cleanup = false;
             if let Some((state, reason)) = target {
                 if record.lobby.state.validate_transition(state).is_ok() {
                     record.lobby.state = state;
@@ -269,8 +270,17 @@ impl LobbyStore for InMemoryStore {
                     for credential in record.credentials.values_mut() {
                         credential.revoked = true;
                     }
-                    transitioned.push(*lobby_id);
+                    needs_cleanup = true;
                 }
+            }
+            if needs_cleanup
+                || (record.cleanup_pending
+                    && matches!(
+                        record.lobby.state,
+                        LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+                    ))
+            {
+                transitioned.push(*lobby_id);
             }
         }
         transitioned
