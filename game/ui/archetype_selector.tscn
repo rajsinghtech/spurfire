@@ -1,0 +1,217 @@
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://scripts/archetype_selector.gd" id="1"]
+[ext_resource type="PackedScene" path="res://ui/attribute_panel.tscn" id="2"]
+
+[sub_resource type="StyleBoxFlat" id="Backdrop"]
+bg_color = Color(0.055, 0.075, 0.115, 0.97)
+border_width_left = 5
+border_width_top = 5
+border_width_right = 5
+border_width_bottom = 5
+border_color = Color(0.98, 0.74, 0.2, 1)
+corner_radius_top_left = 28
+corner_radius_top_right = 28
+corner_radius_bottom_right = 28
+corner_radius_bottom_left = 28
+shadow_color = Color(0, 0, 0, 0.55)
+shadow_size = 14
+
+[sub_resource type="StyleBoxFlat" id="CourserNormal"]
+bg_color = Color(0.88, 0.81, 0.61, 1)
+border_width_left = 5
+border_width_top = 5
+border_width_right = 5
+border_width_bottom = 5
+border_color = Color(0.15, 0.72, 0.67, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+[sub_resource type="StyleBoxFlat" id="CourserFocus"]
+bg_color = Color(0.97, 0.9, 0.69, 1)
+border_width_left = 8
+border_width_top = 8
+border_width_right = 8
+border_width_bottom = 8
+border_color = Color(0.2, 0.94, 0.83, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+
+[sub_resource type="StyleBoxFlat" id="WarhorseNormal"]
+bg_color = Color(0.18, 0.26, 0.39, 1)
+border_width_left = 5
+border_width_top = 5
+border_width_right = 5
+border_width_bottom = 5
+border_color = Color(0.91, 0.45, 0.22, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+[sub_resource type="StyleBoxFlat" id="WarhorseFocus"]
+bg_color = Color(0.24, 0.34, 0.49, 1)
+border_width_left = 8
+border_width_top = 8
+border_width_right = 8
+border_width_bottom = 8
+border_color = Color(1, 0.62, 0.28, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+
+[sub_resource type="StyleBoxFlat" id="MustangNormal"]
+bg_color = Color(0.48, 0.20, 0.13, 1)
+border_width_left = 5
+border_width_top = 5
+border_width_right = 5
+border_width_bottom = 5
+border_color = Color(0.91, 0.23, 0.58, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+[sub_resource type="StyleBoxFlat" id="MustangFocus"]
+bg_color = Color(0.62, 0.27, 0.16, 1)
+border_width_left = 8
+border_width_top = 8
+border_width_right = 8
+border_width_bottom = 8
+border_color = Color(1, 0.39, 0.7, 1)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_right = 16
+corner_radius_bottom_left = 16
+
+[sub_resource type="LabelSettings" id="Heading"]
+font_size = 42
+font_color = Color(1, 0.82, 0.28, 1)
+outline_size = 9
+outline_color = Color(0.015, 0.02, 0.035, 1)
+
+[sub_resource type="LabelSettings" id="StatusSettings"]
+font_size = 25
+font_color = Color(0.2, 0.94, 0.83, 1)
+outline_size = 6
+outline_color = Color(0.015, 0.02, 0.035, 1)
+
+[node name="ArchetypeSelector" type="Control"]
+custom_minimum_size = Vector2(1180, 700)
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Frame" type="PanelContainer" parent="Center"]
+custom_minimum_size = Vector2(1120, 660)
+layout_mode = 2
+theme_override_styles/panel = SubResource("Backdrop")
+
+[node name="Margin" type="MarginContainer" parent="Center/Frame"]
+layout_mode = 2
+theme_override_constants/margin_left = 30
+theme_override_constants/margin_top = 24
+theme_override_constants/margin_right = 30
+theme_override_constants/margin_bottom = 26
+
+[node name="VBox" type="VBoxContainer" parent="Center/Frame/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 18
+
+[node name="Header" type="HBoxContainer" parent="Center/Frame/Margin/VBox"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="Center/Frame/Margin/VBox/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "PICK YOUR HORSE"
+label_settings = SubResource("Heading")
+
+[node name="Status" type="Label" parent="Center/Frame/Margin/VBox/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "RIDING: COURSER"
+label_settings = SubResource("StatusSettings")
+vertical_alignment = 1
+
+[node name="Content" type="HBoxContainer" parent="Center/Frame/Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 24
+
+[node name="Choices" type="VBoxContainer" parent="Center/Frame/Margin/VBox/Content"]
+custom_minimum_size = Vector2(500, 0)
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="CourserButton" type="Button" parent="Center/Frame/Margin/VBox/Content/Choices"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(500, 118)
+layout_mode = 2
+focus_neighbor_bottom = NodePath("../WarhorseButton")
+theme_override_colors/font_color = Color(0.04, 0.08, 0.1, 1)
+theme_override_colors/font_focus_color = Color(0.04, 0.08, 0.1, 1)
+theme_override_font_sizes/font_size = 27
+theme_override_styles/normal = SubResource("CourserNormal")
+theme_override_styles/hover = SubResource("CourserFocus")
+theme_override_styles/focus = SubResource("CourserFocus")
+theme_override_styles/pressed = SubResource("CourserFocus")
+toggle_mode = true
+text = "1   COURSER   ▶\nLONG-LEGGED RACER"
+
+[node name="WarhorseButton" type="Button" parent="Center/Frame/Margin/VBox/Content/Choices"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(500, 118)
+layout_mode = 2
+focus_neighbor_top = NodePath("../CourserButton")
+focus_neighbor_bottom = NodePath("../MustangButton")
+theme_override_colors/font_color = Color(0.98, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 27
+theme_override_styles/normal = SubResource("WarhorseNormal")
+theme_override_styles/hover = SubResource("WarhorseFocus")
+theme_override_styles/focus = SubResource("WarhorseFocus")
+theme_override_styles/pressed = SubResource("WarhorseFocus")
+toggle_mode = true
+text = "2   WARHORSE   ■\nCHUNKY RANGE ANCHOR"
+
+[node name="MustangButton" type="Button" parent="Center/Frame/Margin/VBox/Content/Choices"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(500, 118)
+layout_mode = 2
+focus_neighbor_top = NodePath("../WarhorseButton")
+theme_override_colors/font_color = Color(1, 0.94, 0.83, 1)
+theme_override_font_sizes/font_size = 27
+theme_override_styles/normal = SubResource("MustangNormal")
+theme_override_styles/hover = SubResource("MustangFocus")
+theme_override_styles/focus = SubResource("MustangFocus")
+theme_override_styles/pressed = SubResource("MustangFocus")
+toggle_mode = true
+text = "3   MUSTANG   ∩\nCOMPACT TRAIL DANCER"
+
+[node name="Controls" type="Label" parent="Center/Frame/Margin/VBox/Content/Choices"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.82, 0.86, 0.93, 1)
+theme_override_colors/font_outline_color = Color(0.01, 0.015, 0.025, 1)
+theme_override_constants/outline_size = 5
+theme_override_font_sizes/font_size = 21
+text = "1 / 2 / 3  SELECT     A / D or D-PAD  CYCLE"
+horizontal_alignment = 1
+
+[node name="AttributePanel" parent="Center/Frame/Margin/VBox/Content" instance=ExtResource("2")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
