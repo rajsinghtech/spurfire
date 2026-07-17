@@ -6,6 +6,11 @@ use std::f64::consts::{PI, TAU};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::{
+    dive_shot_cap, dive_sway_scale_milli, AcceptedShotMetadata, DiveId, GameplayEventRow,
+    RiderStance, ShotAttributionLedger,
+};
+
 use super::*;
 
 const ADS_SPREAD_NUMERATOR: u64 = 3;
@@ -47,21 +52,22 @@ impl WeaponAmmo {
     }
 }
 
-/// Rewound mount/rider handling inputs consumed by the weapon kernel.
+/// Rewound rider handling inputs consumed by the weapon kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RidingState {
-    /// Rider is currently attached to a mount.
-    pub mounted: bool,
+    /// Sole authoritative mounted/airborne source of truth.
+    pub stance: RiderStance,
+    /// Authority-owned dive ID, present exactly for `SaddleDiveAirborne`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dive_id: Option<DiveId>,
     /// Current discrete gait.
     pub gait: CombatGait,
-    /// Planar mount speed in millimetres per second.
+    /// Planar mount or launch-time speed in millimetres per second.
     pub planar_speed_mmps: u32,
     /// Full-speed denominator for spread interpolation.
     pub gait_top_speed_mmps: u32,
     /// Signed yaw rate in thousandths of a degree per second.
     pub yaw_rate_millidegrees_per_second: i32,
-    /// Horse has left the ground.
-    pub airborne: bool,
     /// Horse/rider is in a stumble recovery frame.
     pub stumbling: bool,
     /// Aim-down-sights is held.
@@ -73,12 +79,12 @@ pub struct RidingState {
 impl Default for RidingState {
     fn default() -> Self {
         Self {
-            mounted: true,
+            stance: RiderStance::Mounted,
+            dive_id: None,
             gait: CombatGait::Idle,
             planar_speed_mmps: 0,
             gait_top_speed_mmps: 1,
             yaw_rate_millidegrees_per_second: 0,
-            airborne: false,
             stumbling: false,
             ads: false,
             sprint_gallop: false,
@@ -87,6 +93,13 @@ impl Default for RidingState {
 }
 
 impl RidingState {
+    /// Whether stance and authority dive context agree.
+    #[must_use]
+    pub const fn is_consistent(self) -> bool {
+        matches!(self.stance, RiderStance::SaddleDiveAirborne) == self.dive_id.is_some()
+            && !matches!(self.stance, RiderStance::Unknown(_))
+    }
+
     /// Speed ratio in thousandths, clamped to the design range.
     #[must_use]
     pub fn speed_ratio_milli(self) -> u32 {
@@ -202,6 +215,9 @@ pub enum ReloadStartError {
     /// Rifle is holstered or unavailable.
     #[error("holstered")]
     Holstered,
+    /// Mounted jump or Saddle Dive reload is forbidden and mutates nothing.
+    #[error("airborne")]
+    Airborne,
     /// Rider is not mounted.
     #[error("dismounted")]
     Dismounted,
@@ -235,8 +251,10 @@ pub struct PreparedShot {
     pub ammo: WeaponAmmo,
     /// Camera recoil after the shot impulse.
     pub recoil: RecoilState,
-    /// Zero-based accepted-shot index used for the seed.
-    pub shot_index: u64,
+    /// Match-lifetime accepted-shot index used for seed and event identity.
+    pub accepted_shot_index: u64,
+    /// Authority-owned dive attribution for this acceptance.
+    pub dive_id: Option<DiveId>,
 }
 
 /// A world rifle with retained ammunition.
@@ -285,6 +303,9 @@ pub enum PickupError {
     /// Dropped rifle has reached its 30-second expiry.
     #[error("expired")]
     Expired,
+    /// Dive-airborne weapon changes are locked.
+    #[error("airborne")]
+    Airborne,
 }
 
 /// Successful pickup behavior.
@@ -308,6 +329,84 @@ pub enum PickupOutcome {
     },
 }
 
+/// Authority-owned per-dive firing context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiveFireContext {
+    /// Current dive.
+    pub dive_id: DiveId,
+    /// Accepted movement launch tick.
+    pub launch_tick: SimulationTick,
+    /// Weapon locked at launch.
+    pub launch_weapon: WeaponId,
+    /// Number of ammo-consuming shots accepted in this dive.
+    pub accepted_count: u16,
+    /// Planar horse velocity captured at launch as `[x, z]`.
+    pub prelaunch_horizontal_velocity_mmps: [i32; 2],
+    /// Nominal sway schedule duration.
+    pub nominal_airtime_ticks: u64,
+    /// Landing closes new fire but preserves late-result attribution.
+    pub closed_to_new_shots: bool,
+    /// Authoritative gait/speed/turn/ADS handling captured at launch.
+    pub launch_handling: RidingState,
+}
+
+/// Exact internal dive gate, kept out of the closed wire rejection enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiveFireRejection {
+    /// Saddle Dive stance did not match the authority-owned context.
+    ContextMismatch,
+    /// Equipped weapon differs from the launch lock.
+    WeaponMismatch,
+    /// Landing already closed this context.
+    Closed,
+    /// Per-weapon accepted-shot cap was reached.
+    ShotCap,
+}
+
+/// Detailed local/authority fire rejection. `wire_reason` remains compatible
+/// with wire 1.0 readers while `dive_reason` retains M2 precision internally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FireRejection {
+    /// Existing closed wire reason.
+    pub wire_reason: ShotRejectionReason,
+    /// Optional M2-only reason.
+    pub dive_reason: Option<DiveFireRejection>,
+}
+
+impl FireRejection {
+    const fn wire(wire_reason: ShotRejectionReason) -> Self {
+        Self {
+            wire_reason,
+            dive_reason: None,
+        }
+    }
+
+    const fn dive(wire_reason: ShotRejectionReason, dive_reason: DiveFireRejection) -> Self {
+        Self {
+            wire_reason,
+            dive_reason: Some(dive_reason),
+        }
+    }
+}
+
+/// Invalid authority transition into or out of a dive fire context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum DiveContextError {
+    /// Time cannot move backward.
+    #[error("tick_replay")]
+    TickReplay,
+    /// Movement and combat selected different launch weapons.
+    #[error("weapon_mismatch")]
+    WeaponMismatch,
+    /// A previous dive has not landed.
+    #[error("dive_already_open")]
+    DiveAlreadyOpen,
+    /// Finish did not match the retained context.
+    #[error("dive_context_mismatch")]
+    ContextMismatch,
+}
+
 /// Pure deterministic ammo, cadence, reload, handling, spread, recoil, and pickup state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CombatKernel {
@@ -323,6 +422,7 @@ pub struct CombatKernel {
     shot_index: u64,
     recoil: RecoilState,
     riding: RidingState,
+    dive_context: Option<DiveFireContext>,
 }
 
 impl CombatKernel {
@@ -360,6 +460,7 @@ impl CombatKernel {
             shot_index: 0,
             recoil: RecoilState::default(),
             riding: RidingState::default(),
+            dive_context: None,
         })
     }
 
@@ -426,6 +527,80 @@ impl CombatKernel {
         self.riding
     }
 
+    /// Retained authority dive context, including a closed context needed by
+    /// late shot-result attribution.
+    #[must_use]
+    pub const fn dive_fire_context(&self) -> Option<DiveFireContext> {
+        self.dive_context
+    }
+
+    /// Begins an authority-accepted Saddle Dive before same-tick fire/reload.
+    /// Active reload progress is discarded without transferring rounds.
+    pub fn begin_saddle_dive(
+        &mut self,
+        dive_id: DiveId,
+        launch_tick: SimulationTick,
+        launch_weapon: WeaponId,
+        prelaunch_horizontal_velocity_mmps: [i32; 2],
+        nominal_airtime_ticks: u64,
+    ) -> Result<(), DiveContextError> {
+        let elapsed = launch_tick
+            .checked_duration_since(self.last_advanced_tick)
+            .ok_or(DiveContextError::TickReplay)?;
+        if launch_weapon != self.equipped {
+            return Err(DiveContextError::WeaponMismatch);
+        }
+        if self
+            .dive_context
+            .is_some_and(|context| !context.closed_to_new_shots)
+        {
+            return Err(DiveContextError::DiveAlreadyOpen);
+        }
+
+        let mut launch_handling = self.riding;
+        launch_handling.stance = RiderStance::Mounted;
+        launch_handling.dive_id = None;
+        self.reload = None;
+        self.recoil.recover(elapsed, self.tick_rate);
+        self.last_advanced_tick = launch_tick;
+        self.riding.stance = RiderStance::SaddleDiveAirborne;
+        self.riding.dive_id = Some(dive_id);
+        self.dive_context = Some(DiveFireContext {
+            dive_id,
+            launch_tick,
+            launch_weapon,
+            accepted_count: 0,
+            prelaunch_horizontal_velocity_mmps,
+            nominal_airtime_ticks,
+            closed_to_new_shots: false,
+            launch_handling,
+        });
+        Ok(())
+    }
+
+    /// Closes new dive fire at first landing while retaining accepted-shot context.
+    pub fn finish_saddle_dive(
+        &mut self,
+        dive_id: DiveId,
+        landing_tick: SimulationTick,
+    ) -> Result<(), DiveContextError> {
+        if landing_tick < self.last_advanced_tick {
+            return Err(DiveContextError::TickReplay);
+        }
+        let Some(context) = &mut self.dive_context else {
+            return Err(DiveContextError::ContextMismatch);
+        };
+        if context.dive_id != dive_id {
+            return Err(DiveContextError::ContextMismatch);
+        }
+        context.closed_to_new_shots = true;
+        self.last_advanced_tick = landing_tick;
+        self.riding.stance = RiderStance::LandingProne;
+        self.riding.dive_id = None;
+        self.holster();
+        Ok(())
+    }
+
     /// Ammo for an owned rifle.
     #[must_use]
     pub fn ammo(&self, weapon_id: WeaponId) -> Option<WeaponAmmo> {
@@ -444,9 +619,12 @@ impl CombatKernel {
             .insert(weapon_id, ammo.clamped(*weapon_id.stats()));
     }
 
-    /// Selects an owned rifle and cancels any reload.
+    /// Selects an owned rifle and cancels any reload. Dive-airborne weapon
+    /// switching is refused so it cannot reset or enlarge the shot cap.
     pub fn equip_weapon(&mut self, weapon_id: WeaponId) -> bool {
-        if !self.inventory.contains_key(&weapon_id) {
+        if self.riding.stance == RiderStance::SaddleDiveAirborne
+            || !self.inventory.contains_key(&weapon_id)
+        {
             return false;
         }
         let changed = self.equipped != weapon_id || self.holstered;
@@ -487,7 +665,7 @@ impl CombatKernel {
             return Err(TickRegression);
         };
         self.riding = riding;
-        if !riding.mounted {
+        if !riding.stance.carries_mounted_weapon() {
             self.holster();
         }
         self.recoil.recover(elapsed_ticks, self.tick_rate);
@@ -522,11 +700,20 @@ impl CombatKernel {
         tick: SimulationTick,
         riding: RidingState,
     ) -> Result<ReloadSnapshot, ReloadStartError> {
-        self.advance_to(tick, riding)
-            .map_err(|_| ReloadStartError::TickReplay)?;
-        if !riding.mounted {
+        if tick < self.last_advanced_tick {
+            return Err(ReloadStartError::TickReplay);
+        }
+        if matches!(
+            riding.stance,
+            RiderStance::MountedAirborne | RiderStance::SaddleDiveAirborne
+        ) {
+            return Err(ReloadStartError::Airborne);
+        }
+        if riding.stance != RiderStance::Mounted || !riding.is_consistent() {
             return Err(ReloadStartError::Dismounted);
         }
+        self.advance_to(tick, riding)
+            .map_err(|_| ReloadStartError::TickReplay)?;
         if self.holstered {
             return Err(ReloadStartError::Holstered);
         }
@@ -550,7 +737,8 @@ impl CombatKernel {
         Ok(reload)
     }
 
-    /// Requests a shot using the kernel-derived seed.
+    /// Requests a shot using the kernel-derived seed and the unchanged wire
+    /// rejection enum.
     pub fn request_fire(
         &mut self,
         tick: SimulationTick,
@@ -558,7 +746,8 @@ impl CombatKernel {
         riding: RidingState,
     ) -> Result<PreparedShot, ShotRejectionReason> {
         let seed = self.next_spread_seed();
-        self.request_fire_with_seed(tick, direction, riding, seed)
+        self.request_fire_detailed(tick, direction, riding, seed)
+            .map_err(|rejection| rejection.wire_reason)
     }
 
     /// Requests a shot while validating the wire-provided seed.
@@ -569,49 +758,131 @@ impl CombatKernel {
         riding: RidingState,
         supplied_seed: u64,
     ) -> Result<PreparedShot, ShotRejectionReason> {
+        self.request_fire_detailed(tick, direction, riding, supplied_seed)
+            .map_err(|rejection| rejection.wire_reason)
+    }
+
+    /// Detailed fire path retaining an internal M2 cap/context reason. The cap
+    /// is checked before clock, ammo, seed, cadence, recoil, or telemetry state
+    /// can mutate.
+    pub fn request_fire_detailed(
+        &mut self,
+        tick: SimulationTick,
+        direction: QuantizedDirection,
+        riding: RidingState,
+        supplied_seed: u64,
+    ) -> Result<PreparedShot, FireRejection> {
+        if tick < self.last_advanced_tick {
+            return Err(FireRejection::wire(ShotRejectionReason::TickReplay));
+        }
+        if !riding.is_consistent() {
+            return Err(FireRejection::dive(
+                ShotRejectionReason::Dismounted,
+                DiveFireRejection::ContextMismatch,
+            ));
+        }
+
+        let dive_context = if riding.stance == RiderStance::SaddleDiveAirborne {
+            let Some(context) = self.dive_context else {
+                return Err(FireRejection::dive(
+                    ShotRejectionReason::Dismounted,
+                    DiveFireRejection::ContextMismatch,
+                ));
+            };
+            if riding.dive_id != Some(context.dive_id) {
+                return Err(FireRejection::dive(
+                    ShotRejectionReason::Dismounted,
+                    DiveFireRejection::ContextMismatch,
+                ));
+            }
+            if context.closed_to_new_shots {
+                return Err(FireRejection::dive(
+                    ShotRejectionReason::Dismounted,
+                    DiveFireRejection::Closed,
+                ));
+            }
+            if self.equipped != context.launch_weapon {
+                return Err(FireRejection::dive(
+                    ShotRejectionReason::Weapon,
+                    DiveFireRejection::WeaponMismatch,
+                ));
+            }
+            if context.accepted_count >= dive_shot_cap(context.launch_weapon) {
+                return Err(FireRejection::dive(
+                    ShotRejectionReason::Rate,
+                    DiveFireRejection::ShotCap,
+                ));
+            }
+            Some(context)
+        } else {
+            None
+        };
+
         self.advance_to(tick, riding)
-            .map_err(|_| ShotRejectionReason::TickReplay)?;
+            .map_err(|_| FireRejection::wire(ShotRejectionReason::TickReplay))?;
         if !direction.is_normalized() {
-            return Err(ShotRejectionReason::InvalidDirection);
+            return Err(FireRejection::wire(ShotRejectionReason::InvalidDirection));
         }
-        if !riding.mounted {
-            return Err(ShotRejectionReason::Dismounted);
-        }
-        if riding.airborne {
-            return Err(ShotRejectionReason::Airborne);
+        match riding.stance {
+            RiderStance::Mounted => {}
+            RiderStance::MountedAirborne => {
+                return Err(FireRejection::wire(ShotRejectionReason::Airborne));
+            }
+            RiderStance::SaddleDiveAirborne => {}
+            RiderStance::LandingProne
+            | RiderStance::LandingRecovery
+            | RiderStance::OnFootStanding
+            | RiderStance::Unknown(_) => {
+                return Err(FireRejection::wire(ShotRejectionReason::Dismounted));
+            }
         }
         if riding.stumbling {
-            return Err(ShotRejectionReason::Stumble);
+            return Err(FireRejection::wire(ShotRejectionReason::Stumble));
         }
         if self.holstered {
-            return Err(ShotRejectionReason::Holstered);
+            return Err(FireRejection::wire(ShotRejectionReason::Holstered));
         }
         if self.reload.is_some() {
-            return Err(ShotRejectionReason::Reloading);
+            return Err(FireRejection::wire(ShotRejectionReason::Reloading));
         }
 
         let stats = *self.equipped.stats();
         if let Some(last_tick) = self.last_accepted_tick {
             let elapsed = tick
                 .checked_duration_since(last_tick)
-                .ok_or(ShotRejectionReason::TickReplay)?;
+                .ok_or_else(|| FireRejection::wire(ShotRejectionReason::TickReplay))?;
             if elapsed < stats.cadence_ticks(self.tick_rate) {
-                return Err(ShotRejectionReason::Rate);
+                return Err(FireRejection::wire(ShotRejectionReason::Rate));
             }
         }
         if self.equipped_ammo().magazine == 0 {
-            return Err(ShotRejectionReason::Empty);
+            return Err(FireRejection::wire(ShotRejectionReason::Empty));
         }
 
         let expected_seed = self.next_spread_seed();
         if supplied_seed != expected_seed {
-            return Err(ShotRejectionReason::SpreadSeed);
+            return Err(FireRejection::wire(ShotRejectionReason::SpreadSeed));
         }
-        let spread_millidegrees = effective_spread_millidegrees(stats, riding);
-        let sway = deterministic_sway(tick, self.tick_rate, riding);
+        let handling = dive_context.map_or(riding, |context| {
+            let mut handling = context.launch_handling;
+            handling.stance = RiderStance::SaddleDiveAirborne;
+            handling.dive_id = Some(context.dive_id);
+            handling
+        });
+        let spread_millidegrees = effective_spread_millidegrees(stats, handling);
+        let mut sway = deterministic_sway(tick, self.tick_rate, handling);
+        if let Some(context) = dive_context {
+            let elapsed = tick
+                .checked_duration_since(context.launch_tick)
+                .unwrap_or_default();
+            sway = scale_sway(
+                sway,
+                dive_sway_scale_milli(elapsed, context.nominal_airtime_ticks),
+            );
+        }
         let resolved_direction =
             spread_direction(direction, expected_seed, spread_millidegrees, sway)
-                .ok_or(ShotRejectionReason::InvalidDirection)?;
+                .ok_or_else(|| FireRejection::wire(ShotRejectionReason::InvalidDirection))?;
 
         let accepted_index = self.shot_index;
         let ammo = self
@@ -623,6 +894,11 @@ impl CombatKernel {
         self.last_accepted_tick = Some(tick);
         self.shot_index = self.shot_index.saturating_add(1);
         self.recoil.apply_impulse(stats, expected_seed);
+        if let Some(context) = &mut self.dive_context {
+            if dive_context.is_some() {
+                context.accepted_count = context.accepted_count.saturating_add(1);
+            }
+        }
 
         Ok(PreparedShot {
             tick,
@@ -633,7 +909,8 @@ impl CombatKernel {
             sway,
             ammo: ammo_after,
             recoil: self.recoil,
-            shot_index: accepted_index,
+            accepted_shot_index: accepted_index,
+            dive_id: dive_context.map(|context| context.dive_id),
         })
     }
 
@@ -644,6 +921,9 @@ impl CombatKernel {
         distance_mm: u32,
         tick: SimulationTick,
     ) -> Result<PickupOutcome, PickupError> {
+        if self.riding.stance == RiderStance::SaddleDiveAirborne {
+            return Err(PickupError::Airborne);
+        }
         if distance_mm > PICKUP_RANGE_MM {
             return Err(PickupError::OutOfRange);
         }
@@ -707,7 +987,7 @@ pub fn effective_spread_millidegrees(stats: WeaponStats, riding: RidingState) ->
         / u64::from(MAX_TURN_RATE_MILLIDEGREES_PER_SECOND)
         / MAX_TURN_SPREAD_PENALTY_DIVISOR;
     let mut spread = interpolated.saturating_add(turn_penalty);
-    if riding.airborne {
+    if riding.stance == RiderStance::MountedAirborne {
         spread = spread.saturating_mul(AIRBORNE_SPREAD_PENALTY_NUMERATOR)
             / AIRBORNE_SPREAD_PENALTY_DENOMINATOR;
     }
@@ -739,6 +1019,22 @@ pub fn deterministic_sway(tick: SimulationTick, tick_rate: u32, riding: RidingSt
     SwaySample {
         pitch_millidegrees: (phase.sin() * amplitude).round() as i32,
         yaw_millidegrees: (phase.cos() * amplitude).round() as i32 + turn_coupling,
+    }
+}
+
+fn scale_sway(sample: SwaySample, scale_milli: u16) -> SwaySample {
+    fn scale_axis(value: i32, scale_milli: u16) -> i32 {
+        let product = i64::from(value) * i64::from(scale_milli);
+        let rounded = if product >= 0 {
+            (product + 500) / 1_000
+        } else {
+            -((-product + 500) / 1_000)
+        };
+        i32::try_from(rounded).unwrap_or(if rounded < 0 { i32::MIN } else { i32::MAX })
+    }
+    SwaySample {
+        pitch_millidegrees: scale_axis(sample.pitch_millidegrees, scale_milli),
+        yaw_millidegrees: scale_axis(sample.yaw_millidegrees, scale_milli),
     }
 }
 
@@ -918,6 +1214,8 @@ pub struct TargetPoseSnapshot {
     pub tick: SimulationTick,
     /// Target identity.
     pub entity_id: EntityId,
+    /// Rewound logical stance retained for D7 geometry selection.
+    pub stance: RiderStance,
     /// Center of the vertical body capsule.
     pub body_center: QuantizedOrigin,
     /// Half-length of the capsule's inner vertical segment.
@@ -1280,6 +1578,12 @@ pub struct AuthorityShot {
     pub result: ShotResult,
     /// Persistable deterministic telemetry.
     pub telemetry: ShotTelemetry,
+    /// M2-only precision when the wire reason remains `rate`/`dismounted`.
+    pub dive_fire_rejection: Option<DiveFireRejection>,
+    /// Authority-owned acceptance retained for instrumentation.
+    pub accepted_shot: Option<AcceptedShotMetadata>,
+    /// Newly derived deterministic style notifications.
+    pub gameplay_events: Vec<GameplayEventRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1293,7 +1597,9 @@ struct AuthorityShooter {
 pub struct CombatAuthority {
     tick_rate: u32,
     lobby_seed: u64,
+    authority_epoch: u64,
     shooters: BTreeMap<PlayerId, AuthorityShooter>,
+    shot_ledger: ShotAttributionLedger,
 }
 
 impl CombatAuthority {
@@ -1305,8 +1611,75 @@ impl CombatAuthority {
         Ok(Self {
             tick_rate,
             lobby_seed,
+            authority_epoch: 0,
             shooters: BTreeMap::new(),
+            shot_ledger: ShotAttributionLedger::default(),
         })
+    }
+
+    /// Sets the current authority epoch monotonically. Offline play leaves it zero.
+    pub fn set_authority_epoch(&mut self, authority_epoch: u64) -> bool {
+        if authority_epoch < self.authority_epoch {
+            return false;
+        }
+        self.authority_epoch = authority_epoch;
+        true
+    }
+
+    /// Current authority epoch used in event IDs.
+    #[must_use]
+    pub const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+
+    /// Match-lifetime accepted-shot ledger.
+    #[must_use]
+    pub const fn shot_attribution_ledger(&self) -> &ShotAttributionLedger {
+        &self.shot_ledger
+    }
+
+    /// Attributes a delayed/replayed authority result through the retained
+    /// match-lifetime ledger. Target damage remains owned by the authority's
+    /// normal resolution path; this method derives telemetry/events only.
+    pub fn observe_authority_result(
+        &mut self,
+        result: &ShotResult,
+    ) -> crate::ShotResultAttribution {
+        self.shot_ledger
+            .observe_result(self.authority_epoch, result)
+    }
+
+    /// Begins the authority-owned combat context for one accepted movement dive.
+    pub fn begin_saddle_dive(
+        &mut self,
+        shooter_peer_id: PlayerId,
+        dive_id: DiveId,
+        launch_tick: SimulationTick,
+        launch_weapon: WeaponId,
+        prelaunch_horizontal_velocity_mmps: [i32; 2],
+        nominal_airtime_ticks: u64,
+    ) -> Result<(), DiveContextError> {
+        self.shooter_kernel_mut(shooter_peer_id)
+            .ok_or(DiveContextError::ContextMismatch)?
+            .begin_saddle_dive(
+                dive_id,
+                launch_tick,
+                launch_weapon,
+                prelaunch_horizontal_velocity_mmps,
+                nominal_airtime_ticks,
+            )
+    }
+
+    /// Closes one authority-owned dive at first valid landing.
+    pub fn finish_saddle_dive(
+        &mut self,
+        shooter_peer_id: PlayerId,
+        dive_id: DiveId,
+        landing_tick: SimulationTick,
+    ) -> Result<(), DiveContextError> {
+        self.shooter_kernel_mut(shooter_peer_id)
+            .ok_or(DiveContextError::ContextMismatch)?
+            .finish_saddle_dive(dive_id, landing_tick)
     }
 
     /// Registers one shooter with one full selected rifle.
@@ -1368,7 +1741,10 @@ impl CombatAuthority {
         let equipped = shooter.kernel.equipped_weapon();
         let ammo_before = shooter.kernel.equipped_ammo();
 
-        if rider.shooter_peer_id != command.shooter_peer_id || rider.tick != command.tick {
+        if rider.shooter_peer_id != command.shooter_peer_id
+            || rider.tick != command.tick
+            || !rider.riding.is_consistent()
+        {
             return rejected_authority_shot(
                 command,
                 equipped,
@@ -1451,21 +1827,22 @@ impl CombatAuthority {
             );
         }
 
-        let prepared = match shooter.kernel.request_fire_with_seed(
+        let prepared = match shooter.kernel.request_fire_detailed(
             command.tick,
             command.direction,
             rider.riding,
             command.spread_seed,
         ) {
             Ok(prepared) => prepared,
-            Err(reason) => {
-                return rejected_authority_shot(
+            Err(rejection) => {
+                return rejected_authority_shot_detailed(
                     command,
                     equipped,
                     shooter.kernel.equipped_ammo(),
                     rider.riding,
                     self.tick_rate,
-                    reason,
+                    rejection.wire_reason,
+                    rejection.dive_reason,
                 );
             }
         };
@@ -1517,6 +1894,7 @@ impl CombatAuthority {
             spread_millidegrees: prepared.spread_millidegrees,
             sway_millidegrees: prepared.sway.magnitude_millidegrees(),
             gait: rider.riding.gait,
+            stance: rider.riding.stance,
             speed_mmps: rider.riding.planar_speed_mmps,
             origin: command.origin,
             direction: prepared.resolved_direction,
@@ -1527,7 +1905,41 @@ impl CombatAuthority {
             damage,
             distance_mm,
         };
-        AuthorityShot { result, telemetry }
+        let prelaunch_horizontal_velocity_mmps = prepared
+            .dive_id
+            .and_then(|dive_id| {
+                shooter
+                    .kernel
+                    .dive_fire_context()
+                    .filter(|context| context.dive_id == dive_id)
+                    .map(|context| context.prelaunch_horizontal_velocity_mmps)
+            })
+            .unwrap_or([0; 2]);
+        let accepted_shot = AcceptedShotMetadata {
+            shooter: command.shooter_peer_id,
+            tick: command.tick,
+            accepted_shot_index: prepared.accepted_shot_index,
+            weapon_id: prepared.weapon_id,
+            stance: rider.riding.stance,
+            gait: rider.riding.gait,
+            dive_id: prepared.dive_id,
+            prelaunch_horizontal_velocity_mmps,
+        };
+        let recorded = self.shot_ledger.record_accepted(accepted_shot);
+        debug_assert!(
+            recorded,
+            "authority admits at most one accepted shooter/tick"
+        );
+        let attribution = self
+            .shot_ledger
+            .observe_result(self.authority_epoch, &result);
+        AuthorityShot {
+            result,
+            telemetry,
+            dive_fire_rejection: None,
+            accepted_shot: Some(accepted_shot),
+            gameplay_events: attribution.events,
+        }
     }
 }
 
@@ -1538,6 +1950,26 @@ fn rejected_authority_shot(
     riding: RidingState,
     tick_rate: u32,
     reason: ShotRejectionReason,
+) -> AuthorityShot {
+    rejected_authority_shot_detailed(
+        command,
+        authority_weapon,
+        ammo,
+        riding,
+        tick_rate,
+        reason,
+        None,
+    )
+}
+
+fn rejected_authority_shot_detailed(
+    command: &ShotCommand,
+    authority_weapon: WeaponId,
+    ammo: WeaponAmmo,
+    riding: RidingState,
+    tick_rate: u32,
+    reason: ShotRejectionReason,
+    dive_fire_rejection: Option<DiveFireRejection>,
 ) -> AuthorityShot {
     let spread = effective_spread_millidegrees(*authority_weapon.stats(), riding);
     let sway = deterministic_sway(command.tick, tick_rate, riding);
@@ -1563,6 +1995,7 @@ fn rejected_authority_shot(
         spread_millidegrees: spread,
         sway_millidegrees: sway.magnitude_millidegrees(),
         gait: riding.gait,
+        stance: riding.stance,
         speed_mmps: riding.planar_speed_mmps,
         origin: command.origin,
         direction: command.direction,
@@ -1573,7 +2006,13 @@ fn rejected_authority_shot(
         damage: 0,
         distance_mm: None,
     };
-    AuthorityShot { result, telemetry }
+    AuthorityShot {
+        result,
+        telemetry,
+        dive_fire_rejection,
+        accepted_shot: None,
+        gameplay_events: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1603,6 +2042,7 @@ mod tests {
         TargetPoseSnapshot {
             tick: SimulationTick::new(tick),
             entity_id: EntityId(entity_id),
+            stance: RiderStance::Mounted,
             body_center: QuantizedOrigin::new(0, 900, z_mm),
             body_half_height_mm: 400,
             body_radius_mm: 300,
@@ -1814,7 +2254,7 @@ mod tests {
             assert!(
                 effective_spread_millidegrees(stats, gallop) > stats.gallop_spread_millidegrees
             );
-            gallop.airborne = true;
+            gallop.stance = RiderStance::MountedAirborne;
             assert!(
                 effective_spread_millidegrees(stats, gallop) > stats.gallop_spread_millidegrees
             );
@@ -2232,6 +2672,333 @@ mod tests {
             assert!((hits_to_eliminate - 1) * damage < 100);
             assert!(hits_to_eliminate * damage >= 100);
         }
+    }
+
+    #[test]
+    fn k09_stance_legality_and_authority_context_are_conservative() {
+        let mut mounted = kernel(60, WeaponId::Dustwalker);
+        assert!(mounted
+            .request_fire(SimulationTick::new(0), forward(), riding())
+            .is_ok());
+
+        let mut jump = riding();
+        jump.stance = RiderStance::MountedAirborne;
+        let mut jump_kernel = kernel(60, WeaponId::Dustwalker);
+        assert_eq!(
+            jump_kernel.request_fire(SimulationTick::new(0), forward(), jump),
+            Err(ShotRejectionReason::Airborne)
+        );
+
+        let dive_id = DiveId::new(1).unwrap();
+        let mut dive_kernel = kernel(60, WeaponId::Dustwalker);
+        dive_kernel
+            .begin_saddle_dive(
+                dive_id,
+                SimulationTick::new(0),
+                WeaponId::Dustwalker,
+                [0, -8_000],
+                45,
+            )
+            .unwrap();
+        let mut dive = riding();
+        dive.stance = RiderStance::SaddleDiveAirborne;
+        dive.dive_id = Some(dive_id);
+        assert!(dive_kernel
+            .request_fire(SimulationTick::new(0), forward(), dive)
+            .is_ok());
+
+        let mut mismatch = dive;
+        mismatch.dive_id = DiveId::new(2);
+        let before = dive_kernel.clone();
+        let rejection = dive_kernel
+            .request_fire_detailed(
+                SimulationTick::new(1),
+                forward(),
+                mismatch,
+                dive_kernel.next_spread_seed(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            rejection.dive_reason,
+            Some(DiveFireRejection::ContextMismatch)
+        );
+        assert_eq!(dive_kernel, before);
+
+        for stance in [
+            RiderStance::LandingProne,
+            RiderStance::LandingRecovery,
+            RiderStance::OnFootStanding,
+            RiderStance::Unknown(200),
+        ] {
+            let mut state = riding();
+            state.stance = stance;
+            let mut candidate = kernel(60, WeaponId::Dustwalker);
+            assert_eq!(
+                candidate.request_fire(SimulationTick::new(0), forward(), state),
+                Err(ShotRejectionReason::Dismounted)
+            );
+        }
+
+        let shooter = player(1);
+        let muzzle = QuantizedOrigin::new(0, 1_600, 0);
+        let mut authority = CombatAuthority::new(60, LOBBY_SEED).unwrap();
+        authority.register_shooter(shooter, WeaponId::Dustwalker);
+        let before = authority.shooter_kernel(shooter).unwrap().clone();
+        let command = command(
+            &authority,
+            shooter,
+            WeaponId::Dustwalker,
+            1,
+            muzzle,
+            forward(),
+        );
+        let mut unknown = rider_snapshot(shooter, 1, muzzle);
+        unknown.riding.stance = RiderStance::Unknown(200);
+        let mut targets = TargetRegistry::new(60).unwrap();
+        let rejected =
+            authority.validate_shot(&command, SimulationTick::new(1), unknown, &mut targets);
+        assert_eq!(
+            rejected.result.rejection_reason,
+            Some(ShotRejectionReason::RiderSnapshot)
+        );
+        assert_eq!(authority.shooter_kernel(shooter).unwrap(), &before);
+    }
+
+    #[test]
+    fn k10_per_weapon_caps_precede_every_weapon_mutation_and_new_dive_resets() {
+        for weapon in WeaponId::ALL {
+            let mut kernel = kernel(60, weapon);
+            let first_dive = DiveId::new(1).unwrap();
+            kernel
+                .begin_saddle_dive(first_dive, SimulationTick::new(0), weapon, [0, -8_000], 45)
+                .unwrap();
+            let mut dive = riding();
+            dive.stance = RiderStance::SaddleDiveAirborne;
+            dive.dive_id = Some(first_dive);
+            let cadence = weapon.stats().cadence_ticks(60);
+            for index in 0..u64::from(dive_shot_cap(weapon)) {
+                assert!(kernel
+                    .request_fire(SimulationTick::new(index * cadence), forward(), dive)
+                    .is_ok());
+            }
+            let cap_tick = u64::from(dive_shot_cap(weapon)) * cadence;
+            let before = kernel.clone();
+            let rejection = kernel
+                .request_fire_detailed(
+                    SimulationTick::new(cap_tick),
+                    forward(),
+                    dive,
+                    kernel.next_spread_seed(),
+                )
+                .unwrap_err();
+            assert_eq!(rejection.wire_reason, ShotRejectionReason::Rate);
+            assert_eq!(rejection.dive_reason, Some(DiveFireRejection::ShotCap));
+            assert_eq!(kernel, before, "{weapon:?} cap rejection mutated state");
+
+            kernel
+                .finish_saddle_dive(first_dive, SimulationTick::new(cap_tick))
+                .unwrap();
+            assert!(kernel.equip_weapon(weapon));
+            let second_dive = DiveId::new(2).unwrap();
+            kernel
+                .begin_saddle_dive(
+                    second_dive,
+                    SimulationTick::new(cap_tick + cadence),
+                    weapon,
+                    [0, -8_000],
+                    45,
+                )
+                .unwrap();
+            dive.dive_id = Some(second_dive);
+            assert!(kernel
+                .request_fire(SimulationTick::new(cap_tick + cadence), forward(), dive,)
+                .is_ok());
+            assert_eq!(kernel.dive_fire_context().unwrap().accepted_count, 1);
+        }
+    }
+
+    #[test]
+    fn k11_launch_cancels_reload_and_airborne_reload_or_equipment_mutate_nothing() {
+        let mut kernel = CombatKernel::with_full_loadout(60, LOBBY_SEED, player(1)).unwrap();
+        kernel.set_ammo(
+            WeaponId::Dustwalker,
+            WeaponAmmo {
+                magazine: 10,
+                reserve: 120,
+            },
+        );
+        kernel
+            .request_reload(SimulationTick::new(0), riding())
+            .unwrap();
+        let ammo = kernel.equipped_ammo();
+        let dive_id = DiveId::new(1).unwrap();
+        kernel
+            .begin_saddle_dive(
+                dive_id,
+                SimulationTick::new(1),
+                WeaponId::Dustwalker,
+                [0, -8_000],
+                45,
+            )
+            .unwrap();
+        assert_eq!(kernel.reload(), None);
+        assert_eq!(kernel.equipped_ammo(), ammo);
+
+        let mut dive = riding();
+        dive.stance = RiderStance::SaddleDiveAirborne;
+        dive.dive_id = Some(dive_id);
+        let before_reload = kernel.clone();
+        assert_eq!(
+            kernel.request_reload(SimulationTick::new(1), dive),
+            Err(ReloadStartError::Airborne)
+        );
+        assert_eq!(kernel, before_reload);
+        assert!(!kernel.equip_weapon(WeaponId::Longspur));
+        assert_eq!(kernel, before_reload);
+        assert_eq!(
+            kernel.pickup(
+                WeaponPickup::world_spawn(WeaponId::Longspur, SimulationTick::new(1)),
+                0,
+                SimulationTick::new(1),
+            ),
+            Err(PickupError::Airborne)
+        );
+        assert_eq!(kernel, before_reload);
+    }
+
+    #[test]
+    fn k12_same_tick_launch_fire_reload_and_landing_order_are_explicit() {
+        let dive_id = DiveId::new(1).unwrap();
+        let mut kernel = kernel(60, WeaponId::Dustwalker);
+        kernel
+            .begin_saddle_dive(
+                dive_id,
+                SimulationTick::new(10),
+                WeaponId::Dustwalker,
+                [0, -8_000],
+                45,
+            )
+            .unwrap();
+        let mut dive = riding();
+        dive.stance = RiderStance::SaddleDiveAirborne;
+        dive.dive_id = Some(dive_id);
+        assert!(kernel
+            .request_fire(SimulationTick::new(10), forward(), dive)
+            .is_ok());
+        assert_eq!(
+            kernel.request_reload(SimulationTick::new(10), dive),
+            Err(ReloadStartError::Airborne)
+        );
+        assert!(kernel
+            .finish_saddle_dive(dive_id, SimulationTick::new(10))
+            .is_ok());
+        let after_first_finish = kernel.clone();
+        assert!(kernel
+            .finish_saddle_dive(dive_id, SimulationTick::new(10))
+            .is_ok());
+        assert_eq!(kernel, after_first_finish);
+        let mut prone = riding();
+        prone.stance = RiderStance::LandingProne;
+        assert_eq!(
+            kernel.request_fire(SimulationTick::new(10), forward(), prone),
+            Err(ShotRejectionReason::Dismounted)
+        );
+    }
+
+    #[test]
+    fn dive_sway_scales_only_offsets_and_decays_on_the_nominal_schedule() {
+        let mut launch_handling = riding();
+        launch_handling.gait = CombatGait::Gallop;
+        launch_handling.planar_speed_mmps = 14_000;
+        launch_handling.gait_top_speed_mmps = 14_000;
+        let mut kernel = kernel(60, WeaponId::Rattler);
+        kernel
+            .advance_to(SimulationTick::new(0), launch_handling)
+            .unwrap();
+        let dive_id = DiveId::new(1).unwrap();
+        kernel
+            .begin_saddle_dive(
+                dive_id,
+                SimulationTick::new(0),
+                WeaponId::Rattler,
+                [0, -14_000],
+                45,
+            )
+            .unwrap();
+        let mut dive = launch_handling;
+        dive.stance = RiderStance::SaddleDiveAirborne;
+        dive.dive_id = Some(dive_id);
+        let shot = kernel
+            .request_fire(SimulationTick::new(1), forward(), dive)
+            .unwrap();
+        let normal = deterministic_sway(SimulationTick::new(1), 60, launch_handling);
+        assert_eq!(shot.sway, scale_sway(normal, 600));
+        assert_eq!(
+            shot.spread_millidegrees,
+            effective_spread_millidegrees(*WeaponId::Rattler.stats(), launch_handling)
+        );
+        assert!(shot.sway.magnitude_millidegrees() <= normal.magnitude_millidegrees());
+    }
+
+    #[test]
+    fn combat_authority_emits_deduplicated_dive_events_with_epoch_and_late_ledger() {
+        let shooter = player(1);
+        let muzzle = QuantizedOrigin::new(0, 1_650, 0);
+        let mut authority = CombatAuthority::new(60, LOBBY_SEED).unwrap();
+        assert!(authority.set_authority_epoch(7));
+        assert!(!authority.set_authority_epoch(6));
+        authority.register_shooter(shooter, WeaponId::Longspur);
+        let dive_id = DiveId::new(4).unwrap();
+        authority
+            .begin_saddle_dive(
+                shooter,
+                dive_id,
+                SimulationTick::new(100),
+                WeaponId::Longspur,
+                [0, 8_000],
+                45,
+            )
+            .unwrap();
+        let mut targets = TargetRegistry::new(60).unwrap();
+        register_target(&mut targets, 9, 2, 200);
+        let mut pose = target_pose(9, 100, -20_000, 1_650);
+        pose.head_radius_mm = 5_000;
+        targets.record_pose(pose).unwrap();
+        let shot = command(
+            &authority,
+            shooter,
+            WeaponId::Longspur,
+            100,
+            muzzle,
+            forward(),
+        );
+        let mut rider = rider_snapshot(shooter, 100, muzzle);
+        rider.riding.stance = RiderStance::SaddleDiveAirborne;
+        rider.riding.dive_id = Some(dive_id);
+        rider.riding.gait = CombatGait::Gallop;
+        let resolved =
+            authority.validate_shot(&shot, SimulationTick::new(100), rider, &mut targets);
+        assert_eq!(resolved.result.outcome, ShotOutcome::Hit);
+        assert_eq!(resolved.telemetry.stance, RiderStance::SaddleDiveAirborne);
+        assert_eq!(resolved.accepted_shot.unwrap().dive_id, Some(dive_id));
+        assert_eq!(
+            resolved
+                .gameplay_events
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::GameplayEventKind::SaddleDiveHeadshot,
+                crate::GameplayEventKind::AirborneReversal,
+            ]
+        );
+        assert!(resolved
+            .gameplay_events
+            .iter()
+            .all(|event| event.id.authority_epoch == 7));
+        let replay = authority.observe_authority_result(&resolved.result);
+        assert!(replay.duplicate);
+        assert!(replay.events.is_empty());
     }
 
     #[test]
