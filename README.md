@@ -23,7 +23,8 @@ docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
-docs/godot-m0.md           Godot setup, M0 contract, and platform notes
+docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
+docs/asset-licenses.md     Verified provenance and licenses for imported game assets
 .github/workflows/         Locked CI gates and manual credentialed e2e
 justfile                   Task runner recipes
 ```

@@ -10,7 +10,7 @@ const ACCENTS := [Color("35d5c5"), Color("ef8a45"), Color("ef5aaa")]
 @export var horse_path: NodePath
 @export_range(0, 2, 1) var selected_id := 0
 
-@onready var attribute_panel: SpurfireAttributePanel = %AttributePanel
+@onready var attribute_panel = %AttributePanel
 @onready var cards: Array[Button] = [%CourserButton, %WarhorseButton, %MustangButton]
 @onready var status_label: Label = %Status
 
@@ -26,7 +26,20 @@ func _ready() -> void:
 	cards[selected_id].grab_focus()
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.physical_keycode == KEY_H and event.is_pressed() and not event.echo:
+		visible = not visible
+		if visible:
+			cards[selected_id].grab_focus()
+		get_viewport().set_input_as_handled()
+		return
+	# Number keys remain fast archetype shortcuts while riding; directional selection is only
+	# active while the panel is open so A/D never steals horse controls.
 	if not visible:
+		if event is InputEventKey and event.is_pressed() and not event.echo:
+			match event.physical_keycode:
+				KEY_1: select_archetype(0)
+				KEY_2: select_archetype(1)
+				KEY_3: select_archetype(2)
 		return
 	if event is InputEventKey and event.physical_keycode == KEY_TAB and event.is_released():
 		attribute_panel.set_exact_stats_visible(false)

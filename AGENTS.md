@@ -13,7 +13,7 @@ This repository contains the Rust control plane and the Godot 4.7.1 game prototy
 - `crates/spurfire-server/` — `spurfire-server` Axum HTTP lobby control service.
 - `crates/spurfire-cli/` — `spurfire-ctl` command-line client.
 - `crates/spurfire-gdext/` — Rust gameplay classes exposed to Godot through GDExtension.
-- `game/` — Godot 4.7.1 project, graybox scenes, input, camera, UI, and smoke tests.
+- `game/` — Godot 4.7.1 project, scenes, input, camera, archetype UI, smoke tests, and curated CC0 assets under `game/assets/kenney/`.
 - `scripts/` — safe API probes plus portable GDExtension build and Godot test helpers.
 - `docs/design.md` — product and game design source of truth.
 - `docs/architecture.md` — control/data planes, trust boundaries, and lifecycle.
@@ -22,7 +22,8 @@ This repository contains the Rust control plane and the Godot 4.7.1 game prototy
 - `docs/rustscale-integration.md` — RustScale readiness and integration survey.
 - `docs/rustscale-tailnet-tooling.md` — RustScale organization-tailnet script comparison and safe probe policy.
 - `docs/lobby-service.md` — HTTP routes, lifecycle, dry-run, configuration, and trust boundaries.
-- `docs/godot-m0.md` — Godot/GDExtension setup, commands, M0 contract, and platform caveats.
+- `docs/godot-m0.md` — Godot/GDExtension setup, commands, M0/M0.5 handling contract, and platform caveats.
+- `docs/asset-licenses.md` — verified source URLs, licenses, and hashes for every imported asset.
 - `.github/workflows/ci.yml` — continuous integration gates.
 
 ## Development commands

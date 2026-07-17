@@ -83,6 +83,41 @@ if [[ ! -f "$project_dir/project.godot" ]]; then
   exit 1
 fi
 
+# Runtime builds do not import source GLBs themselves. Generate the ignored import cache with the
+# native descriptor temporarily disabled: Godot 4.7.1's macOS headless editor crashes after
+# loading GDExtension during layout initialization, while asset import without it is stable.
+import_marker="$project_dir/.godot/.spurfire-assets-imported"
+needs_import=false
+if [[ ! -f "$import_marker" ]]; then
+  needs_import=true
+elif find "$project_dir/assets" -type f \( -name '*.glb' -o -name '*.gltf' \) -newer "$import_marker" -print -quit 2>/dev/null | grep -q .; then
+  needs_import=true
+fi
+if [[ "$needs_import" == true ]]; then
+  descriptor="$project_dir/bin/spurfire.gdextension"
+  disabled_descriptor="$descriptor.import-disabled"
+  import_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-import.XXXXXX")"
+  mv "$descriptor" "$disabled_descriptor"
+  import_status=0
+  run_bounded "$timeout_seconds" "$godot_bin" \
+    --headless \
+    --display-driver headless \
+    --audio-driver Dummy \
+    --editor \
+    --path "$project_dir" \
+    --quit-after 5 >"$import_log" 2>&1 || import_status=$?
+  mv "$disabled_descriptor" "$descriptor"
+  if [[ "$import_status" -ne 0 ]]; then
+    cat "$import_log" >&2
+    rm -f "$import_log"
+    exit "$import_status"
+  fi
+  rm -f "$import_log"
+  mkdir -p "$project_dir/.godot"
+  printf 'res://bin/spurfire.gdextension\n' > "$project_dir/.godot/extension_list.cfg"
+  touch "$import_marker"
+fi
+
 printf 'Running %s headlessly (timeout %ss)...\n' "$smoke_scene" "$timeout_seconds"
 run_bounded "$timeout_seconds" "$godot_bin" \
   --headless \

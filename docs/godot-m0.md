@@ -67,9 +67,17 @@ Set `GODOT_BIN` when the executable is not named `godot4` or `godot`. Headless c
 - **Mouse / right stick:** orbit camera.
 - **Escape once:** release mouse capture. **Escape again:** quit the prototype. Left-click recaptures.
 
+## M0.5 horse handling and presentation
+
+Three native sidegrade archetypes are selectable at rest with **1/2/3**: Courser (speed/acceleration), Warhorse (vitality/stagger resistance), and Mustang (turning/jump/terrain). Press **H** to toggle the detailed horse panel. The archetype API and immutable stat rows live in `crates/spurfire-gdext/src/archetype.rs`.
+
+At Idle with no forward/reverse command, A/D performs a bounded lateral step without changing yaw. Forward input blends out residual lateral speed before accelerating; at riding speed A/D remains rein steering, so the horse never gains shooter-style gallop strafing. The HUD/visual layer reports lateral speed and adds a small body lean.
+
+The course uses a curated 208 KB subset of Kenney Nature Kit and Survival Kit props. Both packs are CC0; exact official URLs, archive and file hashes, retained licenses, and selected filenames are in `docs/asset-licenses.md` and `game/assets/kenney/manifest.json`. No verified downloadable Kenney 3D horse was available, so the procedural horse remains the explicit fallback rather than using an uncertain asset.
+
 ## M0 contract
 
-The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz.
+The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, lateral stepping, archetype attributes, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz.
 
 The measurable exit checks are:
 

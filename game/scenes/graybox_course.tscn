@@ -1,4 +1,4 @@
-[gd_scene load_steps=20 format=3]
+[gd_scene load_steps=23 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -6,6 +6,9 @@
 [ext_resource type="Script" path="res://scripts/speed_graph.gd" id="4_graph"]
 [ext_resource type="Script" path="res://scripts/kill_zone.gd" id="5_kill"]
 [ext_resource type="Script" path="res://scripts/horse_visual.gd" id="6_visual"]
+[ext_resource type="PackedScene" path="res://ui/archetype_selector.tscn" id="7_selector"]
+[ext_resource type="PackedScene" path="res://ui/stylized_feedback.tscn" id="8_feedback"]
+[ext_resource type="PackedScene" path="res://scenes/art/frontier_prop_set.tscn" id="9_props"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -88,6 +91,13 @@ shadow_enabled = true
 
 [node name="TestCourse" type="Node3D" parent="."]
 script = ExtResource("1_course")
+
+[node name="FrontierPropsWest" parent="." instance=ExtResource("9_props")]
+position = Vector3(-30, 0, 4)
+
+[node name="FrontierPropsEast" parent="." instance=ExtResource("9_props")]
+position = Vector3(24, 0, -32)
+rotation_degrees = Vector3(0, 150, 0)
 
 [node name="HorseSpawn" type="Marker3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 25)
@@ -191,7 +201,21 @@ script = ExtResource("5_kill")
 [node name="CollisionShape3D" type="CollisionShape3D" parent="KillResetZone"]
 shape = SubResource("BoxShape_kill")
 
+[node name="FeedbackLayer" type="CanvasLayer" parent="."]
+layer = 0
+
+[node name="StylizedFeedback" parent="FeedbackLayer" node_paths=PackedStringArray("horse") instance=ExtResource("8_feedback")]
+horse = NodePath("../../Horse")
+
+[node name="ArchetypeLayer" type="CanvasLayer" parent="."]
+layer = 5
+
+[node name="ArchetypeSelector" parent="ArchetypeLayer" instance=ExtResource("7_selector")]
+visible = false
+horse_path = NodePath("../../Horse")
+
 [node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse")]
+layer = 2
 script = ExtResource("3_hud")
 horse = NodePath("../Horse")
 
@@ -237,4 +261,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "Hold W: walk → trot → gallop  •  S: brake, pause, reverse  •  A/D steer\nShift/Ctrl quick gait  •  Space jump  •  R reset  •  Esc release / Esc again quit"
+text = "W/S ride  •  A/D steer; from rest A/D sidesteps  •  1/2/3 horse archetype\nH horse stats  •  Space jump  •  R reset  •  Esc release / Esc again quit"

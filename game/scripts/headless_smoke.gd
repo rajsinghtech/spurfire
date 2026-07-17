@@ -10,7 +10,9 @@ const REQUIRED_NODES := [
 	"TestCourse/RoughStrip", "TestCourse/Ramp15", "TestCourse/Ramp25",
 	"TestCourse/Face45", "TestCourse/JumpFence_0Rail", "TestCourse/BridgeDeck",
 	"TestCourse/SlalomPost_0", "TestCourse/TurnCircle_0", "WorldEnvironment",
-	"Sun", "KillResetZone", "HorseSpawn", "HUD"
+	"Sun", "KillResetZone", "HorseSpawn", "Horse/HeadProxy", "Horse/FrontLeftLeg",
+	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
+	"ArchetypeLayer/ArchetypeSelector", "HUD"
 ]
 
 func _ready() -> void:
@@ -46,6 +48,40 @@ func _exercise_native_input(horse: CharacterBody3D, failures: Array[String]) -> 
 	# boundary. Kernel-only tests cannot catch a reversed Godot yaw convention or an Idle gait that
 	# ignores W.
 	await _wait_physics_frames(5)
+	if not horse.has_method("set_archetype") or not horse.has_method("get_archetype_stats"):
+		failures.append("HorseController lacks the M0.5 archetype API")
+	else:
+		horse.call("set_archetype", 0)
+		if int(horse.get("archetype")) != 0:
+			failures.append("Courser archetype selection failed")
+		var stats := horse.call("get_archetype_stats") as Dictionary
+		if float(stats.get("max_vitality", 0.0)) <= 0.0:
+			failures.append("archetype stats omitted max_vitality")
+		horse.call("set_archetype", 2)
+
+	horse.call("reset_horse")
+	# Spawn-floor contact intentionally applies a short landing recovery before lateral steps.
+	await _wait_physics_frames(20)
+	var sidestep_start := horse.global_position
+	Input.action_press(&"steer_left")
+	await _wait_physics_frames(30)
+	Input.action_release(&"steer_left")
+	if horse.global_position.x >= sidestep_start.x - 0.1:
+		failures.append("A from rest did not sidestep toward negative X")
+	if absf(horse.rotation.y) > 0.02:
+		failures.append("stationary sidestep incorrectly changed yaw")
+
+	horse.call("reset_horse")
+	await _wait_physics_frames(20)
+	sidestep_start = horse.global_position
+	Input.action_press(&"steer_right")
+	await _wait_physics_frames(30)
+	Input.action_release(&"steer_right")
+	if horse.global_position.x <= sidestep_start.x + 0.1:
+		failures.append("D from rest did not sidestep toward positive X")
+	if absf(horse.rotation.y) > 0.02:
+		failures.append("stationary sidestep incorrectly changed yaw")
+
 	horse.call("reset_horse")
 	await _wait_physics_frames(2)
 	var start := horse.global_position
@@ -75,6 +111,7 @@ func _wait_physics_frames(count: int) -> void:
 
 func _finish(failures: Array[String]) -> void:
 	Input.action_release(&"move_forward")
+	Input.action_release(&"steer_left")
 	Input.action_release(&"steer_right")
 	if failures.is_empty():
 		print("SPURFIRE_GODOT_SMOKE_OK")
