@@ -12,4 +12,5 @@ dist
 # Godot editor/import state and generated native extension artifacts
 /game/.godot/
 /game/bin/
+*.import
 /game/*_telemetry.csv
