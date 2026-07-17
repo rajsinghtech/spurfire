@@ -171,9 +171,11 @@ jobs:
             arch=x86_64
             test "$target" = aarch64-apple-darwin && arch=arm64
             for profile in debug release; do
-              args=()
-              test "$profile" = release && args=(--release)
-              cargo build --locked -p spurfire-gdext --target "$target" "${args[@]}"
+              if test "$profile" = release; then
+                cargo build --locked -p spurfire-gdext --target "$target" --release
+              else
+                cargo build --locked -p spurfire-gdext --target "$target"
+              fi
               mkdir -p game/bin/macos
               cp "target/$target/$profile/libspurfire_godot.dylib" "game/bin/macos/libspurfire_godot.$profile.$arch.dylib"
               codesign --force --sign - "game/bin/macos/libspurfire_godot.$profile.$arch.dylib"
