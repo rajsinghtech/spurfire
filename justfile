@@ -61,6 +61,10 @@ e2e:
 p2p-live:
     scripts/live-rustscale-p2p.sh
 
+# Open two real Godot clients on a disposable RustScale child tailnet
+p2p-demo:
+    scripts/run-p2p-demo.sh
+
 # Remove build artifacts
 clean:
     cargo clean

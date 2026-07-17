@@ -69,7 +69,9 @@ Useful commands:
 - `just e2e` — manual live token probe; requires `.env`.
 - `just game-build [debug|release]` — build and install the platform-native GDExtension.
 - `just game-test` — headless import and M0 smoke tests with a bounded timeout.
-- `just game-editor` / `just game-run` — edit or run the Godot project.
+- `just game-editor` / `just game-run` — edit or run one local Godot client.
+- `just p2p-demo` — provision a disposable tailnet and open two visibly replicated Godot clients.
+- `just p2p-live` — headless real-UDP and forced-authority-migration probe.
 - `just --list` — all recipes.
 
 ## Documentation

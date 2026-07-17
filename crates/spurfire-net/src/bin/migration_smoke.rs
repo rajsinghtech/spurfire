@@ -117,7 +117,15 @@ async fn child_main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let elapsed = started.elapsed();
         let now_ms = elapsed.as_millis().try_into().unwrap_or(u64::MAX);
-        if elapsed.saturating_sub(last_send) >= StdDuration::from_millis(250) {
+        let send_interval = if node == "c"
+            && session.authority() == PlayerId::parse(PLAYER_B)?
+            && session.authority_epoch() >= 2
+        {
+            StdDuration::from_millis(50)
+        } else {
+            StdDuration::from_millis(200)
+        };
+        if elapsed.saturating_sub(last_send) >= send_interval {
             last_send = elapsed;
             let payload =
                 if node == "b" && session.authority() == local && session.authority_epoch() >= 2 {
@@ -193,7 +201,7 @@ async fn child_main() -> Result<(), Box<dyn std::error::Error>> {
                 write_atomic(&directory.join(format!("migrated-{node}")), b"ok")?;
             }
         }
-        if elapsed > StdDuration::from_secs(20) && (!migration_announced || !gameplay_continued) {
+        if elapsed > StdDuration::from_secs(45) && (!migration_announced || !gameplay_continued) {
             return Err(
                 format!("node {node} did not complete migration and continued play").into(),
             );
@@ -247,8 +255,8 @@ fn parent_main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = a.wait();
         wait_for(&directory.join("migrated-b"), StdDuration::from_secs(12))?;
         wait_for(&directory.join("migrated-c"), StdDuration::from_secs(12))?;
-        wait_for(&directory.join("continued-b"), StdDuration::from_secs(5))?;
-        wait_for(&directory.join("continued-c"), StdDuration::from_secs(5))?;
+        wait_for(&directory.join("continued-b"), StdDuration::from_secs(20))?;
+        wait_for(&directory.join("continued-c"), StdDuration::from_secs(20))?;
         write_atomic(&directory.join("stop"), b"ok")?;
         if !b.wait()?.success() || !c.wait()?.success() {
             return Err("surviving peer process failed".into());

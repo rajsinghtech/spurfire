@@ -67,7 +67,7 @@ Verify:
 6. The lower-left network panel says `NET OFFLINE` when no lobby join credential has been supplied. This is expected for local play.
 7. Escape releases the mouse; press Escape again to quit.
 
-## 5. Real RustScale UDP and authority-loss test
+## 5. Visible two-client P2P demo
 
 Create the gitignored `.env` if needed:
 
@@ -80,10 +80,32 @@ Set `TS_CLIENT_ID` and `TS_CLIENT_SECRET` to an organization OAuth client that c
 Run:
 
 ```bash
+just p2p-demo
+```
+
+This builds once, creates a disposable child tailnet, and opens two Godot windows named **Rider A** and **Rider B**. Wait until both HUDs say `NET CONNECTED`. Focus either window and ride with W/A/S/D; its remote horse is replicated into the other window through real RustScale application UDP. Close both windows—or press Ctrl-C in the launching terminal—to delete the child tailnet.
+
+Expected terminal markers:
+
+```text
+SPURFIRE_GODOT_P2P_READY local=a ...
+SPURFIRE_GODOT_P2P_READY local=b ...
+SPURFIRE_GODOT_P2P_SNAPSHOT local=a ...
+SPURFIRE_GODOT_P2P_SNAPSHOT local=b ...
+cleanup: deleted P2P demo tailnet ...
+```
+
+`just game-run` is intentionally a single local client and therefore displays `NET OFFLINE`; it is not the two-player launcher.
+
+## 6. Automated UDP and authority-loss test
+
+Run:
+
+```bash
 just p2p-live
 ```
 
-The probe creates a disposable child tailnet and should print:
+The headless probe creates a disposable child tailnet and should print:
 
 ```text
 SPURFIRE_P2P_UDP_OK ... route_a_to_b=Direct|Derp|PeerRelay ...
@@ -95,7 +117,7 @@ SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 
 The cleanup trap deletes the tailnet on success, failure, interruption, or timeout. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue; it does not invalidate the test if the success and lifecycle markers appear.
 
-## 6. Final secret and repository checks
+## 7. Final secret and repository checks
 
 ```bash
 git diff --check

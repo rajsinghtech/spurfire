@@ -19,7 +19,8 @@ func show_tracer(origin: Vector3, endpoint: Vector3, color: Color = Color("ffb84
 	tracer.mesh = mesh
 	add_child(tracer)
 	tracer.global_position = origin.lerp(endpoint, 0.5)
-	tracer.look_at(endpoint, Vector3.UP)
+	var tracer_direction := tracer.global_position.direction_to(endpoint)
+	tracer.look_at(endpoint, _safe_up(tracer_direction))
 	_fade_and_free(tracer, tracer_lifetime)
 	return tracer
 
@@ -34,10 +35,14 @@ func show_impact(position: Vector3, normal: Vector3, headshot := false) -> Node3
 	mesh.material = material
 	impact.mesh = mesh
 	add_child(impact)
-	impact.global_position = position + normal * 0.012
-	impact.global_basis = Basis.looking_at(normal, Vector3.UP).rotated(Vector3.RIGHT, PI * 0.5)
+	var impact_normal := normal.normalized() if normal.length_squared() > 0.0001 else Vector3.UP
+	impact.global_position = position + impact_normal * 0.012
+	impact.global_basis = Basis.looking_at(impact_normal, _safe_up(impact_normal)).rotated(Vector3.RIGHT, PI * 0.5)
 	_fade_and_free(impact, impact_lifetime)
 	return impact
+
+func _safe_up(direction: Vector3) -> Vector3:
+	return Vector3.FORWARD if absf(direction.normalized().dot(Vector3.UP)) > 0.98 else Vector3.UP
 
 func _fade_and_free(node: Node, duration: float) -> void:
 	var tween := create_tween()
