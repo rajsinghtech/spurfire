@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Godot 4.7 horse locomotion GDExtension for Spurfire"
 
 [lib]
+name = "spurfire_godot"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
