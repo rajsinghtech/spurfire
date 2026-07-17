@@ -14,8 +14,7 @@ use spurfire_protocol::{
     MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2, SADDLE_DIVE_TICK_RATE_HZ,
 };
 
-use crate::horse_controller::{HorseController, HorseM2Snapshot};
-use crate::locomotion::TerrainSurface;
+use crate::horse_controller::HorseController;
 use crate::mounted_weapon_controller::MountedWeaponController;
 
 const DEFAULT_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -415,10 +414,10 @@ impl SaddleDiveController {
             return false;
         };
         let effects = self.kernel.reset(SimulationTick::new(tick_value));
-        if let Some(horse) = self.horse() {
+        if let Some(mut horse) = self.horse() {
             horse.bind_mut().reset_horse();
         }
-        if let Some(weapon) = self.weapon_controller() {
+        if let Some(mut weapon) = self.weapon_controller() {
             weapon.bind_mut().complete_remount(tick);
         }
         self.follow_saddle();
@@ -553,7 +552,7 @@ impl SaddleDiveController {
                 let forward = self.chosen_forward;
                 let right = Vector3::new(-forward.z, 0.0, forward.x);
                 let desired = (right * self.move_input.x + forward * self.move_input.y)
-                    .limit_length(1.0)
+                    .limit_length(Some(1.0))
                     * finite_positive_or(self.on_foot_speed_mps, 6.0) as f32
                     * scale;
                 let mut velocity = self.base().get_velocity();
@@ -574,11 +573,11 @@ impl SaddleDiveController {
                     horse_velocity_mmps,
                     ..
                 } => {
-                    if let Some(horse) = self.horse() {
+                    if let Some(mut horse) = self.horse() {
                         horse.bind_mut().start_dive_runout(tick_i64(tick));
                     }
                     if let Some(row) = self.kernel.instrumentation_row(dive_id) {
-                        if let Some(weapon) = self.weapon_controller() {
+                        if let Some(mut weapon) = self.weapon_controller() {
                             weapon.bind_mut().begin_saddle_dive(
                                 dive_id_i64(dive_id),
                                 tick_i64(tick),
@@ -600,26 +599,27 @@ impl SaddleDiveController {
                     self.base_mut()
                         .set_velocity(mmps_to_vector(launch_velocity_mmps));
                     if dive_id.is_none() {
-                        if let Some(horse) = self.horse() {
+                        if let Some(mut horse) = self.horse() {
                             horse.bind_mut().stop_for_dismount(tick_i64(tick));
                         }
                     }
                 }
                 SaddleDiveCommand::ApplyRiderDamage(command) => {
+                    let health_after = i64::from(self.kernel.rider_health());
                     self.signals().landing_damage_applied().emit(
                         dive_id_i64(command.id.dive_id),
                         i64::from(command.amount),
-                        i64::from(self.kernel.rider_health()),
+                        health_after,
                     );
                     if command.amount != BAD_LANDING_DAMAGE {
                         godot_error!("unexpected Saddle Dive landing damage command");
                     }
                 }
                 SaddleDiveCommand::AttachRider { tick, .. } => {
-                    if let Some(horse) = self.horse() {
+                    if let Some(mut horse) = self.horse() {
                         horse.bind_mut().complete_remount(tick_i64(tick));
                     }
-                    if let Some(weapon) = self.weapon_controller() {
+                    if let Some(mut weapon) = self.weapon_controller() {
                         weapon.bind_mut().complete_remount(tick_i64(tick));
                     }
                     self.follow_saddle();
@@ -642,7 +642,7 @@ impl SaddleDiveController {
             match (transition.from, transition.to) {
                 (SaddleDiveState::Mounted, SaddleDiveState::SaddleDiveAirborne) => {
                     if let Some(id) = transition.dive_id {
-                        if let Some(row) = self.kernel.instrumentation_row(id) {
+                        if let Some(row) = self.kernel.instrumentation_row(id).cloned() {
                             self.signals().dive_started().emit(
                                 dive_id_i64(id),
                                 mmps_to_vector([
@@ -659,12 +659,12 @@ impl SaddleDiveController {
                 }
                 (SaddleDiveState::SaddleDiveAirborne, SaddleDiveState::LandingProne) => {
                     if let Some(id) = transition.dive_id {
-                        if let Some(weapon) = self.weapon_controller() {
+                        if let Some(mut weapon) = self.weapon_controller() {
                             weapon
                                 .bind_mut()
                                 .finish_saddle_dive(dive_id_i64(id), tick_i64(transition.tick));
                         }
-                        if let Some(row) = self.kernel.instrumentation_row(id) {
+                        if let Some(row) = self.kernel.instrumentation_row(id).cloned() {
                             let bad = row.landing_outcome == Some(LandingOutcome::Bad);
                             let terrain = GString::from(
                                 row.landing_terrain.map_or("unknown", landing_terrain_name),
@@ -709,14 +709,15 @@ impl SaddleDiveController {
     }
 
     fn emit_gameplay_event(&mut self, event: &GameplayEventRow) {
-        let event_id = GString::from(format!(
+        let event_id_text = format!(
             "{}:{}:{}:{}:{}",
             event.id.authority_epoch,
             event.id.actor.to_canonical_string(),
             event.id.source_tick.as_u64(),
             gameplay_event_kind_name(event.kind),
             event.id.sequence
-        ));
+        );
+        let event_id = GString::from(&event_id_text);
         let kind = GString::from(gameplay_event_kind_name(event.kind));
         let payload = gameplay_event_dictionary(event);
         godot_print!(
@@ -828,7 +829,7 @@ fn stance_for_state(state: SaddleDiveState, mounted_grounded: bool) -> RiderStan
 
 fn finite_move_input(value: Vector2) -> Vector2 {
     if value.is_finite() {
-        value.limit_length(1.0)
+        value.limit_length(Some(1.0))
     } else {
         Vector2::ZERO
     }
@@ -1108,7 +1109,7 @@ fn set_optional_tick(result: &mut VarDictionary, key: &str, value: Option<Simula
     if let Some(value) = value {
         result.set(key, tick_i64(value));
     } else {
-        result.set(key, Variant::nil());
+        result.set(key, &Variant::nil());
     }
 }
 
@@ -1116,7 +1117,7 @@ fn set_optional_u64(result: &mut VarDictionary, key: &str, value: Option<u64>) {
     if let Some(value) = value {
         result.set(key, i64::try_from(value).unwrap_or(i64::MAX));
     } else {
-        result.set(key, Variant::nil());
+        result.set(key, &Variant::nil());
     }
 }
 
@@ -1124,7 +1125,7 @@ fn set_optional_bool(result: &mut VarDictionary, key: &str, value: Option<bool>)
     if let Some(value) = value {
         result.set(key, value);
     } else {
-        result.set(key, Variant::nil());
+        result.set(key, &Variant::nil());
     }
 }
 
@@ -1158,6 +1159,7 @@ fn dive_id_i64(dive_id: DiveId) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locomotion::TerrainSurface;
 
     #[test]
     fn gameplay_event_names_match_presentation_contract() {

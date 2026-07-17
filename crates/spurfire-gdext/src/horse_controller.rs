@@ -29,7 +29,6 @@ pub(crate) struct HorseM2Snapshot {
     pub grounded: bool,
     pub gait: i64,
     pub retrievable: bool,
-    pub surface: TerrainSurface,
 }
 
 /// Godot adapter for the pure locomotion kernel.
@@ -440,7 +439,6 @@ impl HorseController {
             grounded: self.base().is_on_floor(),
             gait: self.current_gait,
             retrievable: self.runout_kernel.is_retrievable(),
-            surface: self.kernel.telemetry().terrain,
         }
     }
 
@@ -546,9 +544,10 @@ impl HorseController {
 
     fn emit_retrievable(&mut self, tick: SimulationTick) {
         self.assign_runout_properties();
+        let distance = self.runout_distance_m;
         self.signals().horse_retrievable().emit(
             i64::try_from(tick.as_u64()).unwrap_or(i64::MAX),
-            self.runout_distance_m,
+            distance,
         );
     }
 
