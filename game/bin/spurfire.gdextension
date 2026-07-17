@@ -1,0 +1,14 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.7"
+reloadable = true
+
+[libraries]
+macos.debug.arm64 = "res://bin/macos/libspurfire_godot.debug.arm64.dylib"
+macos.release.arm64 = "res://bin/macos/libspurfire_godot.release.arm64.dylib"
+macos.debug.x86_64 = "res://bin/macos/libspurfire_godot.debug.x86_64.dylib"
+macos.release.x86_64 = "res://bin/macos/libspurfire_godot.release.x86_64.dylib"
+linux.debug.x86_64 = "res://bin/linux/libspurfire_godot.debug.x86_64.so"
+linux.release.x86_64 = "res://bin/linux/libspurfire_godot.release.x86_64.so"
+windows.debug.x86_64 = "res://bin/windows/spurfire_godot.debug.x86_64.dll"
+windows.release.x86_64 = "res://bin/windows/spurfire_godot.release.x86_64.dll"

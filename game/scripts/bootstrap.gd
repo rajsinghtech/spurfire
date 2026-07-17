@@ -1,0 +1,18 @@
+extends Control
+
+const MAIN_SCENE := "res://scenes/graybox_course.tscn"
+
+func _ready() -> void:
+	if not ClassDB.class_exists(&"HorseController"):
+		var message := "HorseController native class unavailable. Build/copy the Spurfire GDExtension library for this platform into game/bin, then restart Godot."
+		push_error(message)
+		$Panel/Margin/VBox/Error.text = message
+		$Panel/Margin/VBox/Paths.text = "Descriptor: res://bin/spurfire.gdextension\nExpected platform libraries are listed there."
+		return
+	var packed := load(MAIN_SCENE) as PackedScene
+	if packed == null:
+		push_error("Could not load graybox course: %s" % MAIN_SCENE)
+		$Panel/Margin/VBox/Error.text = "Graybox course failed to load. See debugger output."
+		return
+	get_tree().root.add_child(packed.instantiate())
+	queue_free()

@@ -1,0 +1,79 @@
+; Spurfire M0 horse-controller graybox (Godot 4.7.1)
+config_version=5
+
+[application]
+config/name="Spurfire Graybox"
+run/main_scene="res://scenes/bootstrap.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/default_filters/use_nearest_mipmap_filter=false
+
+[physics]
+common/physics_ticks_per_second=60
+3d/default_gravity=22.0
+
+[input]
+move_forward={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":87), Object(InputEventJoypadMotion,"axis":1,"axis_value":-1.0)]
+}
+move_back={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":83), Object(InputEventJoypadMotion,"axis":1,"axis_value":1.0)]
+}
+steer_left={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":65), Object(InputEventJoypadMotion,"axis":0,"axis_value":-1.0)]
+}
+steer_right={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":68), Object(InputEventJoypadMotion,"axis":0,"axis_value":1.0)]
+}
+gait_up={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194325), Object(InputEventJoypadButton,"button_index":10)]
+}
+gait_down={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194326), Object(InputEventJoypadButton,"button_index":9)]
+}
+hard_brake={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194324), Object(InputEventJoypadMotion,"axis":4,"axis_value":1.0)]
+}
+jump={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":32), Object(InputEventJoypadButton,"button_index":0)]
+}
+reset_horse={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":82), Object(InputEventJoypadButton,"button_index":6)]
+}
+camera_left={
+"deadzone": 0.15,
+"events": [Object(InputEventJoypadMotion,"axis":2,"axis_value":-1.0)]
+}
+camera_right={
+"deadzone": 0.15,
+"events": [Object(InputEventJoypadMotion,"axis":2,"axis_value":1.0)]
+}
+camera_up={
+"deadzone": 0.15,
+"events": [Object(InputEventJoypadMotion,"axis":3,"axis_value":-1.0)]
+}
+camera_down={
+"deadzone": 0.15,
+"events": [Object(InputEventJoypadMotion,"axis":3,"axis_value":1.0)]
+}
+release_mouse={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194305)]
+}
