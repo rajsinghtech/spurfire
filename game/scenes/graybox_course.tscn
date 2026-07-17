@@ -1,0 +1,167 @@
+[gd_scene load_steps=15 format=3]
+
+[ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
+[ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
+[ext_resource type="Script" path="res://scripts/hud.gd" id="3_hud"]
+[ext_resource type="Script" path="res://scripts/speed_graph.gd" id="4_graph"]
+[ext_resource type="Script" path="res://scripts/kill_zone.gd" id="5_kill"]
+
+[sub_resource type="Environment" id="Environment_graybox"]
+background_mode = 1
+background_color = Color(0.32, 0.48, 0.64, 1)
+ambient_light_source = 3
+ambient_light_color = Color(0.62, 0.69, 0.78, 1)
+ambient_light_energy = 0.55
+tonemap_mode = 2
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape_horse"]
+radius = 0.6
+height = 2.2
+
+[sub_resource type="StandardMaterial3D" id="Material_horse"]
+albedo_color = Color(0.34, 0.16, 0.07, 1)
+roughness = 0.85
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_horse"]
+material = SubResource("Material_horse")
+radius = 0.6
+height = 2.2
+
+[sub_resource type="BoxMesh" id="BoxMesh_body"]
+material = SubResource("Material_horse")
+size = Vector3(1.15, 1.0, 2.4)
+
+[sub_resource type="StandardMaterial3D" id="Material_saddle"]
+albedo_color = Color(0.08, 0.09, 0.1, 1)
+roughness = 0.75
+
+[sub_resource type="BoxMesh" id="BoxMesh_saddle"]
+material = SubResource("Material_saddle")
+size = Vector3(0.9, 0.25, 1.0)
+
+[sub_resource type="SphereShape3D" id="SphereShape_camera"]
+radius = 0.35
+
+[sub_resource type="BoxShape3D" id="BoxShape_kill"]
+size = Vector3(300, 8, 300)
+
+[node name="GrayboxCourse" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_graybox")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-52, -32, 0)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 1.25
+shadow_enabled = true
+
+[node name="TestCourse" type="Node3D" parent="."]
+script = ExtResource("1_course")
+
+[node name="HorseSpawn" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 25)
+groups = ["respawn_anchor"]
+
+[node name="Horse" type="HorseController" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 25)
+floor_max_angle = 0.698132
+floor_snap_length = 0.4
+floor_block_on_wall = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Horse"]
+position = Vector3(0, 1.1, 0)
+shape = SubResource("CapsuleShape_horse")
+
+[node name="BodyProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.1, 0)
+mesh = SubResource("BoxMesh_body")
+
+[node name="ChestProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.25, -0.75)
+rotation_degrees = Vector3(90, 0, 0)
+mesh = SubResource("CapsuleMesh_horse")
+
+[node name="SaddleProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.72, 0.15)
+mesh = SubResource("BoxMesh_saddle")
+
+[node name="ForwardMarker" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.35, -1.35)
+scale = Vector3(0.3, 0.3, 0.3)
+mesh = SubResource("CapsuleMesh_horse")
+
+[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target")]
+script = ExtResource("2_camera")
+target = NodePath("../Horse")
+
+[node name="PitchPivot" type="Node3D" parent="CameraRig"]
+
+[node name="SpringArm3D" type="SpringArm3D" parent="CameraRig/PitchPivot"]
+spring_length = 5.5
+margin = 0.08
+shape = SubResource("SphereShape_camera")
+collision_mask = 1
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig/PitchPivot/SpringArm3D"]
+position = Vector3(0.4, 0, 0)
+current = true
+fov = 70.0
+
+[node name="KillResetZone" type="Area3D" parent="."]
+position = Vector3(0, -25, 0)
+collision_layer = 0
+collision_mask = 1
+monitoring = true
+script = ExtResource("5_kill")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="KillResetZone"]
+shape = SubResource("BoxShape_kill")
+
+[node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse")]
+script = ExtResource("3_hud")
+horse = NodePath("../Horse")
+
+[node name="Panel" type="PanelContainer" parent="HUD"]
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 470.0
+offset_bottom = 210.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 10
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Panel/Margin"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="HUD/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.68, 0.2, 1)
+theme_override_font_sizes/font_size = 20
+text = "SPURFIRE // HORSE M0"
+
+[node name="Readout" type="Label" parent="HUD/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 17
+text = "Idle  |  0.00 m/s  0.0 km/h  |  slope 0.0°"
+
+[node name="Details" type="Label" parent="HUD/Panel/Margin/VBox"]
+layout_mode = 2
+text = "surface: flat   airborne: false   turn radius: 0.0 m"
+
+[node name="SpeedGraph" type="Control" parent="HUD/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(420, 70)
+layout_mode = 2
+mouse_filter = 2
+script = ExtResource("4_graph")
+
+[node name="Help" type="Label" parent="HUD"]
+offset_left = 20.0
+offset_top = 225.0
+offset_right = 560.0
+offset_bottom = 290.0
+text = "W/S throttle & brake  •  A/D steer  •  Shift/Ctrl gait\nAlt hard brake  •  Space jump  •  R reset  •  Mouse/right stick orbit"
