@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: meta
         shell: bash
         run: |
@@ -49,6 +50,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -94,6 +97,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -140,6 +145,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -195,7 +202,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: client-*
           path: dist
@@ -212,8 +221,8 @@ jobs:
           cd ..
           notes="docs/release-notes-${VERSION}.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/Spurfire-* dist/SHA256SUMS --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/Spurfire-* dist/SHA256SUMS \
-              --verify-tag --title "Spurfire ${VERSION}" --notes-file "$notes"
+            echo "release $GITHUB_REF_NAME already exists; refusing to replace assets" >&2
+            exit 1
           fi
+          gh release create "$GITHUB_REF_NAME" dist/Spurfire-* dist/SHA256SUMS \
+            --verify-tag --title "Spurfire ${VERSION}" --notes-file "$notes"
