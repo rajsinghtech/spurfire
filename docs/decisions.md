@@ -37,11 +37,15 @@ The control plane is a single Rust workspace: `spurfire-control` (library: Tails
 tailnet/key lifecycle) and `spurfire-cli` (`spurfire-ctl` binary). A future backend service
 builds on the same library.
 
-## D4 — Game engine
+## D4 — Godot 4 with Rust GDExtension
 
-**Status:** open — **blocking**
+**Status:** accepted
 
-No game engine has been chosen. This blocks all data-plane (game client) work.
+The game client uses **Godot 4.7.1** for scenes, input, camera, UI, content iteration, and platform packaging, with gameplay systems implemented in Rust through `gdext` GDExtension classes. The first proof point is the M0 graybox horse-movement slice; RustScale integration begins only after its movement acceptance checks pass.
+
+This closes the former blocking engine question. Historically, Bevy was attractive for native Rust and Unity/Unreal offered more mature content tooling, while Godot had the best expected iteration speed and an idiomatic in-process Rust boundary. Godot was selected to optimize the feel-tuning loop without giving up Rust gameplay code.
+
+Acceptance does not erase platform risk: native libraries must be built and packaged per OS/architecture; mobile and console GDExtension support is not validated; large-world and 16-rider performance remain unproven; and RustScale still has gameplay-UDP, telemetry, relay, and all-platform caveats. See `docs/godot-m0.md` and `docs/rustscale-integration.md`.
 
 ## D5 — Ranked result verification
 

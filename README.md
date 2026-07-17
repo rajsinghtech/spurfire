@@ -4,7 +4,7 @@
 
 **Spurfire** is a third-person, peer-hosted open-range shooter where every player fights from horseback, performs dangerous flying dismounts, develops a bond with their mount, and battles across terrain that scales with the size of the lobby.
 
-This repository is the Rust **control plane**. It provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. Game clients embed [RustScale](https://github.com/rajsinghtech/rustscale) (sibling repository) and play peer-to-peer; `spurfire-server` is never a permanent gameplay server.
+This repository contains the Rust **control plane** and the Godot game prototype. The control plane provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. The game uses Godot 4.7.1 with Rust GDExtension gameplay classes. Game clients will embed [RustScale](https://github.com/rajsinghtech/rustscale) and play peer-to-peer after M0 movement validation; `spurfire-server` is never a permanent gameplay server.
 
 ## Repository layout
 
@@ -13,7 +13,9 @@ crates/spurfire-control/   Tailscale API client and provisioning primitives
 crates/spurfire-protocol/  Wire DTOs, lobby state machine, deterministic election
 crates/spurfire-server/    spurfire-server Axum lobby control service
 crates/spurfire-cli/       spurfire-ctl development and operations CLI
-scripts/                   Safe API probes and development helpers
+crates/spurfire-gdext/     Rust gameplay classes for Godot
+game/                      Godot 4.7.1 project and graybox tests
+scripts/                   API probes and game build/test helpers
 docs/design.md             Product and game design source of truth
 docs/architecture.md       Control/data planes and trust boundaries
 docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
@@ -21,13 +23,14 @@ docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
+docs/godot-m0.md           Godot setup, M0 contract, and platform notes
 .github/workflows/         Locked CI gates and manual credentialed e2e
 justfile                   Task runner recipes
 ```
 
 ## Quickstart
 
-Prerequisites: Rust 1.91 or newer and [`just`](https://github.com/casey/just).
+Control-plane prerequisites: Rust 1.91 or newer and [`just`](https://github.com/casey/just). Game development also requires Godot 4.7.1 and Bash; see [docs/godot-m0.md](docs/godot-m0.md) for macOS, Linux, and Windows setup.
 
 ```sh
 just setup
@@ -38,6 +41,11 @@ just serve-dry
 # In another terminal:
 curl -sS http://127.0.0.1:8080/healthz
 curl -sS http://127.0.0.1:8080/v1/capabilities
+
+# Build the Rust GDExtension and run bounded headless Godot smoke tests.
+just game-test
+# Or iterate locally.
+just game-editor
 ```
 
 PowerShell:
@@ -55,6 +63,9 @@ Useful commands:
 - `just serve-dry` — loopback dry-run server with zero Tailscale mutations.
 - `cargo run -p spurfire-server -- --help` — server options.
 - `just e2e` — manual live token probe; requires `.env`.
+- `just game-build [debug|release]` — build and install the platform-native GDExtension.
+- `just game-test` — headless import and M0 smoke tests with a bounded timeout.
+- `just game-editor` / `just game-run` — edit or run the Godot project.
 - `just --list` — all recipes.
 
 ## Documentation
@@ -66,7 +77,8 @@ Useful commands:
 - [docs/tailscale-api.md](docs/tailscale-api.md) — current API permission evidence.
 - [docs/rustscale-integration.md](docs/rustscale-integration.md) — sibling integration readiness.
 - [docs/rustscale-tailnet-tooling.md](docs/rustscale-tailnet-tooling.md) — reference script comparison and safe wrapper policy.
+- [docs/godot-m0.md](docs/godot-m0.md) — local setup, automation, M0 checks, and platform caveats.
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype now implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. This is not production-ready: restart recovery requires an encrypted secret manager and child key issuance still needs live end-to-end verification. Shared-tailnet provisioning remains blocked by historical OAuth scope/ACL evidence; the game itself is not yet playable.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension is accepted for the client, with M0 focused strictly on graybox movement validation. RustScale networking begins after that gate. Restart recovery, live child-key verification, shared-tailnet permissions, cross-platform Godot packaging, and RustScale's platform/telemetry gaps remain production blockers.

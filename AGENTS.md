@@ -4,7 +4,7 @@
 
 **Pitch:** *High noon. Low ping.* Spurfire is a third-person, peer-hosted horseback shooter with flying dismounts, mount bonding, and lobby-scaled open terrain.
 
-This repository is the Rust control plane. It provisions Tailscale-backed lobbies and join credentials through `spurfire-control`, exposes the `spurfire-server` HTTP lobby service, and provides development and operations workflows through the `spurfire-ctl` CLI. Gameplay is peer-to-peer; the control service handles metadata, provisioning, cleanup, and prototype results but is not a permanent gameplay server.
+This repository contains the Rust control plane and the Godot 4.7.1 game prototype. The control plane provisions Tailscale-backed lobbies and join credentials through `spurfire-control`, exposes the `spurfire-server` HTTP lobby service, and provides development and operations workflows through the `spurfire-ctl` CLI. Gameplay systems are Rust GDExtension classes hosted by Godot. Gameplay will be peer-to-peer after M0 movement validation; the control service handles metadata, provisioning, cleanup, and prototype results but is not a permanent gameplay server.
 
 ## Repository layout
 
@@ -12,7 +12,9 @@ This repository is the Rust control plane. It provisions Tailscale-backed lobbie
 - `crates/spurfire-protocol/` — wire DTOs, lobby state machine, and deterministic authority election.
 - `crates/spurfire-server/` — `spurfire-server` Axum HTTP lobby control service.
 - `crates/spurfire-cli/` — `spurfire-ctl` command-line client.
-- `scripts/` — safe API probes and development helpers.
+- `crates/spurfire-gdext/` — Rust gameplay classes exposed to Godot through GDExtension.
+- `game/` — Godot 4.7.1 project, graybox scenes, input, camera, UI, and smoke tests.
+- `scripts/` — safe API probes plus portable GDExtension build and Godot test helpers.
 - `docs/design.md` — product and game design source of truth.
 - `docs/architecture.md` — control/data planes, trust boundaries, and lifecycle.
 - `docs/decisions.md` — ADR-lite decisions and blocking questions.
@@ -20,6 +22,7 @@ This repository is the Rust control plane. It provisions Tailscale-backed lobbie
 - `docs/rustscale-integration.md` — RustScale readiness and integration survey.
 - `docs/rustscale-tailnet-tooling.md` — RustScale organization-tailnet script comparison and safe probe policy.
 - `docs/lobby-service.md` — HTTP routes, lifecycle, dry-run, configuration, and trust boundaries.
+- `docs/godot-m0.md` — Godot/GDExtension setup, commands, M0 contract, and platform caveats.
 - `.github/workflows/ci.yml` — continuous integration gates.
 
 ## Development commands
@@ -34,6 +37,9 @@ Use the `justfile` recipes when available:
 - `just serve-dry` — run `spurfire-server` on loopback with zero provider mutations.
 - `cargo run -p spurfire-server -- --help` — inspect server options.
 - `just e2e` — run the live, credentialed Tailscale smoke test.
+- `just game-build [debug|release]` — build and install the native GDExtension.
+- `just game-test` — run bounded headless Godot import and M0 smoke tests.
+- `just game-editor` / `just game-run` — open or run the Godot project.
 - `just clean` — remove build artifacts.
 
 The workspace requires Rust 1.91 or newer.
@@ -58,9 +64,11 @@ Organization and child OAuth credentials are control-plane secrets. They must ne
 
 See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changing either verdict.
 
-## RustScale caveat
+## Godot and RustScale caveats
 
-The sibling repository `/Users/rajsingh/Documents/GitHub/rustscale` is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. A Rust-only prototype is currently feasible, but production all-platform embedding is not. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
+Godot 4.7.1 with Rust GDExtension is the accepted game stack. Keep engine-facing scenes and content in `game/` and gameplay classes in `crates/spurfire-gdext/`; never commit generated libraries under `game/bin/`. M0 is movement-only, and RustScale integration starts only after the movement acceptance checks in `docs/godot-m0.md` pass.
+
+The sibling repository `/Users/rajsingh/Documents/GitHub/rustscale` is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. In-process Rust integration is feasible, but production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
 
 ## Agent worktree pattern
 
@@ -68,17 +76,17 @@ For parallel agent work, create one branch and sibling worktree per disjoint tas
 
 ## Model routing policy
 
-- Design work: `ai/moonshotai/kimi-k3` — limited quantity; use sparingly.
-- Execution and coding: `openai-codex/gpt-5.6-sol`.
+- Game/control-plane design work: `ai/moonshotai/kimi-k3` — limited quantity; use sparingly.
+- Rust, GDExtension, Godot integration, automation, and other execution work: `openai-codex/gpt-5.6-sol`.
 
 ## Blocking open questions
 
-1. **Game engine:** no engine is selected; this blocks data-plane implementation and determines whether RustScale's current Rust API or incomplete C ABI can be used.
-2. **Ranked verification:** peer-hosted ranked results need a trust model, such as co-signing or a witness/replay-validation service; none is selected.
+1. **Ranked verification:** peer-hosted ranked results need a trust model, such as co-signing or a witness/replay-validation service; none is selected.
 
 ## Known issues
 
 - Tailnet-per-lobby prototype secrets are process-local; restart makes retained child lobbies `cleanup_pending` with manual remediation until an encrypted secret manager/reconciler is integrated.
 - Child one-use auth-key issuance is implemented and mock-tested but was not live-mutated in this correction workflow.
 - Shared-tailnet live provisioning is blocked by the historical OAuth client's insufficient auth-key, device, and ACL permissions.
-- RustScale's C ABI lacks gameplay UDP, RTT/status telemetry is incomplete, and peer-relay Hostinfo advertisement may regress during refresh; track these in the sibling repository.
+- Godot desktop native-library packaging is automated but mobile, console, Windows ARM64, and large-world/16-rider performance remain unvalidated.
+- RustScale's C ABI lacks gameplay UDP, RTT/status telemetry is incomplete, and peer-relay Hostinfo advertisement may regress during refresh; track these in the sibling repository after M0 movement validation.
