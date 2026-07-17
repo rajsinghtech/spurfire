@@ -38,7 +38,7 @@ Use the `justfile` recipes when available:
 - `cargo run -p spurfire-server -- --help` — inspect server options.
 - `just e2e` — run the live, credentialed Tailscale smoke test.
 - `just game-build [debug|release]` — build and install the native GDExtension.
-- `just game-test` — run bounded headless Godot import and M0 smoke tests.
+- `just game-test` — run the bounded headless Godot M0 smoke scene.
 - `just game-editor` / `just game-run` — open or run the Godot project.
 - `just clean` — remove build artifacts.
 

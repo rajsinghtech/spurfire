@@ -20,7 +20,7 @@ just game-build
 just game-editor
 ```
 
-Godot loads `game/bin/macos/libspurfire_gdext.dylib`. The Rust and Godot architectures must match.
+Godot loads `game/bin/macos/libspurfire_godot.<profile>.<arch>.dylib` (for example, `libspurfire_godot.debug.arm64.dylib`). The Rust and Godot architectures must match.
 
 ### Linux
 
@@ -31,7 +31,7 @@ just game-build
 just game-test
 ```
 
-The extension is copied to `game/bin/linux/libspurfire_gdext.so`. CI exercises the x86_64 Linux path.
+The extension is copied to `game/bin/linux/libspurfire_godot.<profile>.<arch>.so`. CI exercises the x86_64 Linux path.
 
 ### Windows
 
@@ -43,13 +43,13 @@ just game-build
 just game-test
 ```
 
-The extension is copied to `game/bin/windows/spurfire_gdext.dll`. Do not mix the GNU and MSVC Rust toolchains. Native ARM64 Windows is detected, but remains a platform-validation caveat until Godot, gdext, and packaging are exercised together on that target.
+The extension is copied to `game/bin/windows/spurfire_godot.<profile>.<arch>.dll`. Do not mix the GNU and MSVC Rust toolchains. Native ARM64 Windows remains a platform-validation caveat until Godot, gdext, and packaging are exercised together on that target.
 
 ## Commands
 
 - `just game-build` — debug build of `spurfire-gdext` and install the native library.
 - `just game-build release` — optimized build and install.
-- `just game-test` — bounded headless project import plus `res://tests/m0_smoke.gd`.
+- `just game-test` — bounded execution of `res://scenes/headless_smoke.tscn` with headless display and dummy audio drivers.
 - `just game-editor` — open the project in Godot.
 - `just game-run` — run the project.
 
@@ -78,4 +78,4 @@ M0 contains no weapons, Saddle Dive, networking, external art, or non-graybox an
 
 ## CI and troubleshooting
 
-The Linux game job pins Godot 4.7.1, verifies the downloaded archive with the release SHA-512 manifest, builds the debug extension, imports the project, and runs the smoke test. A failure to load the extension usually means the library is absent, has the wrong architecture, or has unresolved system libraries. Run `scripts/build-gdext.sh debug`, then launch Godot from a terminal to retain loader diagnostics.
+The Linux game job pins Godot 4.7.1, verifies the downloaded archive with the release SHA-512 manifest, builds the debug extension, and runs the headless smoke scene. A failure to load the extension usually means the library is absent, has the wrong architecture, or has unresolved system libraries. Run `scripts/build-gdext.sh debug`, then launch Godot from a terminal to retain loader diagnostics.

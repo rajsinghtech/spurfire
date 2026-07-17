@@ -14,5 +14,6 @@ func _ready() -> void:
 		push_error("Could not load graybox course: %s" % MAIN_SCENE)
 		$Panel/Margin/VBox/Error.text = "Graybox course failed to load. See debugger output."
 		return
-	get_tree().root.add_child(packed.instantiate())
-	queue_free()
+	# SceneTree is still attaching the bootstrap scene during _ready(). Defer the
+	# replacement rather than adding another root child while that operation is active.
+	get_tree().change_scene_to_packed.call_deferred(packed)

@@ -17,9 +17,9 @@ platform_details() {
   uname_m="$(uname -m)"
 
   case "$uname_s" in
-    Darwin) platform="macos"; library="libspurfire_gdext.dylib" ;;
-    Linux) platform="linux"; library="libspurfire_gdext.so" ;;
-    MINGW*|MSYS*|CYGWIN*) platform="windows"; library="spurfire_gdext.dll" ;;
+    Darwin) platform="macos"; source_library="libspurfire_godot.dylib"; extension="dylib" ;;
+    Linux) platform="linux"; source_library="libspurfire_godot.so"; extension="so" ;;
+    MINGW*|MSYS*|CYGWIN*) platform="windows"; source_library="spurfire_godot.dll"; extension="dll" ;;
     *) echo "error: unsupported operating system: $uname_s" >&2; return 1 ;;
   esac
 
@@ -32,11 +32,11 @@ platform_details() {
 
 self_test() {
   platform_details
-  case "$platform:$library" in
+  case "$platform:$source_library" in
     macos:*.dylib|linux:*.so|windows:*.dll) ;;
     *) echo "error: platform/library mapping is invalid" >&2; return 1 ;;
   esac
-  printf 'build-gdext self-test: %s/%s -> %s\n' "$platform" "$arch" "$library"
+  printf 'build-gdext self-test: %s/%s -> %s\n' "$platform" "$arch" "$source_library"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -61,18 +61,23 @@ if [[ -n "$target_dir_setting" && "$target_dir_setting" != /* ]]; then
 else
   target_dir="${target_dir_setting:-$repo_root/target}"
 fi
-source_library="$target_dir/$profile/$library"
+source_path="$target_dir/$profile/$source_library"
 destination_dir="$repo_root/game/bin/$platform"
+if [[ "$platform" == "windows" ]]; then
+  destination_library="spurfire_godot.$profile.$arch.$extension"
+else
+  destination_library="libspurfire_godot.$profile.$arch.$extension"
+fi
 cargo_bin="${CARGO:-cargo}"
 
 printf 'Building spurfire-gdext (%s) for %s/%s...\n' "$profile" "$platform" "$arch"
 "$cargo_bin" build --locked -p spurfire-gdext "${cargo_profile_args[@]}"
 
-if [[ ! -f "$source_library" ]]; then
-  echo "error: Cargo succeeded but $source_library was not produced" >&2
+if [[ ! -f "$source_path" ]]; then
+  echo "error: Cargo succeeded but $source_path was not produced" >&2
   exit 1
 fi
 
 mkdir -p "$destination_dir"
-cp -f "$source_library" "$destination_dir/$library"
-printf 'Installed %s\n' "$destination_dir/$library"
+cp -f "$source_path" "$destination_dir/$destination_library"
+printf 'Installed %s\n' "$destination_dir/$destination_library"

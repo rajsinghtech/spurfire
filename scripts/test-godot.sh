@@ -5,11 +5,11 @@ usage() {
   cat <<'EOF'
 Usage: scripts/test-godot.sh [--self-test]
 
-Imports the Godot project and runs its M0 smoke test headlessly.
+Loads the Godot project and runs its M0 smoke scene headlessly.
 Environment:
   GODOT_BIN             Godot executable (auto-detected if unset)
   GODOT_TIMEOUT_SECONDS Per-command timeout, default 120
-  GODOT_SMOKE_SCRIPT    Project-relative script, default res://tests/m0_smoke.gd
+  GODOT_SMOKE_SCENE     Project-relative scene, default res://scenes/headless_smoke.tscn
 EOF
 }
 
@@ -71,7 +71,7 @@ esac
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_dir="$repo_root/game"
 timeout_seconds="${GODOT_TIMEOUT_SECONDS:-120}"
-smoke_script="${GODOT_SMOKE_SCRIPT:-res://tests/m0_smoke.gd}"
+smoke_scene="${GODOT_SMOKE_SCENE:-res://scenes/headless_smoke.tscn}"
 godot_bin="$(find_godot)"
 
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
@@ -83,7 +83,27 @@ if [[ ! -f "$project_dir/project.godot" ]]; then
   exit 1
 fi
 
-printf 'Importing Godot project (timeout %ss)...\n' "$timeout_seconds"
-run_bounded "$timeout_seconds" "$godot_bin" --headless --path "$project_dir" --import
-printf 'Running %s (timeout %ss)...\n' "$smoke_script" "$timeout_seconds"
-run_bounded "$timeout_seconds" "$godot_bin" --headless --path "$project_dir" --script "$smoke_script"
+printf 'Running %s headlessly (timeout %ss)...\n' "$smoke_scene" "$timeout_seconds"
+run_bounded "$timeout_seconds" "$godot_bin" \
+  --headless \
+  --display-driver headless \
+  --audio-driver Dummy \
+  --path "$project_dir" \
+  --scene "$smoke_scene"
+
+# The dedicated smoke scene validates the native class and course contract, while a short run of
+# the configured main scene catches bootstrap/deferred-scene-change errors that the smoke scene
+# intentionally bypasses.
+runtime_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-runtime.XXXXXX")"
+trap 'rm -f "$runtime_log"' EXIT
+printf 'Running configured main scene for 30 frames...\n'
+run_bounded "$timeout_seconds" "$godot_bin" \
+  --headless \
+  --display-driver headless \
+  --audio-driver Dummy \
+  --path "$project_dir" \
+  --quit-after 30 2>&1 | tee "$runtime_log"
+if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$runtime_log"; then
+  echo "error: Godot main-scene smoke emitted an error" >&2
+  exit 1
+fi
