@@ -1,6 +1,5 @@
-# Spurfire task runner. Portable across macOS and Linux.
-# On Windows, run via `just` with PowerShell 7 (pwsh) as the shell:
-#   set shell := ["pwsh", "-c"]   (or: just --shell pwsh --shell-arg -c <recipe>)
+# Spurfire task runner. Uses a POSIX shell on macOS/Linux and Git Bash on Windows.
+# Game helper scripts explicitly require Bash.
 
 set dotenv-load := false
 
@@ -23,6 +22,22 @@ lint:
 # Run the test suite
 test:
     cargo test --locked
+
+# Build and install the Godot GDExtension (profile: debug or release)
+game-build profile="debug":
+    scripts/build-gdext.sh "{{profile}}"
+
+# Build, import, and run the Godot M0 smoke test headlessly
+game-test: game-build
+    scripts/test-godot.sh
+
+# Build and open the Godot editor
+game-editor: game-build
+    @godot_bin="${GODOT_BIN:-}"; if [ -z "$godot_bin" ]; then godot_bin="$(command -v godot4 || command -v godot || true)"; fi; [ -n "$godot_bin" ] || { echo "error: Godot 4 not found; set GODOT_BIN" >&2; exit 1; }; "$godot_bin" --editor --path game
+
+# Build and run the Godot project
+game-run: game-build
+    @godot_bin="${GODOT_BIN:-}"; if [ -z "$godot_bin" ]; then godot_bin="$(command -v godot4 || command -v godot || true)"; fi; [ -n "$godot_bin" ] || { echo "error: Godot 4 not found; set GODOT_BIN" >&2; exit 1; }; "$godot_bin" --path game
 
 # Run the HTTP service in zero-mutation mode on loopback
 serve-dry:

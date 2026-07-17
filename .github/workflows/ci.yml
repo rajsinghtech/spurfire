@@ -39,6 +39,53 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+  game:
+    name: Godot / Rust M0 (Linux)
+    runs-on: ubuntu-latest
+    env:
+      GODOT_VERSION: 4.7.1
+      GODOT_TIMEOUT_SECONDS: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Godot runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2t64 libfontconfig1 libgl1 libxi6 libxcursor1 libxinerama1 libxrandr2 unzip
+
+      - name: Download and verify pinned Godot
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="${GODOT_VERSION}-stable"
+          archive="Godot_v${release}_linux.x86_64.zip"
+          base_url="https://github.com/godotengine/godot/releases/download/${release}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$archive" "$base_url/$archive"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output SHA512-SUMS.txt "$base_url/SHA512-SUMS.txt"
+          grep -F "  $archive" SHA512-SUMS.txt > SHA512-SUMS.godot
+          test "$(wc -l < SHA512-SUMS.godot)" -eq 1
+          sha512sum --check SHA512-SUMS.godot
+          unzip -q "$archive"
+          sudo install -m 0755 "Godot_v${release}_linux.x86_64" /usr/local/bin/godot4
+          godot4 --version
+
+      - name: Validate game scripts
+        run: |
+          bash -n scripts/build-gdext.sh scripts/test-godot.sh
+          scripts/build-gdext.sh --self-test
+          scripts/test-godot.sh --self-test
+
+      - name: Build extension and run headless smoke tests
+        run: |
+          scripts/build-gdext.sh debug
+          scripts/test-godot.sh
+
   e2e:
     name: e2e (Tailscale API, manual)
     # Manual trigger only — never runs on PRs or pushes. Requires the
