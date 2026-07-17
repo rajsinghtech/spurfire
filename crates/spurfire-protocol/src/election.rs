@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(second.input_hash, third.input_hash);
         assert_eq!(
             first.input_hash.to_string(),
-            "55a5fc1bed2c4f7248bd4eed71680ed085e9417f996460d603310f3ef4b397c4"
+            "17cf06fe708c150eb8dbf8d5f15139d5e8c828143fe388dec2d200d83b8cf286"
         );
     }
 

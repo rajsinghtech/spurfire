@@ -2206,6 +2206,9 @@ fn normalize_planar(value: [i128; 2]) -> Option<[i32; 2]> {
 }
 
 fn rotate_planar(base: [i32; 2], angle_millidegrees: i32) -> [i32; 2] {
+    if angle_millidegrees.rem_euclid(360_000) == 0 {
+        return base;
+    }
     let (cosine, sine) = cordic_sin_cos(angle_millidegrees);
     let x = div_round_half_away(
         i128::from(base[0]) * cosine + i128::from(base[1]) * sine,
