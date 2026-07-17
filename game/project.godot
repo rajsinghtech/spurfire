@@ -2,7 +2,8 @@
 config_version=5
 
 [application]
-config/name="Spurfire Graybox"
+config/name="Spurfire"
+config/version="0.1.1"
 run/main_scene="res://scenes/bootstrap.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 

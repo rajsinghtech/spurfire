@@ -9,8 +9,8 @@ use std::{
 
 use axum::{
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -58,6 +58,7 @@ const MAX_PROVIDER_CONCURRENCY: usize = 16;
 const PROVIDER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FINAL_SCORE_ABS: i64 = 1_000_000;
 const MAX_MATCH_DURATION_S: u32 = 60 * 60;
+const LANDING_HTML: &str = include_str!("landing.html");
 
 /// Cloneable application dependencies shared by every Axum handler.
 #[derive(Clone)]
@@ -157,6 +158,7 @@ impl fmt::Debug for AppState {
 /// Builds the complete HTTP router.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(landing))
         .route("/healthz", get(healthz))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/lobbies", post(create_lobby))
@@ -190,6 +192,25 @@ pub fn build_router(state: AppState) -> Router {
 /// Alias that reads naturally in embedders.
 pub fn router(state: AppState) -> Router {
     build_router(state)
+}
+
+async fn landing() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    (headers, Html(LANDING_HTML))
 }
 
 #[derive(Serialize)]

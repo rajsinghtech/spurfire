@@ -367,6 +367,27 @@ async fn make_ready(app: &Router, lobby_id: &str, players: &[(&str, u32)]) {
 }
 
 #[tokio::test]
+async fn landing_page_links_public_downloads_and_sets_browser_headers() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(0)));
+    let provider = Arc::new(DryRunProvider::new());
+    let (app, _, _) = dry_app(clock, provider);
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert!(response.headers().contains_key("content-security-policy"));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("High noon. Low ping."));
+    assert!(html.contains("github.com/rajsinghtech/spurfire/releases/latest"));
+}
+
+#[tokio::test]
 async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     let clock = Arc::new(ManualClock::new(UnixMillis::new(1_000_000)));
     let provider = Arc::new(DryRunProvider::new());
