@@ -1,0 +1,56 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/weapons/kenney-blaster-kit/blaster-f.glb" id="1_model"]
+
+[sub_resource type="StandardMaterial3D" id="Material_wood"]
+albedo_color = Color(0.31, 0.14, 0.055, 1)
+roughness = 0.9
+
+[sub_resource type="StandardMaterial3D" id="Material_gunmetal"]
+albedo_color = Color(0.11, 0.13, 0.15, 1)
+metallic = 0.55
+roughness = 0.62
+
+[sub_resource type="BoxMesh" id="Mesh_stock"]
+material = SubResource("Material_wood")
+size = Vector3(0.17, 0.15, 0.33)
+
+[sub_resource type="CylinderMesh" id="Mesh_band"]
+material = SubResource("Material_gunmetal")
+top_radius = 0.074
+bottom_radius = 0.074
+height = 0.09
+radial_segments = 8
+
+[sub_resource type="BoxMesh" id="Mesh_cheek"]
+material = SubResource("Material_wood")
+size = Vector3(0.18, 0.045, 0.25)
+
+[node name="LongspurArt" type="Node3D"]
+metadata/weapon_id = "longspur"
+metadata/source_model = "Kenney Blaster Kit 2.1 / blaster-f.glb"
+metadata/forward_axis = "-Z"
+
+[node name="ModelPivot" type="Node3D" parent="."]
+position = Vector3(0, 0, -0.1)
+
+[node name="KenneyBlasterF" parent="ModelPivot" instance=ExtResource("1_model")]
+
+[node name="WoodStockAccent" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.015, 0.49)
+mesh = SubResource("Mesh_stock")
+
+[node name="WoodCheekAccent" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.12, 0.38)
+mesh = SubResource("Mesh_cheek")
+
+[node name="GunmetalBarrelBand" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0, -0.57)
+rotation_degrees = Vector3(90, 0, 0)
+mesh = SubResource("Mesh_band")
+
+[node name="Grip" type="Marker3D" parent="."]
+position = Vector3(0, -0.14, 0)
+
+[node name="Muzzle" type="Marker3D" parent="."]
+position = Vector3(0, 0, -0.78)
