@@ -3,8 +3,7 @@ use std::f64::consts::PI;
 use godot::classes::{CharacterBody3D, ICharacterBody3D, Input, Marker3D, Node};
 use godot::prelude::*;
 use spurfire_protocol::{
-    HorseRunoutKernel, HorseRunoutState, QuantizedOrigin, SimulationTick,
-    SADDLE_DIVE_TICK_RATE_HZ,
+    HorseRunoutKernel, HorseRunoutState, QuantizedOrigin, SimulationTick, SADDLE_DIVE_TICK_RATE_HZ,
 };
 
 use crate::archetype::{HorseArchetype, HorseStats};
@@ -283,7 +282,10 @@ impl HorseController {
         let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
             return false;
         };
-        if self.last_external_tick.is_some_and(|current| tick <= current) {
+        if self
+            .last_external_tick
+            .is_some_and(|current| tick <= current)
+        {
             return false;
         }
         self.external_simulation_enabled = true;
@@ -310,8 +312,8 @@ impl HorseController {
     pub fn reset_horse(&mut self) {
         self.refresh_spawn();
         let transition = self.kernel.reset();
-        self.runout_kernel = HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
-            .expect("M2 tick rate is nonzero");
+        self.runout_kernel =
+            HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ).expect("M2 tick rate is nonzero");
         self.last_external_tick = None;
         self.assign_runout_properties();
         self.apply_kernel_transform();
@@ -513,8 +515,8 @@ impl HorseController {
         };
 
         if outcome.reset {
-            self.runout_kernel = HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
-                .expect("M2 tick rate is nonzero");
+            self.runout_kernel =
+                HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ).expect("M2 tick rate is nonzero");
             self.assign_runout_properties();
             self.apply_kernel_transform();
         } else {
@@ -539,8 +541,7 @@ impl HorseController {
             HorseRunoutState::IdleRetrievable => 2,
         };
         self.is_retrievable = self.runout_kernel.is_retrievable();
-        self.runout_distance_m =
-            f64::from(self.runout_kernel.cumulative_travel_mm()) / 1_000.0;
+        self.runout_distance_m = f64::from(self.runout_kernel.cumulative_travel_mm()) / 1_000.0;
     }
 
     fn emit_retrievable(&mut self, tick: SimulationTick) {
@@ -943,12 +944,7 @@ fn finite_positive_or(value: f64, fallback: f64) -> f64 {
 }
 
 fn quantized_origin(value: Vector3) -> Option<QuantizedOrigin> {
-    QuantizedOrigin::from_meters(
-        f64::from(value.x),
-        f64::from(value.y),
-        f64::from(value.z),
-    )
-    .ok()
+    QuantizedOrigin::from_meters(f64::from(value.x), f64::from(value.y), f64::from(value.z)).ok()
 }
 
 fn quantized_velocity(value: Vector3) -> [i32; 3] {

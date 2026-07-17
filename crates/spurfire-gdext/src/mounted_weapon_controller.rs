@@ -294,8 +294,8 @@ impl MountedWeaponController {
         {
             return false;
         }
-        let already_equipped = self.kernel.equipped_weapon() == weapon_id
-            && !self.kernel.is_holstered();
+        let already_equipped =
+            self.kernel.equipped_weapon() == weapon_id && !self.kernel.is_holstered();
         let changed = self.kernel.equip_weapon(weapon_id);
         if !changed && !already_equipped {
             return false;
@@ -374,20 +374,21 @@ impl MountedWeaponController {
 
         let riding = self.handling_state();
         let seed = self.kernel.next_spread_seed();
-        let prepared = match self
-            .kernel
-            .request_fire_detailed(tick, direction_quantized, riding, seed)
-        {
-            Ok(prepared) => prepared,
-            Err(rejection) => {
-                self.current_tick = self
-                    .current_tick
-                    .max(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
-                self.record_detailed_rejection(tick, origin, direction, rejection);
-                self.update_runtime_properties();
-                return false;
-            }
-        };
+        let prepared =
+            match self
+                .kernel
+                .request_fire_detailed(tick, direction_quantized, riding, seed)
+            {
+                Ok(prepared) => prepared,
+                Err(rejection) => {
+                    self.current_tick = self
+                        .current_tick
+                        .max(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
+                    self.record_detailed_rejection(tick, origin, direction, rejection);
+                    self.update_runtime_properties();
+                    return false;
+                }
+            };
 
         self.current_tick = self
             .current_tick

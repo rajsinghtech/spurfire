@@ -10,9 +10,8 @@ use spurfire_protocol::{
     LandingTerrain, PlayerId, QuantizedDirection, QuantizedOrigin, RiderMotionObservation,
     RiderStance, SaddleDiveCommand, SaddleDiveEffects, SaddleDiveKernel, SaddleDiveState,
     SaddleDiveTickInput, ShotAttributionLedger, ShotOutcome, ShotResult, SimulationTick, WeaponId,
-    BAD_LANDING_DAMAGE, DIRECTION_UNITS, MOVEMENT_SCALE_FULL_MILLI,
-    MOVEMENT_SCALE_PRONE_MILLI, MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2,
-    SADDLE_DIVE_TICK_RATE_HZ,
+    BAD_LANDING_DAMAGE, DIRECTION_UNITS, MOVEMENT_SCALE_FULL_MILLI, MOVEMENT_SCALE_PRONE_MILLI,
+    MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2, SADDLE_DIVE_TICK_RATE_HZ,
 };
 
 use crate::horse_controller::{HorseController, HorseM2Snapshot};
@@ -116,8 +115,7 @@ impl SaddleDiveController {
         move_input: Vector2,
         weapon_id: i64,
     ) -> bool {
-        let (Ok(tick_value), Ok(weapon_id)) =
-            (u64::try_from(tick), WeaponId::try_from(weapon_id))
+        let (Ok(tick_value), Ok(weapon_id)) = (u64::try_from(tick), WeaponId::try_from(weapon_id))
         else {
             return false;
         };
@@ -186,7 +184,8 @@ impl SaddleDiveController {
         if self.kernel.state() == SaddleDiveState::Mounted {
             self.follow_saddle();
             if let Some(horse) = self.horse() {
-                self.base_mut().set_velocity(horse.bind().m2_snapshot().velocity);
+                self.base_mut()
+                    .set_velocity(horse.bind().m2_snapshot().velocity);
             }
             descending = false;
             landing_normal = None;
@@ -196,8 +195,7 @@ impl SaddleDiveController {
             if self.kernel.state() != SaddleDiveState::SaddleDiveAirborne
                 && !self.base().is_on_floor()
             {
-                velocity.y -= SADDLE_DIVE_GRAVITY_MMPS2 as f32
-                    / SADDLE_DIVE_TICK_RATE_HZ as f32;
+                velocity.y -= SADDLE_DIVE_GRAVITY_MMPS2 as f32 / SADDLE_DIVE_TICK_RATE_HZ as f32;
                 self.base_mut().set_velocity(velocity);
             }
             descending = velocity.y <= 0.0;
@@ -270,9 +268,9 @@ impl SaddleDiveController {
         let prelaunch = dive_id
             .and_then(|id| self.kernel.instrumentation_row(id))
             .map_or([0; 2], |row| row.prelaunch_velocity_mmps);
-        let gait = self
-            .horse()
-            .map_or(CombatGait::Idle, |horse| combat_gait(horse.bind().m2_snapshot().gait));
+        let gait = self.horse().map_or(CombatGait::Idle, |horse| {
+            combat_gait(horse.bind().m2_snapshot().gait)
+        });
         let shot = AcceptedShotMetadata {
             shooter: self.kernel.actor(),
             tick,
@@ -296,7 +294,8 @@ impl SaddleDiveController {
     /// retained acceptance metadata, never from client claims.
     #[func]
     pub fn record_authority_result(&mut self, result: VarDictionary) -> bool {
-        let Some(tick_value) = dictionary_i64(&result, "tick").and_then(|value| u64::try_from(value).ok())
+        let Some(tick_value) =
+            dictionary_i64(&result, "tick").and_then(|value| u64::try_from(value).ok())
         else {
             return false;
         };
@@ -331,8 +330,8 @@ impl SaddleDiveController {
         let damage = dictionary_i64(&result, "damage")
             .and_then(|value| u16::try_from(value).ok())
             .unwrap_or(0);
-        let resolved_direction = dictionary_vector3(&result, "resolved_direction")
-            .and_then(quantized_direction);
+        let resolved_direction =
+            dictionary_vector3(&result, "resolved_direction").and_then(quantized_direction);
         let shot_result = ShotResult {
             tick,
             shooter_peer_id: self.kernel.actor(),
@@ -506,7 +505,8 @@ impl ICharacterBody3D for SaddleDiveController {
 
 impl SaddleDiveController {
     fn horse(&self) -> Option<Gd<HorseController>> {
-        self.base().try_get_node_as::<HorseController>(&self.horse_path)
+        self.base()
+            .try_get_node_as::<HorseController>(&self.horse_path)
     }
 
     fn weapon_controller(&self) -> Option<Gd<MountedWeaponController>> {
@@ -542,7 +542,8 @@ impl SaddleDiveController {
             SaddleDiveState::Mounted => {
                 self.follow_saddle();
                 if let Some(horse) = self.horse() {
-                    self.base_mut().set_velocity(horse.bind().m2_snapshot().velocity);
+                    self.base_mut()
+                        .set_velocity(horse.bind().m2_snapshot().velocity);
                 }
             }
             SaddleDiveState::LandingProne
@@ -680,11 +681,9 @@ impl SaddleDiveController {
                 (SaddleDiveState::LandingProne, SaddleDiveState::LandingRecovery) => {
                     if let Some(id) = transition.dive_id {
                         let phase = GString::from("half_speed");
-                        self.signals().recovery_changed().emit(
-                            dive_id_i64(id),
-                            &phase,
-                            0.5,
-                        );
+                        self.signals()
+                            .recovery_changed()
+                            .emit(dive_id_i64(id), &phase, 0.5);
                     }
                 }
                 (SaddleDiveState::LandingRecovery, SaddleDiveState::OnFootReady) => {
@@ -866,12 +865,7 @@ fn finite_planar_or_full(value: Vector3) -> Option<Vector3> {
 }
 
 fn quantized_origin(value: Vector3) -> Option<QuantizedOrigin> {
-    QuantizedOrigin::from_meters(
-        f64::from(value.x),
-        f64::from(value.y),
-        f64::from(value.z),
-    )
-    .ok()
+    QuantizedOrigin::from_meters(f64::from(value.x), f64::from(value.y), f64::from(value.z)).ok()
 }
 
 fn quantized_velocity(value: Vector3) -> [i32; 3] {
@@ -895,8 +889,8 @@ fn mmps_to_vector(value: [i32; 3]) -> Vector3 {
 }
 
 fn impulse_component(direction: i32) -> i32 {
-    ((i64::from(direction) * 6_000 + i64::from(DIRECTION_UNITS) / 2)
-        / i64::from(DIRECTION_UNITS)) as i32
+    ((i64::from(direction) * 6_000 + i64::from(DIRECTION_UNITS) / 2) / i64::from(DIRECTION_UNITS))
+        as i32
 }
 
 fn finite_positive_or(value: f64, fallback: f64) -> f64 {
@@ -1050,7 +1044,9 @@ fn gameplay_event_dictionary(event: &GameplayEventRow) -> VarDictionary {
     result.set("dive_id", event.dive_id.map_or(-1, dive_id_i64));
     result.set(
         "weapon_id",
-        event.weapon_id.map_or(-1, |weapon| i64::from(weapon.as_u8())),
+        event
+            .weapon_id
+            .map_or(-1, |weapon| i64::from(weapon.as_u8())),
     );
     result.set(
         "target_id",
@@ -1133,7 +1129,9 @@ fn set_optional_bool(result: &mut VarDictionary, key: &str, value: Option<bool>)
 }
 
 fn dictionary_i64(dictionary: &VarDictionary, key: &str) -> Option<i64> {
-    dictionary.get(key).and_then(|value| value.try_to::<i64>().ok())
+    dictionary
+        .get(key)
+        .and_then(|value| value.try_to::<i64>().ok())
 }
 
 fn dictionary_string(dictionary: &VarDictionary, key: &str) -> Option<String> {
@@ -1163,10 +1161,7 @@ mod tests {
 
     #[test]
     fn gameplay_event_names_match_presentation_contract() {
-        assert_eq!(
-            GameplayEventKind::FlyingDismount.text(),
-            "FLYING DISMOUNT"
-        );
+        assert_eq!(GameplayEventKind::FlyingDismount.text(), "FLYING DISMOUNT");
         assert_eq!(
             GameplayEventKind::SaddleDiveHeadshot.text(),
             "SADDLE DIVE HEADSHOT"
@@ -1182,7 +1177,10 @@ mod tests {
     fn invalid_vectors_are_conservative() {
         assert!(quantized_direction(Vector3::ZERO).is_none());
         assert!(quantized_direction(Vector3::new(f32::NAN, 0.0, 0.0)).is_none());
-        assert_eq!(finite_move_input(Vector2::new(f32::NAN, 0.0)), Vector2::ZERO);
+        assert_eq!(
+            finite_move_input(Vector2::new(f32::NAN, 0.0)),
+            Vector2::ZERO
+        );
     }
 
     #[test]

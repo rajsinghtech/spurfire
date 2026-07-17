@@ -139,7 +139,10 @@ impl NetworkRider {
         result.set("distance_m", f64::from(correction.distance_m));
         result.set("snap", correction.snap);
         result.set("stance_mismatch", correction.stance_mismatch);
-        result.set("authoritative_stance_id", i64::from(authoritative_stance.as_u8()));
+        result.set(
+            "authoritative_stance_id",
+            i64::from(authoritative_stance.as_u8()),
+        );
         result
     }
 }

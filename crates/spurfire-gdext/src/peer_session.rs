@@ -286,8 +286,7 @@ impl PeerSession {
         if !yaw.is_finite()
             || yaw < f64::from(i32::MIN)
             || yaw > f64::from(i32::MAX)
-            || !(RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID)
-                .contains(&stance_id)
+            || !(RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID).contains(&stance_id)
         {
             return PackedByteArray::new();
         }
