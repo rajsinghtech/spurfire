@@ -10,8 +10,9 @@ permissions:
 
 jobs:
   test:
-    name: fmt / clippy / test (${{ matrix.os }})
+    name: Rust source gates (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -29,21 +30,24 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: Install checksum-verified just
+        shell: bash
+        run: scripts/install-just-ci.sh
+
+      - name: Validate release metadata
+        shell: bash
+        run: scripts/check-release-metadata.sh
 
       - name: cargo check (locked)
         run: cargo check --locked --all-targets
 
-      - name: cargo clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --locked
+      - name: just check
+        run: just check
 
   game:
-    name: Godot / Rust M0 (Linux)
+    name: Godot / Rust M2 (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GODOT_VERSION: 4.7.1
       GODOT_TIMEOUT_SECONDS: 120
@@ -57,6 +61,9 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Install checksum-verified just
+        run: scripts/install-just-ci.sh
 
       - name: Install Godot runtime dependencies
         run: |
@@ -79,16 +86,15 @@ jobs:
           sudo install -m 0755 "Godot_v${release}_linux.x86_64" /usr/local/bin/godot4
           godot4 --version
 
-      - name: Validate game scripts
+      - name: Validate game and release helpers
         run: |
-          bash -n scripts/build-gdext.sh scripts/test-godot.sh
+          bash -n scripts/build-gdext.sh scripts/test-godot.sh scripts/install-just-ci.sh scripts/check-release-metadata.sh
           scripts/build-gdext.sh --self-test
           scripts/test-godot.sh --self-test
+          scripts/check-release-metadata.sh
 
-      - name: Build extension and run headless smoke tests
-        run: |
-          scripts/build-gdext.sh debug
-          scripts/test-godot.sh
+      - name: Build extension and run bounded smoke tests
+        run: just game-test
 
   e2e:
     name: e2e (Tailscale API, manual)

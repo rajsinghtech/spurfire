@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Validate the version contract shared by the server, client, chart, lockfile, and release notes.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+manifest_version() {
+  awk '
+    /^\[package\]$/ { package = 1; next }
+    package && /^\[/ { exit }
+    package && /^version = / {
+      gsub(/[" ]/, "", $3)
+      print $3
+      exit
+    }
+  ' "$1"
+}
+
+lock_version() {
+  local package_name="$1"
+  awk -v package_name="$package_name" '
+    /^\[\[package\]\]$/ { package = 0; next }
+    $0 == "name = \"" package_name "\"" { package = 1; next }
+    package && /^version = / {
+      gsub(/[" ]/, "", $3)
+      print $3
+      exit
+    }
+  ' Cargo.lock
+}
+
+require_equal() {
+  local label="$1" actual="$2" expected="$3"
+  if [[ -z "$actual" || "$actual" != "$expected" ]]; then
+    printf 'error: %s is %q; expected %q\n' "$label" "$actual" "$expected" >&2
+    exit 1
+  fi
+}
+
+version="$(manifest_version crates/spurfire-server/Cargo.toml)"
+semver_regex='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+[[ "$version" =~ $semver_regex ]] || {
+  echo "error: invalid spurfire-server release version: $version" >&2
+  exit 1
+}
+
+if [[ $# -gt 1 ]]; then
+  echo "usage: scripts/check-release-metadata.sh [expected-version]" >&2
+  exit 2
+fi
+if [[ $# -eq 1 ]]; then
+  require_equal "requested release version" "$version" "$1"
+fi
+
+require_equal "Cargo.lock spurfire-server version" "$(lock_version spurfire-server)" "$version"
+
+chart_version="$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' charts/spurfire-control/Chart.yaml)"
+chart_app_version="$(awk '$1 == "appVersion:" { gsub(/"/, "", $2); print $2; exit }' charts/spurfire-control/Chart.yaml)"
+require_equal "Helm chart version" "$chart_version" "$version"
+require_equal "Helm chart appVersion" "$chart_app_version" "$version"
+
+game_version="$(awk -F= '$1 == "config/version" { gsub(/"/, "", $2); print $2; exit }' game/project.godot)"
+require_equal "Godot config/version" "$game_version" "$version"
+
+for crate in cli control gdext net protocol; do
+  package="spurfire-$crate"
+  require_equal "$package manifest version" "$(manifest_version "crates/spurfire-$crate/Cargo.toml")" "0.1.0"
+  require_equal "$package lockfile version" "$(lock_version "$package")" "0.1.0"
+done
+
+notes="docs/release-notes-${version}.md"
+[[ -s "$notes" ]] || {
+  echo "error: missing release notes: $notes" >&2
+  exit 1
+}
+require_equal "release-note heading" "$(sed -n '1p' "$notes")" "# Spurfire $version"
+grep -Fqx '## Playtest status' "$notes" || {
+  echo "error: $notes must contain an explicit Playtest status section" >&2
+  exit 1
+}
+grep -Fqi 'playtest pending' "$notes" || {
+  echo "error: $notes must say that observational playtesting is pending" >&2
+  exit 1
+}
+
+grep -Fq "Release candidate v${version}" crates/spurfire-server/src/landing.html || {
+  echo "error: landing page source version does not match $version" >&2
+  exit 1
+}
+grep -Fq 'Open latest published release' crates/spurfire-server/src/landing.html || {
+  echo "error: landing page must not claim that the release candidate is already published" >&2
+  exit 1
+}
+
+printf '%s\n' "$version"
