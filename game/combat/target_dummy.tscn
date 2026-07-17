@@ -1,0 +1,70 @@
+[gd_scene load_steps=9 format=3]
+
+[ext_resource type="Script" path="res://scripts/combat_target_dummy.gd" id="1"]
+[sub_resource type="StandardMaterial3D" id="BodyMat"]
+resource_local_to_scene = true
+albedo_color = Color(0.12, 0.7, 0.78, 1)
+roughness = 0.8
+[sub_resource type="StandardMaterial3D" id="HeadMat"]
+resource_local_to_scene = true
+albedo_color = Color(1, 0.67, 0.22, 1)
+roughness = 0.8
+[sub_resource type="BoxMesh" id="BodyMesh"]
+material = SubResource("BodyMat")
+size = Vector3(0.86, 1.35, 0.34)
+[sub_resource type="SphereMesh" id="HeadMesh"]
+material = SubResource("HeadMat")
+radius = 0.36
+height = 0.72
+radial_segments = 12
+rings = 6
+[sub_resource type="BoxShape3D" id="BodyShape"]
+size = Vector3(0.9, 1.4, 0.42)
+[sub_resource type="SphereShape3D" id="HeadShape"]
+radius = 0.38
+[sub_resource type="BoxMesh" id="BaseMesh"]
+material = SubResource("HeadMat")
+size = Vector3(1.45, 0.2, 0.8)
+
+[node name="TargetDummy" type="Node3D"]
+script = ExtResource("1")
+
+[node name="Base" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.1, 0)
+mesh = SubResource("BaseMesh")
+
+[node name="BodyZone" type="StaticBody3D" parent="."]
+unique_name_in_owner = true
+position = Vector3(0, 1.0, 0)
+metadata/target_id = 1
+metadata/hit_zone = "body"
+
+[node name="BodyMesh" type="MeshInstance3D" parent="BodyZone"]
+unique_name_in_owner = true
+mesh = SubResource("BodyMesh")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="BodyZone"]
+shape = SubResource("BodyShape")
+
+[node name="HeadZone" type="StaticBody3D" parent="."]
+unique_name_in_owner = true
+position = Vector3(0, 2.02, 0)
+metadata/target_id = 1
+metadata/hit_zone = "head"
+
+[node name="HeadMesh" type="MeshInstance3D" parent="HeadZone"]
+unique_name_in_owner = true
+mesh = SubResource("HeadMesh")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="HeadZone"]
+shape = SubResource("HeadShape")
+
+[node name="Vitality" type="Label3D" parent="."]
+unique_name_in_owner = true
+position = Vector3(0, 2.7, 0)
+modulate = Color(1, 0.95, 0.78, 1)
+text = "100 / 100"
+font_size = 36
+outline_size = 8
+billboard = 1
+no_depth_test = true

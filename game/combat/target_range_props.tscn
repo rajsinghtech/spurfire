@@ -1,0 +1,62 @@
+[gd_scene load_steps=9 format=3]
+
+[sub_resource type="StandardMaterial3D" id="Sand"]
+albedo_color = Color(0.87, 0.57, 0.24, 1)
+roughness = 1.0
+[sub_resource type="StandardMaterial3D" id="Teal"]
+albedo_color = Color(0.06, 0.52, 0.56, 1)
+roughness = 0.82
+[sub_resource type="StandardMaterial3D" id="Red"]
+albedo_color = Color(0.82, 0.18, 0.2, 1)
+roughness = 0.82
+[sub_resource type="BoxMesh" id="Deck"]
+material = SubResource("Sand")
+size = Vector3(18, 0.25, 8)
+[sub_resource type="BoxMesh" id="Wall"]
+material = SubResource("Teal")
+size = Vector3(1.1, 2.2, 0.42)
+[sub_resource type="CylinderMesh" id="Post"]
+material = SubResource("Red")
+top_radius = 0.18
+bottom_radius = 0.25
+height = 2.4
+[sub_resource type="PrismMesh" id="Roof"]
+material = SubResource("Red")
+size = Vector3(3.4, 1.0, 1.4)
+[sub_resource type="BoxMesh" id="Rail"]
+material = SubResource("Sand")
+size = Vector3(5.5, 0.22, 0.22)
+
+[node name="TargetRangeProps" type="Node3D"]
+
+[node name="FiringDeck" type="MeshInstance3D" parent="."]
+mesh = SubResource("Deck")
+
+[node name="LaneWallLeft" type="MeshInstance3D" parent="."]
+position = Vector3(-4.4, 1.1, -4)
+mesh = SubResource("Wall")
+
+[node name="LaneWallRight" type="MeshInstance3D" parent="."]
+position = Vector3(4.4, 1.1, -4)
+mesh = SubResource("Wall")
+
+[node name="RangePostLeft" type="MeshInstance3D" parent="."]
+position = Vector3(-2.8, 1.2, 2.8)
+mesh = SubResource("Post")
+
+[node name="RangePostRight" type="MeshInstance3D" parent="."]
+position = Vector3(2.8, 1.2, 2.8)
+mesh = SubResource("Post")
+
+[node name="Header" type="MeshInstance3D" parent="."]
+position = Vector3(0, 2.45, 2.8)
+rotation = Vector3(0, 1.5708, 0)
+mesh = SubResource("Roof")
+
+[node name="SafetyRailNear" type="MeshInstance3D" parent="."]
+position = Vector3(0, 1.15, 2.8)
+mesh = SubResource("Rail")
+
+[node name="SafetyRailFar" type="MeshInstance3D" parent="."]
+position = Vector3(0, 1.15, -2.8)
+mesh = SubResource("Rail")
