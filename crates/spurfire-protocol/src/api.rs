@@ -645,6 +645,23 @@ mod tests {
     }
 
     #[test]
+    fn join_accepts_minor_difference_and_rejects_major_difference() {
+        let mut request = JoinLobbyRequest {
+            player_id: player_id(),
+            display_name: "Rider".into(),
+            client_wire_version: WireVersion::new(WIRE_VERSION.major(), 99),
+            horse_selection: None,
+        };
+        assert!(request.validate(WIRE_VERSION).is_ok());
+
+        request.client_wire_version = WireVersion::new(WIRE_VERSION.major() + 1, 0);
+        assert!(matches!(
+            request.validate(WIRE_VERSION),
+            Err(ApiValidationError::WireVersionIncompatible(_))
+        ));
+    }
+
+    #[test]
     fn measurement_dto_ignores_additive_json_fields() {
         let json = format!(
             r#"{{"player_id":"{}","route_summary":{{"direct_count":1,"peer_relay_count":0,"derp_count":0,"new_route":9}},"rtt_ms_median":20,"rtt_ms_worst":30,"jitter_ms":2,"loss_pct_milli":0,"upload_mbps_sustained":20,"device_perf_score":900,"observed_peer_count":1,"future_metric":42}}"#,

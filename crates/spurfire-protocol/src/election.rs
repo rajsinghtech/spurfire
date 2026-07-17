@@ -772,6 +772,35 @@ mod tests {
     }
 
     #[test]
+    fn integer_formula_has_a_pinned_score_breakdown() {
+        let mut scored = candidate(1, 3);
+        scored.measurement.route_summary = RouteSummary {
+            direct_count: 1,
+            peer_relay_count: 1,
+            derp_count: 1,
+        };
+        scored.measurement.rtt_ms_median = 40;
+        scored.measurement.rtt_ms_worst = 80;
+        scored.measurement.jitter_ms = 10;
+        scored.measurement.loss_pct_milli = 1_000;
+        scored.measurement.upload_mbps_sustained = 10;
+        scored.measurement.device_perf_score = 700;
+
+        let breakdown = score_authority_candidate(&scored, 4).unwrap();
+        assert_eq!(breakdown.direct_milli, 333);
+        assert_eq!(breakdown.median_rtt_milli, 800);
+        assert_eq!(breakdown.worst_rtt_milli, 800);
+        assert_eq!(breakdown.jitter_milli, 800);
+        assert_eq!(breakdown.loss_milli, 900);
+        assert_eq!(breakdown.upload_milli, 500);
+        assert_eq!(breakdown.device_performance_milli, 700);
+        assert_eq!(breakdown.weighted_score_milli, 646);
+        assert_eq!(breakdown.derp_relay_penalty_milli, 100);
+        assert_eq!(breakdown.peer_relay_penalty_milli, 50);
+        assert_eq!(breakdown.score_milli, 496);
+    }
+
+    #[test]
     fn relay_penalties_are_explicit_and_change_winner() {
         let direct = candidate(1, 1);
         let mut derp = candidate(2, 1);
