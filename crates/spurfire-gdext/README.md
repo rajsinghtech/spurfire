@@ -14,3 +14,17 @@ workspace's other crates currently support Rust 1.91. The produced library is
 named `spurfire_godot` to match `game/bin/spurfire.gdextension`. Unsafe Rust is
 denied crate-wide; the tiny entrypoint module narrowly permits the mandatory
 `unsafe impl ExtensionLibrary` ABI acknowledgement required by godot-rust.
+
+## M0.5 handling contract
+
+`HorseController` defaults to Mustang (`archetype == 2`). Call
+`set_archetype(0|1|2)` for Courser, Warhorse, or Mustang, read the immutable row
+with `get_archetype_stats()`, and observe `archetype_changed(old, new)`. The
+`archetype` property is read-only. Vitality, mass, and stagger threshold are
+attributes only; combat is intentionally not implemented.
+
+A/D sidesteps only while standing below 1 m/s with no forward command. The
+kernel integrates signed lateral velocity, settles it before W or reverse can
+accelerate, and forces it out at speed so reins remain turning rather than
+shooter strafing. Every 10 Hz telemetry sample includes `archetype`,
+`lateral_speed_mps`, and `max_vitality`.

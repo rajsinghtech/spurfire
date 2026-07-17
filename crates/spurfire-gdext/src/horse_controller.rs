@@ -3,9 +3,10 @@ use std::f64::consts::PI;
 use godot::classes::{CharacterBody3D, ICharacterBody3D, Input, Marker3D, Node};
 use godot::prelude::*;
 
+use crate::archetype::{HorseArchetype, HorseStats};
 use crate::locomotion::{
-    Environment, GaitTransition, HorseKernel, InputFrame, StepOutcome, Telemetry, Tuning,
-    Vec3 as KernelVec3,
+    Environment, GaitTransition, HorseKernel, InputFrame, SidestepBlockReason, StepOutcome,
+    Telemetry, TerrainSurface, Tuning, Vec3 as KernelVec3,
 };
 
 const MOVE_FORWARD: &str = "move_forward";
@@ -121,6 +122,18 @@ pub struct HorseController {
 
     // Read-only runtime properties for scripts, HUD, and camera code.
     #[var(no_set)]
+    archetype: i64,
+    #[var(no_set)]
+    max_vitality: f64,
+    #[var(no_set)]
+    vitality: f64,
+    #[var(no_set)]
+    mass: GString,
+    #[var(no_set)]
+    mass_class: i64,
+    #[var(no_set)]
+    stagger_threshold: f64,
+    #[var(no_set)]
     gait: i64,
     #[var(no_set)]
     current_gait: i64,
@@ -128,6 +141,8 @@ pub struct HorseController {
     speed_mps: f64,
     #[var(no_set)]
     speed_kmh: f64,
+    #[var(no_set)]
+    lateral_speed_mps: f64,
     #[var(no_set)]
     acceleration_mps2: f64,
     #[var(no_set)]
@@ -145,6 +160,8 @@ pub struct HorseController {
     #[var(no_set)]
     turn_radius_m: f64,
     #[var(no_set)]
+    sidestep_blocked_reason: GString,
+    #[var(no_set)]
     last_telemetry: VarDictionary,
 
     kernel: HorseKernel,
@@ -158,7 +175,38 @@ impl HorseController {
     fn gait_changed(old_gait: i64, new_gait: i64);
 
     #[signal]
+    fn archetype_changed(old: i64, new: i64);
+
+    #[signal]
     fn telemetry_updated(telemetry: VarDictionary);
+
+    /// Select 0=Courser, 1=Warhorse, or 2=Mustang.
+    #[func]
+    pub fn set_archetype(&mut self, id: i64) {
+        let Ok(archetype) = HorseArchetype::try_from(id) else {
+            godot_error!(
+                "HorseController rejected archetype id {id}; expected 0=Courser, 1=Warhorse, or 2=Mustang"
+            );
+            return;
+        };
+        let old = self.kernel.archetype();
+        if !self.kernel.set_archetype(archetype) {
+            return;
+        }
+        self.update_archetype_properties();
+        let clamped_velocity = to_godot_vector(self.kernel.state().velocity);
+        self.base_mut().set_velocity(clamped_velocity);
+        self.signals()
+            .archetype_changed()
+            .emit(old.id(), archetype.id());
+        self.emit_telemetry();
+    }
+
+    /// Return the complete locked design row for the active archetype.
+    #[func]
+    pub fn get_archetype_stats(&self) -> VarDictionary {
+        archetype_stats_dictionary(self.kernel.archetype_stats())
+    }
 
     /// Restore the configured spawn marker synchronously.
     #[func]
@@ -175,6 +223,8 @@ impl HorseController {
 impl ICharacterBody3D for HorseController {
     fn init(base: Base<CharacterBody3D>) -> Self {
         let tuning = Tuning::default();
+        let default_archetype = HorseArchetype::default();
+        let default_stats = default_archetype.stats();
         Self {
             base,
             walk_speed: tuning.walk_speed,
@@ -220,10 +270,17 @@ impl ICharacterBody3D for HorseController {
             steer_curve_exponent: 1.5,
             back_double_tap_window: 0.25,
             spawn_marker_path: NodePath::from("../HorseSpawn"),
+            archetype: default_archetype.id(),
+            max_vitality: default_stats.max_vitality,
+            vitality: default_stats.max_vitality,
+            mass: GString::from(default_stats.mass.name()),
+            mass_class: default_stats.mass as i64,
+            stagger_threshold: default_stats.stagger_threshold,
             gait: 0,
             current_gait: 0,
             speed_mps: 0.0,
             speed_kmh: 0.0,
+            lateral_speed_mps: 0.0,
             acceleration_mps2: 0.0,
             yaw_rate_degrees: 0.0,
             slope_angle_degrees: 0.0,
@@ -232,6 +289,7 @@ impl ICharacterBody3D for HorseController {
             air_time_s: 0.0,
             speed_fraction: 0.0,
             turn_radius_m: 0.0,
+            sidestep_blocked_reason: GString::from(SidestepBlockReason::None.name()),
             last_telemetry: VarDictionary::new(),
             kernel: HorseKernel::new(tuning, KernelVec3::ZERO, 0.0),
             back_tap_elapsed: f64::INFINITY,
@@ -247,6 +305,11 @@ impl ICharacterBody3D for HorseController {
         let velocity = from_godot_vector(self.base().get_velocity());
         let grounded = self.base().is_on_floor();
         self.kernel.resolve_motion(position, velocity, grounded);
+        self.update_archetype_properties();
+        let archetype = self.kernel.archetype().id();
+        self.signals()
+            .archetype_changed()
+            .emit(archetype, archetype);
         self.emit_telemetry();
     }
 
@@ -403,7 +466,7 @@ impl HorseController {
     fn sample_environment(&self) -> Environment {
         let grounded = self.base().is_on_floor();
         let forward = heading_forward(self.kernel.state().yaw_radians);
-        let (rough, steep_downhill) = self.inspect_slide_collisions();
+        let (terrain, steep_downhill) = self.inspect_slide_collisions();
 
         let (slope_angle_radians, signed_slope_radians) = if grounded {
             let normal = from_godot_vector(self.base().get_floor_normal());
@@ -418,18 +481,20 @@ impl HorseController {
 
         Environment {
             grounded,
-            rough,
+            rough: terrain != TerrainSurface::Flat,
+            terrain,
             slope_angle_radians,
             signed_slope_radians,
             steep_slope: steep_downhill.is_some(),
             downhill_direction: steep_downhill.unwrap_or(KernelVec3::ZERO),
+            ..Environment::default()
         }
     }
 
-    fn inspect_slide_collisions(&self) -> (bool, Option<KernelVec3>) {
+    fn inspect_slide_collisions(&self) -> (TerrainSurface, Option<KernelVec3>) {
         let count = self.base().get_slide_collision_count();
         let max_floor_angle = self.kernel.tuning().max_climb_degrees.to_radians();
-        let mut rough = false;
+        let mut terrain = TerrainSurface::Flat;
         let mut steep_downhill = None;
 
         for index in 0..count {
@@ -439,9 +504,9 @@ impl HorseController {
             let normal = from_godot_vector(collision.get_normal());
             let angle = normal.y.clamp(-1.0, 1.0).acos();
             if normal.y > 0.5 {
-                rough |= collision
-                    .get_collider()
-                    .is_some_and(Self::collider_is_rough);
+                if let Some(collider) = collision.get_collider() {
+                    terrain = more_specific_terrain(terrain, Self::collider_terrain(collider));
+                }
             }
             if normal.y > 0.05 && angle > max_floor_angle && angle < PI / 2.0 {
                 let downhill = KernelVec3::new(normal.x, 0.0, normal.z).normalized_horizontal();
@@ -450,18 +515,43 @@ impl HorseController {
                 }
             }
         }
-        (rough, steep_downhill)
+        (terrain, steep_downhill)
     }
 
-    fn collider_is_rough(collider: Gd<Object>) -> bool {
-        for key in ["rough", "rough_terrain"] {
-            if collider.has_meta(key) {
-                return collider.get_meta(key).try_to::<bool>().unwrap_or(true);
+    fn collider_terrain(collider: Gd<Object>) -> TerrainSurface {
+        for (key, terrain) in [
+            ("mud", TerrainSurface::Mud),
+            ("riverbed", TerrainSurface::Riverbed),
+            ("scrub", TerrainSurface::Scrub),
+        ] {
+            if collider.has_meta(key) && collider.get_meta(key).try_to::<bool>().unwrap_or(true) {
+                return terrain;
             }
         }
-        collider
-            .try_cast::<Node>()
-            .is_ok_and(|node| node.is_in_group("rough") || node.is_in_group("rough_terrain"))
+        for key in ["rough", "rough_terrain"] {
+            if collider.has_meta(key) {
+                return if collider.get_meta(key).try_to::<bool>().unwrap_or(true) {
+                    TerrainSurface::Scrub
+                } else {
+                    TerrainSurface::Flat
+                };
+            }
+        }
+        let Ok(node) = collider.try_cast::<Node>() else {
+            return TerrainSurface::Flat;
+        };
+        if node.is_in_group("mud") {
+            TerrainSurface::Mud
+        } else if node.is_in_group("riverbed") {
+            TerrainSurface::Riverbed
+        } else if node.is_in_group("scrub")
+            || node.is_in_group("rough")
+            || node.is_in_group("rough_terrain")
+        {
+            TerrainSurface::Scrub
+        } else {
+            TerrainSurface::Flat
+        }
     }
 
     fn apply_requested_motion(&mut self, outcome: StepOutcome) {
@@ -501,40 +591,110 @@ impl HorseController {
         self.signals().telemetry_updated().emit(&payload);
     }
 
+    fn update_archetype_properties(&mut self) {
+        let archetype = self.kernel.archetype();
+        let stats = archetype.stats();
+        self.archetype = archetype.id();
+        self.max_vitality = stats.max_vitality;
+        self.vitality = stats.max_vitality;
+        self.mass = GString::from(stats.mass.name());
+        self.mass_class = stats.mass as i64;
+        self.stagger_threshold = stats.stagger_threshold;
+    }
+
     fn update_telemetry_properties(&mut self) -> VarDictionary {
         let telemetry = self.kernel.telemetry();
         self.assign_telemetry_properties(telemetry);
 
         let mut payload = VarDictionary::new();
+        payload.set("archetype", telemetry.archetype.id());
         payload.set("speed_mps", telemetry.speed_mps);
         payload.set("speed_kmh", telemetry.speed_kmh);
+        payload.set("lateral_speed_mps", telemetry.lateral_speed_mps);
+        payload.set("max_vitality", telemetry.max_vitality);
         payload.set("gait", telemetry.gait as i64);
         payload.set("acceleration_mps2", telemetry.acceleration_mps2);
         payload.set("yaw_rate_degs", telemetry.yaw_rate_degrees);
         payload.set("slope_angle_deg", telemetry.slope_angle_degrees);
-        payload.set("surface", if telemetry.rough { "rough" } else { "flat" });
+        payload.set("surface", terrain_name(telemetry.terrain));
         payload.set("position", to_godot_vector(telemetry.position));
         payload.set("is_airborne", telemetry.is_airborne);
         payload.set("air_time_s", telemetry.air_time);
         payload.set("speed_fraction", telemetry.speed_fraction);
         payload.set("turn_radius_m", telemetry.turn_radius_m);
+        payload.set(
+            "sidestep_blocked_reason",
+            telemetry.sidestep_blocked_reason.name(),
+        );
         self.last_telemetry = payload.clone();
         payload
     }
 
     fn assign_telemetry_properties(&mut self, telemetry: Telemetry) {
+        self.archetype = telemetry.archetype.id();
+        self.max_vitality = telemetry.max_vitality;
         self.gait = telemetry.gait as i64;
         self.current_gait = telemetry.gait as i64;
         self.speed_mps = telemetry.speed_mps;
         self.speed_kmh = telemetry.speed_kmh;
+        self.lateral_speed_mps = telemetry.lateral_speed_mps;
         self.acceleration_mps2 = telemetry.acceleration_mps2;
         self.yaw_rate_degrees = telemetry.yaw_rate_degrees;
         self.slope_angle_degrees = telemetry.slope_angle_degrees;
-        self.surface = GString::from(if telemetry.rough { "rough" } else { "flat" });
+        self.surface = GString::from(terrain_name(telemetry.terrain));
         self.is_airborne = telemetry.is_airborne;
         self.air_time_s = telemetry.air_time;
         self.speed_fraction = telemetry.speed_fraction;
         self.turn_radius_m = telemetry.turn_radius_m;
+        self.sidestep_blocked_reason = GString::from(telemetry.sidestep_blocked_reason.name());
+    }
+}
+
+fn archetype_stats_dictionary(stats: &HorseStats) -> VarDictionary {
+    let mut row = VarDictionary::new();
+    row.set("walk_mps", stats.walk_mps);
+    row.set("trot_mps", stats.trot_mps);
+    row.set("gallop_mps", stats.gallop_mps);
+    row.set("sprint_mps", stats.sprint_mps);
+    row.set("accel_0_to_gallop_s", stats.accel_0_to_gallop_s);
+    row.set("turn_walk_deg_s", stats.turn_walk_deg_s);
+    row.set("turn_gallop_deg_s", stats.turn_gallop_deg_s);
+    row.set("drift_deg_s", stats.drift_deg_s);
+    row.set("jump_apex_m", stats.jump_apex_m);
+    row.set("jump_airtime_s", stats.jump_airtime_s);
+    row.set("terrain_scrub", stats.terrain_scrub);
+    row.set("terrain_mud", stats.terrain_mud);
+    row.set("terrain_riverbed", stats.terrain_riverbed);
+    row.set("terrain_recovery_s", stats.terrain_recovery_s);
+    row.set("max_vitality", stats.max_vitality);
+    row.set("stagger_threshold", stats.stagger_threshold);
+    row.set("sidestep_mps", stats.sidestep_mps);
+    row.set("sidestep_ramp_s", stats.sidestep_ramp_s);
+    row
+}
+
+fn terrain_name(terrain: TerrainSurface) -> &'static str {
+    match terrain {
+        TerrainSurface::Flat => "flat",
+        TerrainSurface::Scrub => "scrub",
+        TerrainSurface::Mud => "mud",
+        TerrainSurface::Riverbed => "riverbed",
+    }
+}
+
+fn more_specific_terrain(current: TerrainSurface, candidate: TerrainSurface) -> TerrainSurface {
+    fn priority(terrain: TerrainSurface) -> u8 {
+        match terrain {
+            TerrainSurface::Flat => 0,
+            TerrainSurface::Riverbed => 1,
+            TerrainSurface::Scrub => 2,
+            TerrainSurface::Mud => 3,
+        }
+    }
+    if priority(candidate) > priority(current) {
+        candidate
+    } else {
+        current
     }
 }
 

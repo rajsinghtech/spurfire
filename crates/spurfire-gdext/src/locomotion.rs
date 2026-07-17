@@ -7,6 +7,14 @@
 use std::f64::consts::PI;
 use std::ops::{Add, AddAssign, Mul, Sub};
 
+use crate::archetype::{HorseArchetype, HorseStats};
+
+const SIDESTEP_FORWARD_LIMIT_MPS: f64 = 1.0;
+const SIDESTEP_RAMP_OUT_S: f64 = 0.15;
+const SIDESTEP_BLOCK_SLOPE_DEGREES: f64 = 25.0;
+const SIDESTEP_LANDING_RECOVERY_S: f64 = 0.2;
+const SIDESTEP_EPSILON_MPS: f64 = 1.0e-6;
+
 /// Small engine-independent 3D vector used at the Godot boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Vec3 {
@@ -162,11 +170,55 @@ impl InputFrame {
     }
 }
 
+/// Terrain category used by the archetype rough-ground table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerrainSurface {
+    #[default]
+    Flat,
+    Scrub,
+    Mud,
+    Riverbed,
+}
+
+/// Why a requested stationary sidestep was unavailable this tick.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(i64)]
+pub enum SidestepBlockReason {
+    #[default]
+    None = 0,
+    ForwardInput = 1,
+    ForwardMotion = 2,
+    Airborne = 3,
+    LandingRecovery = 4,
+    OffCamber = 5,
+    PowerTurn = 6,
+    Stagger = 7,
+}
+
+impl SidestepBlockReason {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ForwardInput => "forward_input",
+            Self::ForwardMotion => "forward_motion",
+            Self::Airborne => "airborne",
+            Self::LandingRecovery => "landing_recovery",
+            Self::OffCamber => "off_camber",
+            Self::PowerTurn => "power_turn",
+            Self::Stagger => "stagger",
+        }
+    }
+}
+
 /// Collision and terrain observations for one physics tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Environment {
     pub grounded: bool,
+    /// Backward-compatible rough marker. When no explicit surface is supplied,
+    /// this is interpreted as scrub.
     pub rough: bool,
+    pub terrain: TerrainSurface,
     /// Absolute floor angle for telemetry.
     pub slope_angle_radians: f64,
     /// Grade along the horse's heading. Positive is uphill.
@@ -175,6 +227,19 @@ pub struct Environment {
     pub steep_slope: bool,
     /// Horizontal downhill direction when [`Self::steep_slope`] is true.
     pub downhill_direction: Vec3,
+    /// Reserved movement-state gates; neither implements combat behavior.
+    pub power_turning: bool,
+    pub staggered: bool,
+}
+
+impl Environment {
+    #[must_use]
+    const fn effective_terrain(self) -> TerrainSurface {
+        match (self.terrain, self.rough) {
+            (TerrainSurface::Flat, true) => TerrainSurface::Scrub,
+            (terrain, _) => terrain,
+        }
+    }
 }
 
 impl Default for Environment {
@@ -182,10 +247,13 @@ impl Default for Environment {
         Self {
             grounded: true,
             rough: false,
+            terrain: TerrainSurface::Flat,
             slope_angle_radians: 0.0,
             signed_slope_radians: 0.0,
             steep_slope: false,
             downhill_direction: Vec3::ZERO,
+            power_turning: false,
+            staggered: false,
         }
     }
 }
@@ -237,20 +305,23 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Self {
-            walk_speed: 2.5,
-            trot_speed: 6.0,
-            gallop_speed: 13.0,
+            // Editor values are the Courser reference row. HorseKernel applies the active
+            // archetype's immutable ratios, yielding the exact design defaults while still
+            // allowing deliberate global tuning overrides.
+            walk_speed: 2.0,
+            trot_speed: 5.0,
+            gallop_speed: 14.5,
             reverse_speed: 1.5,
-            walk_acceleration: 4.5,
-            trot_acceleration: 6.0,
-            gallop_acceleration: 7.5,
+            walk_acceleration: 14.5 / 3.0,
+            trot_acceleration: 14.5 / 3.0,
+            gallop_acceleration: 14.5 / 3.0,
             coast_deceleration: 0.8,
-            soft_brake_deceleration: 5.0,
+            soft_brake_deceleration: 6.0,
             hard_brake_deceleration: 8.0,
             idle_yaw_rate_degrees: 90.0,
-            walk_yaw_rate_degrees: 120.0,
-            trot_yaw_rate_degrees: 80.0,
-            gallop_yaw_rate_degrees: 35.0,
+            walk_yaw_rate_degrees: 140.0,
+            trot_yaw_rate_degrees: 120.8,
+            gallop_yaw_rate_degrees: 60.0,
             steering_response: 6.0,
             walk_trot_lateral_damping: 8.0,
             gallop_lateral_damping: 3.0,
@@ -259,14 +330,14 @@ impl Default for Tuning {
             walk_speed_floor: 1.2,
             trot_speed_floor: 3.0,
             gallop_speed_floor: 7.0,
-            gravity: 22.0,
+            gravity: 8.0 * 1.8 / (0.7 * 0.7),
             terminal_fall_speed: 30.0,
-            jump_impulse: 7.5,
+            jump_impulse: 4.0 * 1.8 / 0.7,
             coyote_time: 0.15,
             jump_buffer_time: 0.12,
             air_control: 0.2,
-            rough_speed_multiplier: 0.7,
-            rough_acceleration_multiplier: 0.6,
+            rough_speed_multiplier: 0.90,
+            rough_acceleration_multiplier: 0.90,
             uphill_reference_degrees: 30.0,
             uphill_speed_multiplier: 0.55,
             downhill_speed_bonus: 0.15,
@@ -428,15 +499,23 @@ pub struct HorseState {
     pub position: Vec3,
     pub velocity: Vec3,
     pub yaw_radians: f64,
+    /// Canonical longitudinal component, signed positive in local forward.
+    pub forward_speed_mps: f64,
+    /// Canonical right-positive sidestep component used by future reconciliation.
+    pub lateral_speed_mps: f64,
     pub steering_axis: f64,
     pub yaw_rate_radians: f64,
     pub acceleration_mps2: f64,
     pub slope_angle_radians: f64,
     pub rough: bool,
+    pub terrain: TerrainSurface,
+    pub terrain_speed_multiplier: f64,
     pub grounded: bool,
     pub air_time: f64,
+    pub sidestep_blocked_reason: SidestepBlockReason,
     coyote_remaining: f64,
     jump_buffer_remaining: f64,
+    landing_recovery_remaining: f64,
     low_speed_time: f64,
     reverse_hold_time: f64,
     telemetry_elapsed: f64,
@@ -449,6 +528,11 @@ impl HorseState {
     }
 
     #[must_use]
+    pub fn forward_speed_abs(&self) -> f64 {
+        self.forward_speed_mps.abs()
+    }
+
+    #[must_use]
     pub const fn coyote_remaining(&self) -> f64 {
         self.coyote_remaining
     }
@@ -457,23 +541,33 @@ impl HorseState {
     pub const fn jump_buffer_remaining(&self) -> f64 {
         self.jump_buffer_remaining
     }
+
+    #[must_use]
+    pub const fn landing_recovery_remaining(&self) -> f64 {
+        self.landing_recovery_remaining
+    }
 }
 
 /// Stable snapshot used by the Godot telemetry adapter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Telemetry {
+    pub archetype: HorseArchetype,
     pub speed_mps: f64,
     pub speed_kmh: f64,
+    pub lateral_speed_mps: f64,
+    pub max_vitality: f64,
     pub gait: Gait,
     pub acceleration_mps2: f64,
     pub yaw_rate_degrees: f64,
     pub slope_angle_degrees: f64,
     pub rough: bool,
+    pub terrain: TerrainSurface,
     pub position: Vec3,
     pub is_airborne: bool,
     pub air_time: f64,
     pub speed_fraction: f64,
     pub turn_radius_m: f64,
+    pub sidestep_blocked_reason: SidestepBlockReason,
 }
 
 /// Output for one accepted simulation step.
@@ -499,6 +593,7 @@ pub enum StepError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HorseKernel {
     tuning: Tuning,
+    archetype: HorseArchetype,
     state: HorseState,
     spawn_position: Vec3,
     spawn_yaw_radians: f64,
@@ -516,26 +611,37 @@ impl HorseKernel {
         let spawn_yaw_radians = finite_or_zero(spawn_yaw_radians);
         Self {
             tuning,
-            state: HorseState {
-                gait: Gait::Idle,
-                position: spawn_position,
-                velocity: Vec3::ZERO,
-                yaw_radians: spawn_yaw_radians,
-                steering_axis: 0.0,
-                yaw_rate_radians: 0.0,
-                acceleration_mps2: 0.0,
-                slope_angle_radians: 0.0,
-                rough: false,
-                grounded: true,
-                air_time: 0.0,
-                coyote_remaining: tuning.coyote_time,
-                jump_buffer_remaining: 0.0,
-                low_speed_time: 0.0,
-                reverse_hold_time: 0.0,
-                telemetry_elapsed: 0.0,
-            },
+            archetype: HorseArchetype::default(),
+            state: Self::fresh_state(tuning, spawn_position, spawn_yaw_radians),
             spawn_position,
             spawn_yaw_radians,
+        }
+    }
+
+    fn fresh_state(tuning: Tuning, position: Vec3, yaw_radians: f64) -> HorseState {
+        HorseState {
+            gait: Gait::Idle,
+            position,
+            velocity: Vec3::ZERO,
+            yaw_radians,
+            forward_speed_mps: 0.0,
+            lateral_speed_mps: 0.0,
+            steering_axis: 0.0,
+            yaw_rate_radians: 0.0,
+            acceleration_mps2: 0.0,
+            slope_angle_radians: 0.0,
+            rough: false,
+            terrain: TerrainSurface::Flat,
+            terrain_speed_multiplier: 1.0,
+            grounded: true,
+            air_time: 0.0,
+            sidestep_blocked_reason: SidestepBlockReason::None,
+            coyote_remaining: tuning.coyote_time,
+            jump_buffer_remaining: 0.0,
+            landing_recovery_remaining: 0.0,
+            low_speed_time: 0.0,
+            reverse_hold_time: 0.0,
+            telemetry_elapsed: 0.0,
         }
     }
 
@@ -546,6 +652,28 @@ impl HorseKernel {
 
     pub fn set_tuning(&mut self, tuning: Tuning) {
         self.tuning = tuning.sanitized();
+        self.clamp_canonical_motion();
+    }
+
+    #[must_use]
+    pub const fn archetype(&self) -> HorseArchetype {
+        self.archetype
+    }
+
+    #[must_use]
+    pub fn archetype_stats(&self) -> &'static HorseStats {
+        self.archetype.stats()
+    }
+
+    /// Switch the immutable active row and clamp canonical movement to its caps.
+    /// Returns `false` when the requested row was already active.
+    pub fn set_archetype(&mut self, archetype: HorseArchetype) -> bool {
+        if archetype == self.archetype {
+            return false;
+        }
+        self.archetype = archetype;
+        self.clamp_canonical_motion();
+        true
     }
 
     #[must_use]
@@ -562,13 +690,23 @@ impl HorseKernel {
         }
     }
 
-    /// Feed collision-resolved engine motion into the next kernel tick.
+    /// Feed collision-resolved engine motion into the canonical movement state.
     pub fn resolve_motion(&mut self, position: Vec3, velocity: Vec3, grounded: bool) {
         if position.is_finite() {
             self.state.position = position;
         }
         if velocity.is_finite() {
             self.state.velocity = velocity;
+            let horizontal = Vec3::new(velocity.x, 0.0, velocity.z);
+            self.state.forward_speed_mps = horizontal.dot(heading_forward(self.state.yaw_radians));
+            self.state.lateral_speed_mps =
+                horizontal.dot(heading_right(self.state.yaw_radians)).clamp(
+                    -self.archetype_stats().sidestep_mps,
+                    self.archetype_stats().sidestep_mps,
+                );
+        }
+        if !self.state.grounded && grounded {
+            self.state.landing_recovery_remaining = SIDESTEP_LANDING_RECOVERY_S;
         }
         self.state.grounded = grounded;
     }
@@ -576,24 +714,7 @@ impl HorseKernel {
     /// Reset synchronously and return the transition that must be signalled.
     pub fn reset(&mut self) -> GaitTransition {
         let old = self.state.gait;
-        self.state = HorseState {
-            gait: Gait::Idle,
-            position: self.spawn_position,
-            velocity: Vec3::ZERO,
-            yaw_radians: self.spawn_yaw_radians,
-            steering_axis: 0.0,
-            yaw_rate_radians: 0.0,
-            acceleration_mps2: 0.0,
-            slope_angle_radians: 0.0,
-            rough: false,
-            grounded: true,
-            air_time: 0.0,
-            coyote_remaining: self.tuning.coyote_time,
-            jump_buffer_remaining: 0.0,
-            low_speed_time: 0.0,
-            reverse_hold_time: 0.0,
-            telemetry_elapsed: 0.0,
-        };
+        self.state = Self::fresh_state(self.tuning, self.spawn_position, self.spawn_yaw_radians);
         GaitTransition {
             old,
             new: Gait::Idle,
@@ -623,20 +744,29 @@ impl HorseKernel {
             });
         }
 
-        self.state.rough = environment.rough;
+        self.state.terrain = environment.effective_terrain();
+        self.state.rough = self.state.terrain != TerrainSurface::Flat;
         self.state.slope_angle_radians = finite_or_zero(environment.slope_angle_radians)
             .abs()
             .clamp(0.0, PI / 2.0);
 
         let mut gait_transition = self.apply_player_gait_command(input);
-        let jumped = self.integrate_vertical(input, environment.grounded, delta);
-        self.integrate_steering(input.steer, environment.grounded, delta);
+        let previous_horizontal = Vec3::new(self.state.velocity.x, 0.0, self.state.velocity.z);
+        let (jumped, vertical_displacement) =
+            self.integrate_vertical(input, environment.grounded, delta);
+        let sidestep_blocked_reason = self.sidestep_block_reason(input, environment);
+        let sidestep_requested = input.steer.abs() > f64::EPSILON
+            && sidestep_blocked_reason == SidestepBlockReason::None;
+        self.state.sidestep_blocked_reason = sidestep_blocked_reason;
+        self.integrate_steering(input.steer, environment, sidestep_requested, delta);
 
-        let previous_speed = self.state.horizontal_speed();
-        self.integrate_horizontal(input, environment, delta);
-        let current_speed = self.state.horizontal_speed();
+        let previous_speed = self.state.forward_speed_abs();
+        self.integrate_horizontal(input, environment, sidestep_requested, delta);
+        let current_speed = self.state.forward_speed_abs();
         self.state.acceleration_mps2 = (current_speed - previous_speed) / delta;
-        self.state.position += self.state.velocity * delta;
+        self.state.position.x += (previous_horizontal.x + self.state.velocity.x) * 0.5 * delta;
+        self.state.position.y += vertical_displacement;
+        self.state.position.z += (previous_horizontal.z + self.state.velocity.z) * 0.5 * delta;
 
         if gait_transition.is_some() {
             self.state.low_speed_time = 0.0;
@@ -650,7 +780,10 @@ impl HorseKernel {
         let periodic_telemetry =
             self.state.telemetry_elapsed + f64::EPSILON >= self.tuning.telemetry_interval;
         if periodic_telemetry {
-            self.state.telemetry_elapsed %= self.tuning.telemetry_interval;
+            // Clamp an epsilon-early boundary to zero rather than `%`-retaining a value
+            // infinitesimally below the interval and emitting again on the next frame.
+            self.state.telemetry_elapsed =
+                (self.state.telemetry_elapsed - self.tuning.telemetry_interval).max(0.0);
         }
 
         Ok(StepOutcome {
@@ -665,25 +798,36 @@ impl HorseKernel {
 
     #[must_use]
     pub fn telemetry(&self) -> Telemetry {
-        let speed_mps = self.state.horizontal_speed();
+        let stats = self.archetype_stats();
+        let speed_mps = self.state.forward_speed_abs();
         let yaw_rate = self.state.yaw_rate_radians.abs();
+        let lateral_speed_mps = if speed_mps + f64::EPSILON >= SIDESTEP_FORWARD_LIMIT_MPS {
+            0.0
+        } else {
+            self.state.lateral_speed_mps
+        };
         Telemetry {
+            archetype: self.archetype,
             speed_mps,
             speed_kmh: speed_mps * 3.6,
+            lateral_speed_mps,
+            max_vitality: stats.max_vitality,
             gait: self.state.gait,
             acceleration_mps2: self.state.acceleration_mps2,
             yaw_rate_degrees: self.state.yaw_rate_radians.to_degrees(),
             slope_angle_degrees: self.state.slope_angle_radians.to_degrees(),
             rough: self.state.rough,
+            terrain: self.state.terrain,
             position: self.state.position,
             is_airborne: !self.state.grounded,
             air_time: self.state.air_time,
-            speed_fraction: (speed_mps / self.tuning.gallop_speed).clamp(0.0, 1.0),
+            speed_fraction: (speed_mps / self.target_speed(Gait::Gallop)).clamp(0.0, 1.0),
             turn_radius_m: if yaw_rate > 1.0e-5 {
                 speed_mps / yaw_rate
             } else {
                 0.0
             },
+            sidestep_blocked_reason: self.state.sidestep_blocked_reason,
         }
     }
 
@@ -700,6 +844,91 @@ impl HorseKernel {
         } else {
             Ok(())
         }
+    }
+
+    fn target_speed(&self, gait: Gait) -> f64 {
+        let active = self.archetype_stats();
+        let reference = HorseArchetype::Courser.stats();
+        let ratio = match gait {
+            Gait::Idle => return 0.0,
+            Gait::Walk => active.walk_mps / reference.walk_mps,
+            Gait::Trot => active.trot_mps / reference.trot_mps,
+            Gait::Gallop => active.gallop_mps / reference.gallop_mps,
+        };
+        self.tuning.target_speed(gait) * ratio
+    }
+
+    fn forward_acceleration(&self, gait: Gait) -> f64 {
+        let active = self.archetype_stats().forward_acceleration_mps2();
+        let reference = HorseArchetype::Courser.stats().forward_acceleration_mps2();
+        self.tuning.acceleration(gait) * active / reference
+    }
+
+    fn reverse_speed(&self) -> f64 {
+        let active = self.archetype_stats().reverse_mps;
+        let reference = HorseArchetype::Courser.stats().reverse_mps;
+        self.tuning.reverse_speed * active / reference
+    }
+
+    fn soft_brake_deceleration(&self) -> f64 {
+        let active = self.archetype_stats().brake_deceleration_mps2;
+        let reference = HorseArchetype::Courser.stats().brake_deceleration_mps2;
+        self.tuning.soft_brake_deceleration * active / reference
+    }
+
+    fn hard_brake_deceleration(&self) -> f64 {
+        let active = self.archetype_stats();
+        let reference = HorseArchetype::Courser.stats();
+        self.tuning.hard_brake_deceleration * active.brake_deceleration_mps2
+            / reference.brake_deceleration_mps2
+            / active.hard_brake_slide_multiplier
+    }
+
+    fn jump_velocity(&self) -> f64 {
+        let active = self.archetype_stats().jump_velocity_mps();
+        let reference = HorseArchetype::Courser.stats().jump_velocity_mps();
+        self.tuning.jump_impulse * active / reference
+    }
+
+    fn jump_gravity(&self) -> f64 {
+        let active = self.archetype_stats().jump_gravity_mps2();
+        let reference = HorseArchetype::Courser.stats().jump_gravity_mps2();
+        self.tuning.gravity * active / reference
+    }
+
+    fn turn_rate_degrees(&self) -> f64 {
+        let active = self.archetype_stats();
+        let reference = HorseArchetype::Courser.stats();
+        let active_span = (active.gallop_mps - active.walk_mps).max(f64::EPSILON);
+        let fraction =
+            ((self.state.forward_speed_abs() - active.walk_mps) / active_span).clamp(0.0, 1.0);
+        let editor_rate = self.tuning.walk_yaw_rate_degrees
+            + (self.tuning.gallop_yaw_rate_degrees - self.tuning.walk_yaw_rate_degrees) * fraction;
+        let reference_rate = reference.turn_walk_deg_s
+            + (reference.turn_gallop_deg_s - reference.turn_walk_deg_s) * fraction;
+        let active_rate =
+            active.turn_walk_deg_s + (active.turn_gallop_deg_s - active.turn_walk_deg_s) * fraction;
+        editor_rate * active_rate / reference_rate
+    }
+
+    fn clamp_canonical_motion(&mut self) {
+        self.state.forward_speed_mps = self
+            .state
+            .forward_speed_mps
+            .clamp(-self.reverse_speed(), self.target_speed(Gait::Gallop));
+        let sidestep_cap = self.archetype_stats().sidestep_mps;
+        self.state.lateral_speed_mps = self
+            .state
+            .lateral_speed_mps
+            .clamp(-sidestep_cap, sidestep_cap);
+        self.compose_canonical_horizontal();
+    }
+
+    fn compose_canonical_horizontal(&mut self) {
+        let horizontal = heading_forward(self.state.yaw_radians) * self.state.forward_speed_mps
+            + heading_right(self.state.yaw_radians) * self.state.lateral_speed_mps;
+        self.state.velocity.x = horizontal.x;
+        self.state.velocity.z = horizontal.z;
     }
 
     fn apply_player_gait_command(&mut self, input: InputFrame) -> Option<GaitTransition> {
@@ -719,8 +948,13 @@ impl HorseKernel {
         Some(GaitTransition { old, new, reason })
     }
 
-    fn integrate_vertical(&mut self, input: InputFrame, grounded: bool, delta: f64) -> bool {
+    fn integrate_vertical(&mut self, input: InputFrame, grounded: bool, delta: f64) -> (bool, f64) {
+        if !self.state.grounded && grounded {
+            self.state.landing_recovery_remaining = SIDESTEP_LANDING_RECOVERY_S;
+        }
         self.state.grounded = grounded;
+        self.state.landing_recovery_remaining =
+            (self.state.landing_recovery_remaining - delta).max(0.0);
         if grounded {
             self.state.coyote_remaining = self.tuning.coyote_time;
             self.state.air_time = 0.0;
@@ -735,11 +969,16 @@ impl HorseKernel {
 
         let can_jump = grounded || self.state.coyote_remaining > 0.0;
         if can_jump && self.state.jump_buffer_remaining > 0.0 {
-            self.state.velocity.y = self.tuning.jump_impulse;
+            let initial_velocity = self.jump_velocity();
+            let gravity = self.jump_gravity();
+            self.state.velocity.y =
+                (initial_velocity - gravity * delta).max(-self.tuning.terminal_fall_speed);
             self.state.grounded = false;
             self.state.coyote_remaining = 0.0;
             self.state.jump_buffer_remaining = 0.0;
-            return true;
+            self.state.landing_recovery_remaining = 0.0;
+            let displacement = initial_velocity * delta - 0.5 * gravity * delta * delta;
+            return (true, displacement);
         }
 
         self.state.jump_buffer_remaining = (self.state.jump_buffer_remaining - delta).max(0.0);
@@ -747,117 +986,186 @@ impl HorseKernel {
             if self.state.velocity.y < 0.0 {
                 self.state.velocity.y = 0.0;
             }
+            (false, 0.0)
         } else {
-            self.state.velocity.y = (self.state.velocity.y - self.tuning.gravity * delta)
+            let initial_velocity = self.state.velocity.y;
+            self.state.velocity.y = (initial_velocity - self.jump_gravity() * delta)
                 .max(-self.tuning.terminal_fall_speed);
+            (
+                false,
+                (initial_velocity + self.state.velocity.y) * 0.5 * delta,
+            )
         }
-        false
     }
 
-    fn integrate_steering(&mut self, raw_steer: f64, grounded: bool, delta: f64) {
+    fn sidestep_block_reason(
+        &self,
+        input: InputFrame,
+        environment: Environment,
+    ) -> SidestepBlockReason {
+        if input.steer.abs() <= f64::EPSILON {
+            return SidestepBlockReason::None;
+        }
+        if input.throttle > f64::EPSILON {
+            return SidestepBlockReason::ForwardInput;
+        }
+        if self.state.gait != Gait::Idle
+            || self.state.forward_speed_abs() + f64::EPSILON >= SIDESTEP_FORWARD_LIMIT_MPS
+        {
+            return SidestepBlockReason::ForwardMotion;
+        }
+        if !self.state.grounded {
+            return SidestepBlockReason::Airborne;
+        }
+        if self.state.landing_recovery_remaining > f64::EPSILON {
+            return SidestepBlockReason::LandingRecovery;
+        }
+        if environment.staggered {
+            return SidestepBlockReason::Stagger;
+        }
+        if environment.power_turning || input.hard_brake {
+            return SidestepBlockReason::PowerTurn;
+        }
+        if environment.steep_slope
+            || self.state.slope_angle_radians.to_degrees()
+                > SIDESTEP_BLOCK_SLOPE_DEGREES + f64::EPSILON
+        {
+            return SidestepBlockReason::OffCamber;
+        }
+        SidestepBlockReason::None
+    }
+
+    fn integrate_steering(
+        &mut self,
+        raw_steer: f64,
+        environment: Environment,
+        sidestep_requested: bool,
+        delta: f64,
+    ) {
         self.state.steering_axis = move_towards(
             self.state.steering_axis,
             raw_steer,
             self.tuning.steering_response * delta,
         );
-        let control = if grounded {
+
+        // Sidestep replaces the old free in-place spin. Suppress residual yaw while the
+        // canonical lateral component ramps in or settles before forward acceleration.
+        if sidestep_requested || self.state.lateral_speed_mps.abs() > SIDESTEP_EPSILON_MPS {
+            self.state.yaw_rate_radians = 0.0;
+            return;
+        }
+
+        let control = if self.state.grounded {
             1.0
         } else {
             self.tuning.air_control
         };
-        // Godot's positive Y rotation turns local -Z toward -X (left). Input steering is
-        // right-positive, so right input must produce a negative Godot yaw rate.
-        let target_yaw_rate = -self.state.steering_axis
-            * self.tuning.yaw_rate_degrees(self.state.gait).to_radians()
-            * control;
+        let target_yaw_rate = if self.state.gait == Gait::Idle {
+            if self.state.sidestep_blocked_reason == SidestepBlockReason::OffCamber {
+                // Refuse a lateral step off-camber but permit a bounded rein pivot.
+                -self.state.steering_axis * 40.0_f64.to_radians()
+            } else {
+                0.0
+            }
+        } else {
+            // Godot's positive Y rotation turns local -Z toward -X (left). Input steering is
+            // right-positive, so right input must produce a negative Godot yaw rate.
+            -self.state.steering_axis * self.turn_rate_degrees().to_radians() * control
+        };
+        let previous_yaw_rate = self.state.yaw_rate_radians;
         let blend = 1.0 - (-self.tuning.steering_response * delta).exp();
         self.state.yaw_rate_radians += (target_yaw_rate - self.state.yaw_rate_radians) * blend;
-        self.state.yaw_radians =
-            wrap_angle(self.state.yaw_radians + self.state.yaw_rate_radians * delta);
+        let average_yaw_rate = (previous_yaw_rate + self.state.yaw_rate_radians) * 0.5;
+        self.state.yaw_radians = wrap_angle(self.state.yaw_radians + average_yaw_rate * delta);
+
+        if environment.steep_slope {
+            self.state.yaw_rate_radians = self
+                .state
+                .yaw_rate_radians
+                .clamp(-40.0_f64.to_radians(), 40.0_f64.to_radians());
+        }
     }
 
-    fn integrate_horizontal(&mut self, input: InputFrame, environment: Environment, delta: f64) {
+    fn integrate_horizontal(
+        &mut self,
+        input: InputFrame,
+        environment: Environment,
+        sidestep_requested: bool,
+        delta: f64,
+    ) {
         if environment.steep_slope {
             self.integrate_steep_slide(environment.downhill_direction, delta);
             return;
         }
 
-        let forward = heading_forward(self.state.yaw_radians);
-        let right = heading_right(self.state.yaw_radians);
-        let old_horizontal = Vec3::new(self.state.velocity.x, 0.0, self.state.velocity.z);
-        let old_speed = old_horizontal.horizontal_length();
+        let (terrain_speed, terrain_acceleration) = self.terrain_multipliers(environment, delta);
+        let gait_cap = self.target_speed(self.state.gait) * terrain_speed;
+        let mut longitudinal = self.state.forward_speed_mps;
+        let mut lateral = self.state.lateral_speed_mps;
+        let settling_lateral = !sidestep_requested && lateral.abs() > SIDESTEP_EPSILON_MPS;
 
-        if input.hard_brake && old_speed > 0.0 {
-            let horizontal = move_vector_towards(
-                old_horizontal,
-                Vec3::ZERO,
-                self.tuning.hard_brake_deceleration * delta,
-            );
-            self.state.velocity.x = horizontal.x;
-            self.state.velocity.z = horizontal.z;
-            return;
-        }
-
-        let mut longitudinal = old_horizontal.dot(forward);
-        let mut lateral = old_horizontal.dot(right);
-        let (terrain_speed, terrain_acceleration) = self.terrain_multipliers(environment);
-        let gait_cap = self.tuning.target_speed(self.state.gait) * terrain_speed;
-
-        let (target_longitudinal, rate) = if input.brake > 0.0 {
+        let (target_longitudinal, rate) = if input.hard_brake {
+            self.state.reverse_hold_time = 0.0;
+            (0.0, self.hard_brake_deceleration())
+        } else if sidestep_requested || (input.throttle > 0.0 && settling_lateral) {
+            // Lateral input wins over reverse, and W waits for the 0.15 s settle rather
+            // than creating an exploitable diagonal launch.
+            self.state.reverse_hold_time = 0.0;
+            (0.0, self.soft_brake_deceleration())
+        } else if input.brake > 0.0 {
             if longitudinal > 0.05 {
                 self.state.reverse_hold_time = 0.0;
-                (0.0, self.tuning.soft_brake_deceleration)
+                (0.0, self.soft_brake_deceleration())
             } else if longitudinal < -0.05 {
                 (
-                    -self.tuning.reverse_speed * input.brake,
-                    self.tuning.walk_acceleration,
+                    -self.reverse_speed() * input.brake,
+                    self.forward_acceleration(Gait::Walk),
                 )
             } else {
                 self.state.reverse_hold_time += delta;
                 if self.state.reverse_hold_time >= 0.35 {
                     (
-                        -self.tuning.reverse_speed * input.brake,
-                        self.tuning.walk_acceleration,
+                        -self.reverse_speed() * input.brake,
+                        self.forward_acceleration(Gait::Walk),
                     )
                 } else {
-                    (0.0, self.tuning.soft_brake_deceleration)
+                    (0.0, self.soft_brake_deceleration())
                 }
             }
         } else if input.throttle > 0.0 {
             (
                 gait_cap * input.throttle,
-                self.tuning.acceleration(self.state.gait) * terrain_acceleration,
+                self.forward_acceleration(self.state.gait) * terrain_acceleration,
             )
         } else {
             (0.0, self.tuning.coast_deceleration)
         };
-        if input.brake <= 0.0 {
+        if input.brake <= 0.0 || sidestep_requested {
             self.state.reverse_hold_time = 0.0;
         }
-
         longitudinal = move_towards(longitudinal, target_longitudinal, rate * delta);
-        let lateral_damping = if self.state.gait == Gait::Gallop {
-            self.tuning.gallop_lateral_damping
-        } else {
-            self.tuning.walk_trot_lateral_damping
-        };
-        lateral *= (-lateral_damping * delta).exp();
 
-        let mut horizontal = forward * longitudinal + right * lateral;
-        let no_turning_energy_limit = old_speed.max(gait_cap.max(self.tuning.reverse_speed));
-        if horizontal.horizontal_length() > no_turning_energy_limit {
-            horizontal = horizontal.normalized_horizontal() * no_turning_energy_limit;
+        let sidestep_cap = self.archetype_stats().sidestep_mps;
+        if sidestep_requested {
+            let target_lateral = input.steer * sidestep_cap;
+            let ramp_rate = sidestep_cap / self.archetype_stats().sidestep_ramp_s;
+            lateral = move_towards(lateral, target_lateral, ramp_rate * delta);
+        } else {
+            lateral = move_towards(lateral, 0.0, sidestep_cap / SIDESTEP_RAMP_OUT_S * delta);
         }
-        self.state.velocity.x = horizontal.x;
-        self.state.velocity.z = horizontal.z;
+        lateral = lateral.clamp(-sidestep_cap, sidestep_cap);
+
         if self.state.gait == Gait::Idle
             && input.throttle == 0.0
             && input.brake == 0.0
-            && self.state.horizontal_speed() <= self.tuning.idle_speed_floor
+            && longitudinal.abs() <= self.tuning.idle_speed_floor
         {
-            self.state.velocity.x = 0.0;
-            self.state.velocity.z = 0.0;
+            longitudinal = 0.0;
         }
+
+        self.state.forward_speed_mps = longitudinal;
+        self.state.lateral_speed_mps = lateral;
+        self.compose_canonical_horizontal();
     }
 
     fn integrate_steep_slide(&mut self, downhill_direction: Vec3, delta: f64) {
@@ -868,16 +1176,49 @@ impl HorseKernel {
         self.state.velocity.x = horizontal.x;
         self.state.velocity.z = horizontal.z;
         self.state.velocity.y = self.state.velocity.y.min(0.0);
+        self.state.forward_speed_mps = horizontal.dot(heading_forward(self.state.yaw_radians));
+        self.state.lateral_speed_mps = 0.0;
     }
 
-    fn terrain_multipliers(&self, environment: Environment) -> (f64, f64) {
-        let mut speed = 1.0;
-        let mut acceleration = 1.0;
-        if environment.rough {
-            speed *= self.tuning.rough_speed_multiplier;
-            acceleration *= self.tuning.rough_acceleration_multiplier;
+    fn design_terrain_factor(&self, terrain: TerrainSurface) -> f64 {
+        let stats = self.archetype_stats();
+        match terrain {
+            TerrainSurface::Flat => 1.0,
+            TerrainSurface::Scrub => stats.terrain_scrub,
+            TerrainSurface::Mud => stats.terrain_mud,
+            TerrainSurface::Riverbed => stats.terrain_riverbed,
+        }
+    }
+
+    fn terrain_multipliers(&mut self, environment: Environment, delta: f64) -> (f64, f64) {
+        let terrain = environment.effective_terrain();
+        let global_speed_scale =
+            self.tuning.rough_speed_multiplier / HorseArchetype::Courser.stats().terrain_scrub;
+        let global_acceleration_scale = self.tuning.rough_acceleration_multiplier
+            / HorseArchetype::Courser.stats().terrain_scrub;
+        let design_factor = self.design_terrain_factor(terrain);
+        let target_speed = if terrain == TerrainSurface::Flat {
+            1.0
+        } else {
+            (design_factor * global_speed_scale).clamp(0.05, 1.0)
+        };
+        if target_speed < self.state.terrain_speed_multiplier {
+            self.state.terrain_speed_multiplier = target_speed;
+        } else {
+            // Three time constants leave five percent of the original penalty at the
+            // design recovery time, independent of fixed-step rate.
+            let recovery = self.archetype_stats().terrain_recovery_s;
+            let blend = 1.0 - (-3.0 * delta / recovery).exp();
+            self.state.terrain_speed_multiplier +=
+                (target_speed - self.state.terrain_speed_multiplier) * blend;
         }
 
+        let mut speed = self.state.terrain_speed_multiplier;
+        let mut acceleration = if terrain == TerrainSurface::Flat {
+            1.0
+        } else {
+            (design_factor * global_acceleration_scale).clamp(0.05, 1.0)
+        };
         let signed_slope = finite_or_zero(environment.signed_slope_radians);
         let reference = self.tuning.uphill_reference_degrees.to_radians();
         if signed_slope > 0.0 {
@@ -901,8 +1242,8 @@ impl HorseKernel {
             return None;
         }
         let threshold = match self.state.gait {
-            Gait::Walk => self.tuning.walk_speed * 0.85,
-            Gait::Trot => self.tuning.trot_speed * 0.85,
+            Gait::Walk => self.target_speed(Gait::Walk) * 0.85,
+            Gait::Trot => self.target_speed(Gait::Trot) * 0.85,
             Gait::Idle | Gait::Gallop => return None,
         };
         if horizontal_speed + f64::EPSILON < threshold {
@@ -1017,7 +1358,13 @@ mod tests {
     const HZ_VALUES: [u32; 3] = [30, 60, 120];
 
     fn kernel() -> HorseKernel {
-        HorseKernel::new(Tuning::default(), Vec3::ZERO, 0.0)
+        kernel_for(HorseArchetype::Mustang)
+    }
+
+    fn kernel_for(archetype: HorseArchetype) -> HorseKernel {
+        let mut kernel = HorseKernel::new(Tuning::default(), Vec3::ZERO, 0.0);
+        kernel.set_archetype(archetype);
+        kernel
     }
 
     fn step(
@@ -1050,7 +1397,9 @@ mod tests {
 
     fn reach_gallop(kernel: &mut HorseKernel, hz: u32) {
         select_gallop(kernel, hz);
-        for _ in 0..(4 * hz) {
+        let frames =
+            ((kernel.archetype_stats().accel_0_to_gallop_s + 1.0) * f64::from(hz)).ceil() as u32;
+        for _ in 0..frames {
             step(
                 kernel,
                 InputFrame {
@@ -1061,14 +1410,16 @@ mod tests {
                 hz,
             );
         }
-        assert!((kernel.state().horizontal_speed() - 13.0).abs() < 1.0e-9);
+        let expected = kernel.archetype_stats().gallop_mps;
+        assert!((kernel.state().forward_speed_abs() - expected).abs() < 1.0e-9);
     }
 
     #[test]
     fn frame_rates_are_bounded_and_acceleration_meets_course_target() {
         let mut final_states = Vec::new();
         for hz in HZ_VALUES {
-            let mut horse = kernel();
+            // Courser is the explicit M0 reference archetype; Mustang remains the runtime default.
+            let mut horse = kernel_for(HorseArchetype::Courser);
             let mut reached = None;
             let mut elapsed = 0.0;
             for frame in 0..(5 * hz) {
@@ -1092,7 +1443,7 @@ mod tests {
             let (time, distance) = reached.expect("horse reaches acceptance speed");
             assert!(time <= 3.5, "{hz} Hz took {time:.3} s");
             assert!(distance <= 30.0, "{hz} Hz used {distance:.3} m");
-            assert!(horse.state().horizontal_speed() <= 13.0 + 1.0e-9);
+            assert!(horse.state().horizontal_speed() <= 14.5 + 1.0e-9);
             final_states.push(horse.state().clone());
         }
 
@@ -1320,7 +1671,7 @@ mod tests {
             }
             let rough_speed = horse.state().horizontal_speed();
             let drop = 1.0 - rough_speed / flat_speed;
-            assert!((0.25..=0.35).contains(&drop), "{hz} Hz rough drop {drop}");
+            assert!((0.045..=0.055).contains(&drop), "{hz} Hz scrub drop {drop}");
 
             for _ in 0..(2 * hz) {
                 step(
@@ -1376,12 +1727,14 @@ mod tests {
                 );
             }
             let telemetry = gallop.telemetry();
+            let stats = HorseArchetype::Mustang.stats();
+            let expected_radius = stats.gallop_mps / stats.turn_gallop_deg_s.to_radians();
             assert!(
-                (18.0..=30.0).contains(&telemetry.turn_radius_m),
+                (telemetry.turn_radius_m - expected_radius).abs() < 0.02,
                 "{hz} Hz radius {}",
                 telemetry.turn_radius_m
             );
-            assert!((telemetry.yaw_rate_degrees + 35.0).abs() < 0.1);
+            assert!((telemetry.yaw_rate_degrees + stats.turn_gallop_deg_s).abs() < 0.1);
 
             let mut walk = kernel();
             step(
@@ -1452,6 +1805,7 @@ mod tests {
             for _ in 0..delay_frames {
                 step(&mut horse, InputFrame::default(), airborne, hz);
             }
+            let takeoff_y = horse.state().position.y;
             let jump = step(
                 &mut horse,
                 InputFrame {
@@ -1462,17 +1816,21 @@ mod tests {
                 hz,
             );
             assert!(jump.jumped, "{hz} Hz coyote jump was rejected");
-            assert!((horse.state().velocity.y - 7.5).abs() < 1.0e-9);
+            let stats = HorseArchetype::Mustang.stats();
+            let expected_velocity =
+                stats.jump_velocity_mps() - stats.jump_gravity_mps2() / f64::from(hz);
+            assert!((horse.state().velocity.y - expected_velocity).abs() < 1.0e-9);
 
-            let start_y = horse.state().position.y;
-            let mut apex = start_y;
+            let mut apex = horse.state().position.y;
             for _ in 0..hz {
                 step(&mut horse, InputFrame::default(), airborne, hz);
                 apex = apex.max(horse.state().position.y);
             }
-            let height = apex - start_y;
-            assert!(height > 1.0, "{hz} Hz apex was {height}");
-            assert!(height < 1.5);
+            let height = apex - takeoff_y;
+            assert!(
+                (height - stats.jump_apex_m).abs() < 0.08,
+                "{hz} Hz apex was {height}"
+            );
         }
 
         let mut late = kernel();
@@ -1541,6 +1899,538 @@ mod tests {
             )
             .jumped
         );
+    }
+
+    #[test]
+    fn stationary_sidestep_has_bounded_signed_rate_and_no_yaw() {
+        for hz in HZ_VALUES {
+            for archetype in HorseArchetype::ALL {
+                let stats = archetype.stats();
+                for direction in [-1.0, 1.0] {
+                    let mut horse = kernel_for(archetype);
+                    for _ in 0..hz {
+                        step(
+                            &mut horse,
+                            InputFrame {
+                                steer: direction,
+                                ..InputFrame::default()
+                            },
+                            Environment::default(),
+                            hz,
+                        );
+                    }
+
+                    let telemetry = horse.telemetry();
+                    assert_eq!(horse.state().gait, Gait::Idle);
+                    assert!(horse.state().forward_speed_abs() < 1.0e-12);
+                    assert!(
+                        (telemetry.lateral_speed_mps - direction * stats.sidestep_mps).abs()
+                            < 1.0e-9,
+                        "{archetype:?} at {hz} Hz lateral {}",
+                        telemetry.lateral_speed_mps
+                    );
+                    assert_eq!(horse.state().yaw_radians, 0.0);
+                    assert_eq!(horse.state().yaw_rate_radians, 0.0);
+                    assert_eq!(telemetry.speed_mps, 0.0);
+                    assert_eq!(telemetry.sidestep_blocked_reason, SidestepBlockReason::None);
+
+                    let expected_distance =
+                        stats.sidestep_mps * (1.0 - 0.5 * stats.sidestep_ramp_s);
+                    assert!(
+                        (horse.state().position.x - direction * expected_distance).abs() < 0.02,
+                        "{archetype:?} at {hz} Hz position {}",
+                        horse.state().position.x
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sidestep_settles_before_forward_or_reverse_motion() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            for _ in 0..hz {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        steer: 1.0,
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert_eq!(horse.state().forward_speed_mps, 0.0, "{hz} Hz reverse leak");
+            assert!(horse.state().lateral_speed_mps > 1.1);
+
+            let settle_frames = (SIDESTEP_RAMP_OUT_S * f64::from(hz)).ceil() as u32;
+            for frame in 0..settle_frames {
+                let outcome = step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                if frame == 0 {
+                    assert_eq!(
+                        outcome.gait_transition.expect("walk transition").new,
+                        Gait::Walk
+                    );
+                }
+                assert_eq!(
+                    horse.state().forward_speed_mps,
+                    0.0,
+                    "{hz} Hz diagonal launch"
+                );
+                assert_eq!(horse.state().yaw_rate_radians, 0.0, "{hz} Hz settle yaw");
+            }
+            assert!(horse.state().lateral_speed_mps.abs() < 1.0e-12);
+            step(
+                &mut horse,
+                InputFrame {
+                    throttle: 1.0,
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            assert!(
+                horse.state().forward_speed_mps > 0.0,
+                "{hz} Hz forward resume"
+            );
+            assert!(
+                horse.state().yaw_radians < 0.0,
+                "{hz} Hz rein steering resume"
+            );
+
+            let mut reverse = kernel();
+            for _ in 0..hz {
+                step(
+                    &mut reverse,
+                    InputFrame {
+                        brake: 1.0,
+                        steer: -1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert_eq!(reverse.state().forward_speed_mps, 0.0);
+            for _ in 0..settle_frames {
+                step(
+                    &mut reverse,
+                    InputFrame {
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                assert_eq!(reverse.state().forward_speed_mps, 0.0);
+            }
+            for _ in 0..((0.35 * f64::from(hz)).ceil() as u32 + 1) {
+                step(
+                    &mut reverse,
+                    InputFrame {
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert!(
+                reverse.state().forward_speed_mps < 0.0,
+                "{hz} Hz reverse resume"
+            );
+        }
+    }
+
+    #[test]
+    fn gallop_steering_never_creates_shooter_strafe() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            reach_gallop(&mut horse, hz);
+            for _ in 0..(2 * hz) {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                assert_eq!(horse.state().lateral_speed_mps, 0.0);
+                assert_eq!(horse.telemetry().lateral_speed_mps, 0.0);
+            }
+            assert!(
+                horse.state().yaw_radians.abs() > 0.1,
+                "{hz} Hz did not steer"
+            );
+
+            // Collision-resolved lateral motion feeds back into canonical state, then is
+            // removed within the anti-strafe window and hidden from high-speed telemetry.
+            let position = horse.state().position;
+            let yaw = horse.state().yaw_radians;
+            let injected = heading_forward(yaw) * 13.0 + heading_right(yaw) * 0.6;
+            horse.resolve_motion(position, injected, true);
+            assert!((horse.state().lateral_speed_mps - 0.6).abs() < 1.0e-9);
+            assert_eq!(horse.telemetry().lateral_speed_mps, 0.0);
+            for _ in 0..((0.2 * f64::from(hz)).ceil() as u32) {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert_eq!(horse.state().lateral_speed_mps, 0.0);
+
+            horse.resolve_motion(horse.state().position, Vec3::ZERO, true);
+            assert_eq!(horse.state().forward_speed_mps, 0.0);
+            step(
+                &mut horse,
+                InputFrame {
+                    throttle: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            assert!(
+                horse.state().forward_speed_mps < 0.2,
+                "{hz} Hz stale collision speed"
+            );
+        }
+    }
+
+    #[test]
+    fn archetype_handling_orders_and_jump_rows_apply_at_all_rates() {
+        for hz in HZ_VALUES {
+            let mut times = Vec::new();
+            for archetype in HorseArchetype::ALL {
+                let stats = archetype.stats();
+                let mut horse = kernel_for(archetype);
+                let mut reached_at = None;
+                for frame in 0..(7 * hz) {
+                    step(
+                        &mut horse,
+                        InputFrame {
+                            throttle: 1.0,
+                            ..InputFrame::default()
+                        },
+                        Environment::default(),
+                        hz,
+                    );
+                    if reached_at.is_none()
+                        && horse.state().forward_speed_abs() >= stats.gallop_mps * 0.99
+                    {
+                        reached_at = Some(f64::from(frame + 1) / f64::from(hz));
+                    }
+                }
+                assert_eq!(horse.state().gait, Gait::Gallop);
+                assert!((horse.state().forward_speed_abs() - stats.gallop_mps).abs() < 1.0e-9);
+                times.push((archetype, reached_at.expect("archetype reaches top speed")));
+
+                for _ in 0..(2 * hz) {
+                    step(
+                        &mut horse,
+                        InputFrame {
+                            throttle: 1.0,
+                            steer: 1.0,
+                            ..InputFrame::default()
+                        },
+                        Environment::default(),
+                        hz,
+                    );
+                }
+                assert!(
+                    (horse.telemetry().yaw_rate_degrees + stats.turn_gallop_deg_s).abs() < 0.1,
+                    "{archetype:?} at {hz} Hz turn rate"
+                );
+
+                let mut jumper = kernel_for(archetype);
+                let jump = step(
+                    &mut jumper,
+                    InputFrame {
+                        jump_pressed: true,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                assert!(jump.jumped);
+                let mut apex = jumper.state().position.y;
+                let mut landed_at = None;
+                for frame in 1..=(2 * hz) {
+                    step(
+                        &mut jumper,
+                        InputFrame::default(),
+                        Environment {
+                            grounded: false,
+                            ..Environment::default()
+                        },
+                        hz,
+                    );
+                    apex = apex.max(jumper.state().position.y);
+                    if jumper.state().position.y <= 0.0 {
+                        landed_at = Some(f64::from(frame + 1) / f64::from(hz));
+                        break;
+                    }
+                }
+                assert!(
+                    (apex - stats.jump_apex_m).abs() < 0.02,
+                    "{archetype:?} at {hz} Hz apex {apex}"
+                );
+                assert!(
+                    (landed_at.expect("ballistic return") - stats.jump_airtime_s).abs()
+                        <= 1.0 / f64::from(hz) + 1.0e-9,
+                    "{archetype:?} at {hz} Hz airtime"
+                );
+            }
+            assert!(times[0].1 < times[2].1, "{hz} Hz Courser/Mustang accel");
+            assert!(times[2].1 < times[1].1, "{hz} Hz Mustang/Warhorse accel");
+        }
+    }
+
+    #[test]
+    fn archetype_switch_clamps_speed_lateral_state_and_telemetry() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel_for(HorseArchetype::Courser);
+            reach_gallop(&mut horse, hz);
+            assert_eq!(horse.state().forward_speed_mps, 14.5);
+            assert!(horse.set_archetype(HorseArchetype::Warhorse));
+            assert_eq!(horse.state().forward_speed_mps, 12.0);
+            assert!((horse.state().velocity.horizontal_length() - 12.0).abs() < 1.0e-9);
+            assert!(!horse.set_archetype(HorseArchetype::Warhorse));
+            let telemetry = horse.telemetry();
+            assert_eq!(telemetry.archetype, HorseArchetype::Warhorse);
+            assert_eq!(telemetry.max_vitality, 320.0);
+
+            let mut lateral = kernel_for(HorseArchetype::Mustang);
+            for _ in 0..hz {
+                step(
+                    &mut lateral,
+                    InputFrame {
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert_eq!(lateral.state().lateral_speed_mps, 1.2);
+            assert!(lateral.set_archetype(HorseArchetype::Warhorse));
+            assert_eq!(lateral.state().lateral_speed_mps, 0.8);
+            assert_eq!(lateral.telemetry().lateral_speed_mps, 0.8);
+        }
+    }
+
+    #[test]
+    fn terrain_sidegrades_and_recovery_apply_from_immutable_rows() {
+        for hz in HZ_VALUES {
+            for archetype in HorseArchetype::ALL {
+                let stats = archetype.stats();
+                for (terrain, expected_factor) in [
+                    (TerrainSurface::Scrub, stats.terrain_scrub),
+                    (TerrainSurface::Mud, stats.terrain_mud),
+                    (TerrainSurface::Riverbed, stats.terrain_riverbed),
+                ] {
+                    let mut horse = kernel_for(archetype);
+                    reach_gallop(&mut horse, hz);
+                    for _ in 0..(3 * hz) {
+                        step(
+                            &mut horse,
+                            InputFrame {
+                                throttle: 1.0,
+                                ..InputFrame::default()
+                            },
+                            Environment {
+                                terrain,
+                                ..Environment::default()
+                            },
+                            hz,
+                        );
+                    }
+                    let fraction = horse.state().forward_speed_abs() / stats.gallop_mps;
+                    assert!(
+                        (fraction - expected_factor).abs() < 0.01,
+                        "{archetype:?} {terrain:?} at {hz} Hz fraction {fraction}"
+                    );
+                }
+
+                let mut recovering = kernel_for(archetype);
+                reach_gallop(&mut recovering, hz);
+                for _ in 0..(3 * hz) {
+                    step(
+                        &mut recovering,
+                        InputFrame {
+                            throttle: 1.0,
+                            ..InputFrame::default()
+                        },
+                        Environment {
+                            terrain: TerrainSurface::Mud,
+                            ..Environment::default()
+                        },
+                        hz,
+                    );
+                }
+                let recovery_frames = (stats.terrain_recovery_s * f64::from(hz)).ceil() as u32;
+                for _ in 0..recovery_frames {
+                    step(
+                        &mut recovering,
+                        InputFrame {
+                            throttle: 1.0,
+                            ..InputFrame::default()
+                        },
+                        Environment::default(),
+                        hz,
+                    );
+                }
+                assert!(
+                    recovering.state().forward_speed_abs() >= stats.gallop_mps * 0.95,
+                    "{archetype:?} at {hz} Hz recovery"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sidestep_block_reasons_cover_air_landing_slope_power_turn_and_stagger() {
+        for hz in HZ_VALUES {
+            let mut airborne = kernel();
+            step(
+                &mut airborne,
+                InputFrame {
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment {
+                    grounded: false,
+                    ..Environment::default()
+                },
+                hz,
+            );
+            assert_eq!(
+                airborne.telemetry().sidestep_blocked_reason,
+                SidestepBlockReason::Airborne
+            );
+            assert_eq!(airborne.state().lateral_speed_mps, 0.0);
+
+            let mut landing = kernel();
+            landing.resolve_motion(Vec3::ZERO, Vec3::ZERO, false);
+            landing.resolve_motion(Vec3::ZERO, Vec3::ZERO, true);
+            step(
+                &mut landing,
+                InputFrame {
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            assert_eq!(
+                landing.telemetry().sidestep_blocked_reason,
+                SidestepBlockReason::LandingRecovery
+            );
+
+            let mut slope = kernel();
+            for _ in 0..hz {
+                step(
+                    &mut slope,
+                    InputFrame {
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment {
+                        slope_angle_radians: 26.0_f64.to_radians(),
+                        ..Environment::default()
+                    },
+                    hz,
+                );
+            }
+            assert_eq!(
+                slope.telemetry().sidestep_blocked_reason,
+                SidestepBlockReason::OffCamber
+            );
+            assert_eq!(slope.state().lateral_speed_mps, 0.0);
+            assert!(slope.state().yaw_rate_radians.to_degrees().abs() <= 40.0 + 1.0e-9);
+
+            for (environment, reason) in [
+                (
+                    Environment {
+                        power_turning: true,
+                        ..Environment::default()
+                    },
+                    SidestepBlockReason::PowerTurn,
+                ),
+                (
+                    Environment {
+                        staggered: true,
+                        ..Environment::default()
+                    },
+                    SidestepBlockReason::Stagger,
+                ),
+            ] {
+                let mut blocked = kernel();
+                step(
+                    &mut blocked,
+                    InputFrame {
+                        steer: 1.0,
+                        ..InputFrame::default()
+                    },
+                    environment,
+                    hz,
+                );
+                assert_eq!(blocked.telemetry().sidestep_blocked_reason, reason);
+                assert_eq!(blocked.state().lateral_speed_mps, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_periodic_sample_has_archetype_lateral_and_vitality() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel_for(HorseArchetype::Mustang);
+            let mut samples = 0;
+            for _ in 0..hz {
+                let outcome = step(
+                    &mut horse,
+                    InputFrame {
+                        steer: -1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                if outcome.telemetry_due {
+                    let telemetry = horse.telemetry();
+                    assert_eq!(telemetry.archetype, HorseArchetype::Mustang);
+                    assert_eq!(telemetry.max_vitality, 250.0);
+                    assert!(telemetry.lateral_speed_mps < 0.0);
+                    assert!(telemetry.lateral_speed_mps >= -1.2);
+                    samples += 1;
+                }
+            }
+            assert!(
+                (9..=11).contains(&samples),
+                "{hz} Hz sample count {samples}"
+            );
+        }
     }
 
     #[test]

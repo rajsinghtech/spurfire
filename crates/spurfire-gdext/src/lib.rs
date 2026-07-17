@@ -2,6 +2,7 @@
 
 //! Spurfire's Godot-facing horse controller and engine-independent locomotion.
 
+pub mod archetype;
 mod horse_controller;
 pub mod locomotion;
 
