@@ -2179,8 +2179,9 @@ fn direction_is_normalized_integer(direction: QuantizedDirection) -> bool {
     let squared = i128::from(direction.x) * i128::from(direction.x)
         + i128::from(direction.y) * i128::from(direction.y)
         + i128::from(direction.z) * i128::from(direction.z);
-    squared >= NORMALIZED_LOWER_UNITS * NORMALIZED_LOWER_UNITS
-        && squared <= NORMALIZED_UPPER_UNITS * NORMALIZED_UPPER_UNITS
+    (NORMALIZED_LOWER_UNITS * NORMALIZED_LOWER_UNITS
+        ..=NORMALIZED_UPPER_UNITS * NORMALIZED_UPPER_UNITS)
+        .contains(&squared)
 }
 
 fn normalize_planar(value: [i128; 2]) -> Option<[i32; 2]> {
