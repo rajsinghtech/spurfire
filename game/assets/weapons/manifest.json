@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "retrieved_utc": "2026-07-17",
+  "provenance_policy": "Official Kenney pack page and official kenney.nl archive download only; no preview images redistributed.",
+  "total_imported_bytes": 215067,
+  "packs": [
+    {
+      "id": "kenney-blaster-kit",
+      "name": "Blaster Kit",
+      "version": "2.1",
+      "official_page_url": "https://kenney.nl/assets/blaster-kit",
+      "official_download_url": "https://kenney.nl/media/pages/assets/blaster-kit/261d80a716-1753959510/kenney_blaster-kit_2.1.zip",
+      "archive_filename": "kenney_blaster-kit_2.1.zip",
+      "archive_size_bytes": 1724676,
+      "archive_sha256": "91e3093e95427d59625e7e2ce2d0399b861600160fd0b4ada7714796b67cea8c",
+      "archive_integrity": "unzip -t: no errors",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "redistribution": "Permitted without attribution; Kenney's included License.txt explicitly permits personal, educational, and commercial use.",
+        "included_file": "game/assets/weapons/kenney-blaster-kit/License.txt"
+      },
+      "files": [
+        {
+          "source_path": "License.txt",
+          "repository_path": "game/assets/weapons/kenney-blaster-kit/License.txt",
+          "size_bytes": 700,
+          "sha256": "bece5f4d99cca9dcf86931221a69909862ff6cc95e1735462ee678516a1063e2"
+        },
+        {
+          "source_path": "Models/GLB format/blaster-e.glb",
+          "repository_path": "game/assets/weapons/kenney-blaster-kit/blaster-e.glb",
+          "size_bytes": 75444,
+          "sha256": "df3e35c9286d7bfe8bde2ff7231ef40ff89b1e7caa52fbf80ea685cb601de3ca",
+          "use": "SF-C30 Dustwalker carbine art"
+        },
+        {
+          "source_path": "Models/GLB format/blaster-f.glb",
+          "repository_path": "game/assets/weapons/kenney-blaster-kit/blaster-f.glb",
+          "size_bytes": 72460,
+          "sha256": "ea389c88b7d90ede2763e1f2b5834b9fbaaaa56b8a51ebdf21f61ec46d716320",
+          "use": "SF-B18 Longspur battle-rifle art"
+        },
+        {
+          "source_path": "Models/GLB format/blaster-g.glb",
+          "repository_path": "game/assets/weapons/kenney-blaster-kit/blaster-g.glb",
+          "size_bytes": 56240,
+          "sha256": "1798d7ff656116d04df516dffceceea3be174598a384a48d632b0ef1adf204cd",
+          "use": "SF-R40 Rattler close-range art"
+        },
+        {
+          "source_path": "Models/GLB format/Textures/colormap.png",
+          "repository_path": "game/assets/weapons/kenney-blaster-kit/Textures/colormap.png",
+          "size_bytes": 10223,
+          "sha256": "4d0867c3c3c8c539106f91fbc0987d0e1b7d2811362d1daed593169c7d3b0fdc"
+        }
+      ]
+    }
+  ]
+}

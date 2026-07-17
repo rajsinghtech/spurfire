@@ -1,0 +1,43 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/weapons/kenney-blaster-kit/blaster-e.glb" id="1_model"]
+
+[sub_resource type="StandardMaterial3D" id="Material_tan"]
+albedo_color = Color(0.56, 0.36, 0.17, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="Mesh_stock"]
+material = SubResource("Material_tan")
+size = Vector3(0.15, 0.13, 0.34)
+
+[sub_resource type="CylinderMesh" id="Mesh_band"]
+material = SubResource("Material_tan")
+top_radius = 0.072
+bottom_radius = 0.072
+height = 0.06
+radial_segments = 8
+
+[node name="DustwalkerArt" type="Node3D"]
+metadata/weapon_id = "dustwalker"
+metadata/source_model = "Kenney Blaster Kit 2.1 / blaster-e.glb"
+metadata/forward_axis = "-Z"
+
+[node name="ModelPivot" type="Node3D" parent="."]
+position = Vector3(0, 0, -0.72)
+
+[node name="KenneyBlasterE" parent="ModelPivot" instance=ExtResource("1_model")]
+
+[node name="TanStockAccent" type="MeshInstance3D" parent="."]
+position = Vector3(-0.045, 0.005, 0.5)
+mesh = SubResource("Mesh_stock")
+
+[node name="TanBarrelBand" type="MeshInstance3D" parent="."]
+position = Vector3(-0.045, 0.015, -0.53)
+rotation_degrees = Vector3(90, 0, 0)
+mesh = SubResource("Mesh_band")
+
+[node name="Grip" type="Marker3D" parent="."]
+position = Vector3(-0.045, -0.12, 0)
+
+[node name="Muzzle" type="Marker3D" parent="."]
+position = Vector3(-0.045, 0, -0.75)
