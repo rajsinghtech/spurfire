@@ -2,8 +2,8 @@ apiVersion: v2
 name: spurfire-control
 description: Hardened single-replica deployment for the Spurfire lobby control service
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.3
+appVersion: "0.1.3"
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/rajsinghtech/spurfire
 sources:
