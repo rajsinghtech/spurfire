@@ -156,7 +156,7 @@ impl NetworkProvider for RecordingProvider {
             auth_key: SecretString::new(if request.dry_run {
                 DRY_RUN_AUTH_KEY
             } else {
-                "tskey-auth-router-canary-secret"
+                "synthetic-auth-key-router-canary-secret"
             }),
             tailnet: request.tailnet,
             metadata: ResponseMetadata {
@@ -510,7 +510,7 @@ async fn credential_is_singleton_until_expiry_and_key_is_returned_once() {
     assert_eq!(first_status, StatusCode::CREATED);
     assert_eq!(
         first["join_credential"]["auth_key"],
-        "tskey-auth-router-canary-secret"
+        "synthetic-auth-key-router-canary-secret"
     );
     let credential_id = first["join_credential"]["credential_id"].clone();
 
@@ -550,7 +550,7 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (status, error) = join(&app, lobby_id, PLAYER_1, "mint-fail").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error["state_reason"], "provisioning_blocked_auth_keys_403");
-    assert!(!error.to_string().contains("tskey-"));
+    assert!(!error.to_string().contains("synthetic-auth-key"));
     assert_eq!(failing.mint_count(), 1);
     assert_eq!(get(&app, lobby_id).await.1["state"], "FAILED");
 }

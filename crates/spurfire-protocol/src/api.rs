@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn auth_key_is_serialized_only_by_explicit_first_join_response() {
-        let secret = "tskey-auth-canary-secret-value";
+        let secret = "synthetic-auth-key-canary-secret-value";
         let response = JoinLobbyResponse {
             join_credential: JoinCredential::new(
                 "credential-1",

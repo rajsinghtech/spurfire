@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn secret_debug_is_redacted() {
-        let secret = SecretString::new("tskey-auth-canary-secret");
+        let secret = SecretString::new("synthetic-auth-key-canary-secret");
         assert_eq!(format!("{secret:?}"), "<redacted>");
         assert!(!format!("{secret:?}").contains("canary"));
     }
@@ -1090,7 +1090,7 @@ mod tests {
             .match_header("authorization", "Bearer child-token")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"id":"key-receipt","key":"tskey-auth-join-secret"}"#)
+            .with_body(r#"{"id":"key-receipt","key":"synthetic-auth-key-join-secret"}"#)
             .expect(1)
             .create_async()
             .await;
@@ -1138,7 +1138,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(minted.credential_id, "key-receipt");
-        assert_eq!(minted.auth_key.into_exposed(), "tskey-auth-join-secret");
+        assert_eq!(
+            minted.auth_key.into_exposed(),
+            "synthetic-auth-key-join-secret"
+        );
 
         let outcome = provider
             .cleanup_lobby(CleanupLobbyRequest {

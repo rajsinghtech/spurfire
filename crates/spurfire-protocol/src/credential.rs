@@ -141,7 +141,7 @@ mod tests {
     fn debug_never_contains_auth_key() {
         let credential = JoinCredential::new(
             "credential-1",
-            "tskey-auth-super-secret-canary",
+            "synthetic-auth-key-super-secret-canary",
             "example.ts.net",
             vec!["tag:spurfire-lobby-example".into()],
             UnixMillis::new(100),

@@ -889,7 +889,7 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"id":"key-id","key":"tskey-auth-secret"}"#)
+            .with_body(r#"{"id":"key-id","key":"synthetic-auth-key-secret"}"#)
             .expect(1)
             .create_async()
             .await;
@@ -906,7 +906,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.id, "key-id");
-        assert!(!format!("{result:?}").contains("tskey-auth-secret"));
+        assert!(!format!("{result:?}").contains("synthetic-auth-key-secret"));
         token.assert_async().await;
         key.assert_async().await;
     }
@@ -948,7 +948,7 @@ mod tests {
             .match_header("authorization", "Bearer test-token")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"id":"key-id","key":"tskey-auth-secret"}"#)
+            .with_body(r#"{"id":"key-id","key":"synthetic-auth-key-secret"}"#)
             .expect(1)
             .create_async()
             .await;
