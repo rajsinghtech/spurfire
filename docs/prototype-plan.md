@@ -1,10 +1,12 @@
 # SPURFIRE — Prototype Plan (M0–M6)
 
-**Status:** v1. Companion to `docs/design.md` (pillars source of truth). Every number here is a
-*starting value for playtest iteration*, not a commitment. Numbers over prose; tune with data.
+**Status:** v2, reconciled 2026-07-17 against shipped code. Companion to `docs/design.md`
+(pillars source of truth). Every number here is a *starting value for playtest iteration*,
+not a commitment. Numbers over prose; tune with data.
 
-**Prototype non-goals:** visual setting, monetization, ranked/witness validation, persistent
-named horses (per-match archetype pick until M4 data says otherwise), singleplayer bots.
+**Prototype non-goals:** monetization, ranked/witness validation, accounts/persistent user
+state, persistent named horses (per-match archetype pick until M4 data says otherwise),
+singleplayer bots, slide/mantle/tac-sprint movement extensions.
 
 ## 0. Global constants
 
@@ -12,25 +14,30 @@ named horses (per-match archetype pick until M4 data says otherwise), singleplay
 |---|---|---|
 | Rider HP | 100 | regen 8/s after 6s without damage |
 | Horse HP | 250 (2.5x rider) | regen 10/s after 6s without damage |
-| Gravity | 9.8 m/s^2 | no arcade fudge until M2 dive data demands it |
+| Gravity | 22.0 m/s^2 | shipped Godot default; arcade feel accepted. Dive numbers derive from this (M2) |
 | Saddle height | 1.6 m | sets dive airtime (M2) |
 | Engagement range r_e | 60 m | encounter math + "long hit" threshold |
 | Match length target | 15 min (band 12–18) | Bounty Run |
-| Authority tick | 30 Hz | snapshots 20 Hz, client input 60 Hz (M6) |
+| Sim / input / authority tick | 60 Hz | snapshots 20 Hz delta + 2 Hz MatchState keyframes, interpolation delay 100 ms (M6) |
 
 ## 1. Milestone ladder
 
-| MS | Name | Exit gate (one line) |
-|---|---|---|
-| M0 | Graybox horse locomotion | 3 archetypes rideable on 1.5km terrain at 60fps |
-| M1 | Mounted shooting + sway | sway model drives hit% into target bands |
-| M2 | Saddle Dive | measurable risk/reward; testers dive 2–4x/match |
-| M3 | Spook/bolt, on-foot loop, Majestic Return | median lose-horse-to-remount < 40s |
-| M4 | Bond meter + Majestic Charge | median player earns >=1 charge/match |
-| M5 | Bounty Run scoring loop | 15-min match, winner 400–800 pts, "play again" >= 70% |
-| M6 | Networked lobby via spurfire-ctl + RustScale | 8p peer-hosted match, authority migration < 3s |
+| MS | Name | Status | Exit gate (one line) |
+|---|---|---|---|
+| M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
+| M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
+| M2 | Saddle Dive | not started | measurable risk/reward; testers dive 2–4x/match |
+| M3 | Spook/bolt, on-foot kit, Majestic Return | not started | median lose-horse-to-remount < 40s |
+| M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
+| M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
+| M6 | Networked lobby: complete the loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
-Build order is strict: each milestone's tuning depends on the previous one's feel.
+Build order is strict: each milestone's tuning depends on the previous one's feel. M6's
+spine (control plane, election, peer UDP transport, replication) was built early and is
+live-verified; its remaining work (§M6) waits for the M5 fun verdict.
+
+Every gameplay milestone follows the established pattern: deterministic Rust kernel in
+`spurfire-protocol`/`spurfire-gdext`, thin Godot adapter, headless smoke test.
 
 ---
 
@@ -75,10 +82,16 @@ passes; (2) camera nausea at gallop + drift; (3) large-world streaming stutter.
 
 ## M1 — Mounted shooting + sway model
 
+**Status: done, as-built.** Shipped as the SF-series rifle trio (Dustwalker / Longspur /
+Rattler) with ADS instead of revolver/repeater with lean-shoot; stat rows are locked in
+`spurfire-protocol` and `docs/combat-m1.md` describes the result. Lean-shoot is dropped
+(ADS + the sway stack carries the skill expression). The tables below are retained as
+historical tuning intent; the protocol rows are authoritative.
+
 **Goal:** aiming from horseback is skill-expressive: stable on straights, punished in turns.
 
-**Mechanics in scope:** two weapons (revolver, repeater), fire while any gait, lean-shoot
-+/-90deg, aim cone driven by sway multiplier stack, hit feedback.
+**Mechanics in scope (as planned):** two weapons (revolver, repeater), fire while any gait,
+lean-shoot +/-90deg, aim cone driven by sway multiplier stack, hit feedback.
 
 **Sway model (multiplies weapon base cone):**
 
@@ -117,19 +130,23 @@ underestimated.
 
 **Goal:** signature mechanic works and is *measurable*: high risk, high reward, never dominant.
 
-**Mechanics in scope:** dive input (>=8 m/s, i.e. trot+), launch vector, airborne accuracy
-window, horse continues, landing recovery, scoring notifications (FLYING DISMOUNT,
-SADDLE DIVE HEADSHOT, FULL-GALLOP HIT, AIRBORNE REVERSAL).
+**Mechanics in scope:** dive via the dismount input at speed (>=8 m/s — no dedicated
+button), launch vector, airborne accuracy window, horse continues, landing recovery,
+scoring notifications (FLYING DISMOUNT, SADDLE DIVE HEADSHOT, FULL-GALLOP HIT, AIRBORNE
+REVERSAL). Airborne fire is **dive-only**; the kernel keeps rejecting normal jump-air fire.
+Groundwork: snapshot DTOs carry a stance field from M2 onward so M6 lag compensation needs
+no wire break.
 
-**Tuning table:**
+**Tuning table** (airtime numbers re-derived for shipped gravity 22.0; the v1 values
+assumed 9.8 and would have produced ~0.57s of air):
 
 | Parameter | Value | Derivation |
 |---|---|---|
 | Min speed to dive | 8 m/s | trot excluded for Courser (5.0), gallop-only |
 | Launch impulse (chosen dir) | 6.0 m/s, cone +/-75deg from velocity | covers "reversal" launches |
-| Vertical pop | 3.5 m/s | with saddle 1.6m: airtime = 1.03s |
+| Vertical pop | 6.0 m/s | with saddle 1.6m at g=22: airtime ~= 0.74s; target band 0.7–0.9s |
 | Airborne sway | x0.6 (40% steadier) | bonus decays in final 20% of airtime |
-| Airborne shots | revolver 2 / repeater 3 | hard cap, no reload airborne |
+| Airborne shots | Longspur 1 / Dustwalker 3 / Rattler 5 | ~= cadence x airtime; hard cap, no reload airborne |
 | Horse behavior | continues 25m, decel 2s, idles | retrievable but not instant |
 | Landing recovery | 0.4s prone no-input + 0.4s 50% move, no fire | 0.8s total vulnerability |
 | Bad landing (slope >30deg) | +15 dmg, +0.4s recovery | terrain punishes blind dives |
@@ -149,12 +166,15 @@ broken will poison playtest feedback; (3) airborne FOV/camera motion sickness.
 
 ---
 
-## M3 — Horse vitality, spook/bolt, on-foot loop, Majestic Return
+## M3 — Horse vitality, spook/bolt, on-foot kit, Majestic Return
 
-**Goal:** losing your horse is a dramatic mid-match arc, not a death sentence.
+**Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
+play is a real, butter-smooth kit that stays deliberately weaker than mounted play.
 
-**Mechanics in scope:** horse HP/damage, spook at 0 HP (throw rider, bolt), on-foot moveset,
-whistle recall with reduction economy, Majestic Return sequence, running mount.
+**Mechanics in scope:** horse HP/damage, spook at 0 HP (throw rider, bolt), on-foot kit
+(sprint / crouch / roll, its own deterministic stance kernel mirroring `HorseKernel`),
+designed headglitch cover standard, whistle recall (trimmed economy), Majestic Return
+sequence, running mount.
 
 **Tuning table:**
 
@@ -164,51 +184,62 @@ whistle recall with reduction economy, Majestic Return sequence, running mount.
 | Spook throw | rider lands 3m lateral, 0.6s stun, no fall damage |
 | Bolt | horse sprints away from last damage source 3s, then despawns |
 | On-foot move | walk 2.0 / sprint 4.5 m/s (4s stamina, 6s regen) |
-| On-foot sway | stand 0.9 / move 1.2 / sprint 1.5 (steadier than saddle, slower) |
-| Base recall timer | 25s |
+| On-foot sway | stand 0.9 / move 1.2 / sprint 1.5 / crouch 0.8 (steadiest stance) |
+| Crouch | hold Ctrl: 1.2 m/s, lowered capsule + eye height |
+| Headglitch cover standard | course low cover authored at 1.0–1.1m; crouched eye-line clears it, body protected; head remains headshot zone |
+| Tactical Roll | tap Ctrl while sprinting: 0.5s, ~3.5m displacement, no fire during, +0.3 sway on exit (0.6s decay), 1.5s cooldown |
+| Roll hitbox | crouch-height capsule for the duration; **no i-frames** (peer-authority fairness) |
+| Roll x reload | roll cancels reload; progress resumes after |
+| Input feel | 0.15s input buffer on roll/jump/crouch; explicit accel/decel curves per stance; cancel windows in this table, never animation-length |
+| Base recall timer | 20s |
 | Recall reduction: damage dealt | -1s per 25 dmg |
 | Recall reduction: objective tick | -2s per tick |
-| Recall reduction: feed pickup | -5s (map pickup, 60s respawn) |
-| Recall reduction: hitching post | -3s (channel 2s at fixed posts) |
-| Recall reduction: survive under fire | -1s per 5s alive while damaged, cap -3s |
-| Recall reduction cap | 60% (min recall 10s) |
+| Recall floor | 8s |
 | Majestic Return sequence | whistle -> 2s hoofbeats -> 1.5s dust/silhouette -> gallop-in 3s -> slide stop |
 | Running mount window | 1.5s, within 4m of moving horse, mounts at trot speed |
 
+Cut from v1: feed pickups, hitching posts, and survive-under-fire recall reductions — three
+map/UX systems for marginal tuning value and zero mid-fight legibility.
+
 **Acceptance checklist:**
 - [ ] Median lose-horse-to-remount wall-clock < 40s (target 30–35s).
-- [ ] On-foot player wins >= 20% of duels vs mounted (viable, not preferred).
+- [ ] On-foot player wins 25–35% of duels vs mounted (viable, not preferred).
+- [ ] Players spend >= 70% of match time mounted (identity guardrail; if crouch-camping
+      appears, dial recall faster before touching the kit).
+- [ ] One-clause test: new tester rolls and headglitches within 2 minutes of hearing
+      "tap crouch while sprinting" / "crouch behind low cover".
 - [ ] Bolt feels earned: shooter sees the 15-pt notification (M5 wires score; M3 logs event).
 - [ ] Return sequence reads at distance: testers stop fighting to watch >= first time.
 - [ ] Running mount success >= 70% on first approach after 3 matches of practice.
 
-**Top risks:** (1) 25s base recall may be brutally long in a 15-min match — first candidate
-dial; (2) on-foot loop so weak that spook = free kill for attacker (watch post-spook death
-rate, target < 50%); (3) return pathing (horse navigating terrain to reach rider) is an AI
-rabbit hole — cheat with off-camera spawn at 60m if needed for the prototype.
+**Top risks:** (1) on-foot kit too strong inverts the mounted identity — watch the 70%
+mounted-time guardrail; (2) on-foot loop so weak that spook = free kill for attacker (watch
+post-spook death rate, target < 50%); (3) return pathing (horse navigating terrain to reach
+rider) is an AI rabbit hole — cheat with off-camera spawn at 60m if needed for the
+prototype.
 
 ---
 
-## M4 — Bond meter + Majestic Charge
+## M4 — Spur meter + Majestic Charge
 
 **Goal:** reward stylish riding with a readable power spike that doesn't break balance.
+One meter, one button (Q), effect depends on state.
 
-**Mechanics in scope:** bond meter 0–100 with fill economy and decay, Majestic Charge
-activation, full-bond instant Majestic Return when horse absent.
+**Mechanics in scope:** Spur meter 0–100 with exactly four fill sources and **no decay**;
+one spend: mounted -> Majestic Charge; horseless -> instant Majestic Return (consumes
+meter, no charge on arrival).
+
+Cut from v1 (was "Bond meter"): sustained-gallop trickle, return-to-horse fill, and idle
+decay — the economy must be countable on one hand and readable mid-fight.
 
 **Tuning table:**
 
-| Bond source | Points |
+| Spur source | Points |
 |---|---|
-| Jump | +4 |
-| Clean landing (no collision, <0.2 sway impulse) | +2 |
-| Sustained gallop | +1 per 3s |
+| Jump +4 / clean landing (no collision, <0.2 sway impulse) +2 | movement style |
 | Near miss (projectile within 1.5m) | +3 |
-| Mounted hit | +2 |
-| Mounted elim | +6 |
-| Saddle Dive elim | +8 |
-| Return to horse / running mount | +5 |
-| Decay | -1 per 5s while idle or on foot (paused while horse absent) |
+| Mounted hit +2 / mounted elim +6 | mounted combat |
+| Saddle Dive elim | +8 (largest: dive is the crown jewel) |
 
 | Majestic Charge | Value |
 |---|---|
@@ -217,20 +248,21 @@ activation, full-bond instant Majestic Return when horse absent.
 | Turn rate | +30%, drift cost removed |
 | Sway | x0.7, terrain factor forced to 1.0 |
 | Stagger | immune except headshots |
-| Horse absent + full bond | whistle = immediate Majestic Return (consumes meter) |
+| Horse absent + full meter | Q = immediate Majestic Return (consumes meter) |
 
 Expected fill time: ~4–6 min of active stylish play -> 1–2 charges per 15-min match.
 
 **Acceptance checklist:**
 - [ ] Median player earns >= 1 charge/match; top quartile <= 3.
 - [ ] Charge win-rate delta in duels: +15–25% (strong, not autowin).
-- [ ] Bond economy can't be farmed solo (jump loops alone fill < 20% of a match's meter).
+- [ ] Spur economy can't be farmed solo (jump loops alone fill < 20% of a match's meter).
 - [ ] Instant-return branch triggers correctly and feels heroic, not like skipping punishment.
 - [ ] Meter legibility: testers can state their charge readiness without looking (audio tiers).
 
 **Top risks:** (1) charge as escape button devalues dives (usage overlap) — monitor dive rate
-pre/post M4; (2) bond farming routes (jump lines) distort movement; (3) full-bond instant
-return may be stronger than charge — A/B which players pick.
+pre/post M4; (2) Spur farming routes (jump lines) distort movement; (3) full-meter instant
+return may be stronger than charge — A/B which players pick; (4) no decay means meters may
+sit full — if hoarding dominates, add a gentle spend incentive before any decay math.
 
 ---
 
@@ -258,7 +290,7 @@ end-of-match results.
 | Match rule | Value |
 |---|---|
 | Duration | 15 min |
-| Respawn | 5s, outer 70–85% of radius, min-distance placement |
+| Respawn | 5s, outer 70–85% of radius, min-distance placement, +20% move speed for 10s (kills the ride-back slog) |
 | Most Wanted reveal | leader, every 60s, 10s duration (map ping + flare + birds) |
 | Objective cadence | 1 event per 90s, 60s lifetime, >=150m from map edge |
 | Objective payouts | moving bounty 150 / supply herd 100 / ammo wagon 80 / signal tower 50 per 10s held (max 150) / horse-buff station 50 + 60s buff |
@@ -274,44 +306,74 @@ end-of-match results.
 
 **Top risks:** (1) snowballing — Most Wanted bonus may feed the leader; survival tick is the
 counterweight, watch Gini coefficient of scores; (2) 6-player lobbies feel empty (see
-encounter math below); (3) respawn ride-back time at 16p radius (~50–75s to center) may feel
-punishing — candidate fix: respawn with +20% speed buff for 10s.
+encounter math below); (3) respawn ride-back time at 16p radius (~50–75s to center) — the
++20% respawn speed buff is now a default; if still punishing, dial objective cadence 90s ->
+60s next.
 
 ---
 
-## M6 — Networked lobby: spurfire-ctl + RustScale, peer-hosted authority
+## M6 — Networked lobby: complete the loop
 
 **Goal:** everything above works over a real tailnet with one elected authority, 8+ players.
 
-**Mechanics in scope:** lobby create/join via spurfire-ctl, one-use join credentials,
-connectivity probe, authority election, client prediction + reconciliation for own horse,
-interpolation for remotes, snapshot retention for migration, results submission.
+**Status: the spine is built and live-verified** — lobby HTTP service, `election_v1`,
+peer UDP transport (`spurfire-net` + embedded RustScale), prediction/reconciliation and
+interpolation (`NetworkRider`/`PeerSession`), and a three-peer live probe with forced
+authority-kill migration at the session level. What remains is completing the loop:
+
+**Remaining scope (build after the M5 fun verdict):**
+
+1. **One migration rule, peers own it.** Mid-match authority is decided by peers: on 2s
+   authority silence, every survivor recomputes `election_v1` over the match-start
+   measurement matrix restricted to the survivor set — deterministic, coordination-free.
+   `SessionState.expire_and_migrate`'s lowest-ID rule becomes the degraded fallback *inside*
+   the same protocol scoring function; the server's scored re-election applies only in
+   `READY`, and during `IN_MATCH` the service validates the successor's heartbeat by
+   recomputing the same function. Split-brain prevented by construction + existing epochs.
+2. **Real state handoff.** New `MatchState` DTO (scores, match clock, per-player
+   rider/horse/health/ammo/Spur, objective state, RNG counter). Authority broadcasts 2 Hz
+   keyframes alongside 20 Hz deltas; every peer keeps the 10s ring buffer; successor
+   restores keyframe + deltas and announces with the hash of the *restored* state
+   (divergence check — `state_hash` stops being a stub).
+3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
+   ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
+   capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
+4. **Client join flow.** Godot client drives the lobby HTTP API end-to-end: create/join
+   (one-use key from the first 201 into `PeerSession`), measurement reporting, `/authority`
+   poll, creator start, authority heartbeats, results submission. Roster-driven peer
+   endpoints replace file-based demo discovery (clients report their tailnet address via an
+   additive measurements field). Per-lobby **join code** shared by the creator; no accounts.
+5. **Landing-page live stats.** Secret-free aggregate stats endpoint feeding
+   spurfire.rajsingh.info: riders online, lobbies by state, direct-connection rate, median
+   RTT. No lobby IDs, no join material.
 
 **Tuning table:**
 
 | Parameter | Value |
 |---|---|
-| Authority sim tick | 30 Hz |
-| Snapshot broadcast | 20 Hz (delta-compressed) |
-| Client input rate | 60 Hz |
+| Sim / authority / input tick | 60 Hz |
+| Snapshot broadcast | 20 Hz (delta-compressed) + 2 Hz MatchState keyframes |
 | Remote interpolation delay | 100ms (2 snapshot intervals) |
 | Prediction window | horse state predicted; shots authority-validated |
 | Snapshot retention | ring buffer 10s on every peer (migration source) |
-| Authority failover | detect 2s silence -> elect -> resume < 3s total |
+| Lag-compensation rewind cap | 150ms (position + stance history ~250ms) |
+| Authority failover | detect 2s silence -> deterministic re-election -> restore + announce < 3s total |
 | Election scoring | weights: direct-conn count 0.3, median RTT 0.25, worst RTT 0.15, jitter 0.1, loss 0.1, upload 0.1 |
 | Match sizes validated | 6, 12, 16 |
 
 **Acceptance checklist:**
-- [ ] 8-player match completes end-to-end on a real tailnet (create -> play -> results -> teardown).
+- [ ] 8-player match completes end-to-end on a real tailnet (create -> play -> results -> teardown) driven from the game client, not scripts.
 - [ ] Median RTT < 80ms direct; lobby health UI matches measured matrix.
-- [ ] Kill the authority mid-match: play resumes < 3s, score/state intact (<=1 snapshot loss).
+- [ ] Kill the authority mid-match: play resumes < 3s, score/state intact (<= 1 keyframe interval of loss); extend `p2p-live` to assert score continuity.
+- [ ] Authority-vs-peer hit% gap < 5% (bot-duel fairness harness).
 - [ ] No movement desync > 200ms peak for any client over a 15-min soak.
+- [ ] Forced-DERP + packet-loss soak playable: TTK consistency holds, sway model unaffected.
+- [ ] 16-peer churn run (joins/leaves mid-lobby) without stuck state.
 - [ ] Ephemeral devices and tailnet cleaned up after match (no leaked state).
-- [ ] Relay fallback (DERP) playable: TTK consistency holds, sway model unaffected.
 
 **Top risks:** (1) RustScale is alpha + sibling repo bugs — budget integration slack, log
-everything, keep the one-tailnet-with-tags fallback warm; (2) authority advantage (host
-literate zero-latency) skewing hit reg — measure authority-vs-peer hit% gap, target < 5%;
+everything, keep the one-tailnet-with-tags fallback warm; (2) rewind interacting with the
+sub-second dive window — validate dive duels under 100ms+ artificial latency early;
 (3) NAT traversal failure rate in the wild (friends-and-family tailnet first).
 
 ---
@@ -346,7 +408,7 @@ guarantees consistent *feel*; it does not by itself deliver action.
 
 ---
 
-## 3. Engine-decision annex (decision explicitly open)
+## 3. Engine-decision annex (decided: Godot 4 + Rust GDExtension — see D4; retained as historical rationale)
 
 | Engine | Horse/anim tooling | 1.5km world streaming | RustScale (Rust crate) embedding | Iteration speed | Prototype risk |
 |---|---|---|---|---|---|
@@ -366,8 +428,8 @@ engine's built-in netcode fits, so RustScale integration is the differentiator.
 5. Streaming 1.5km radius at gallop (14.5 m/s) without >16ms hitches.
 6. Hot-reload / iteration time on a sway-constant tweak (tuning-loop velocity).
 
-Decision gate: end of M0 spike. Bevy wins if anim pain < FFI pain; Godot wins if perf holds;
-Unity/Unreal win only if 1–2 are clearly failed by the others.
+Decision gate (historical): end of M0 spike. Godot won — the M0/M1 slices shipped on
+Godot 4.7.1 with gdext and the acceptance checks held. See `docs/decisions.md` D4.
 
 ---
 

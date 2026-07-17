@@ -21,6 +21,16 @@ through the control plane.
   shots, damage, score, and events. Election inputs include direct-connection count,
   median/worst latency, jitter, packet loss, upload stability, device performance, and relay
   status. Peers keep recent state snapshots for authority migration.
+- **Mid-match authority is peer-owned** (D6): on authority silence, survivors recompute
+  `election_v1` over the match-start measurement matrix restricted to the survivor set —
+  deterministic and coordination-free. The control plane observes and validates successor
+  heartbeats by recomputing the same function; it never decides mid-match. One rule
+  everywhere; the lowest-connected-ID rule is only the degraded fallback inside it.
+- **State handoff**: the authority broadcasts `MatchState` keyframes (2 Hz) alongside 20 Hz
+  snapshot deltas; every peer retains a 10 s ring buffer; a migrating successor restores
+  from keyframe + deltas and announces with a hash of the restored state.
+- **Lag compensation** (D7): authority-side rewind over ~250 ms of position + stance
+  history, hard-capped at 150 ms. Fairness gate: authority-vs-peer hit% gap < 5%.
 
 ## Trust boundaries
 

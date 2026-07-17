@@ -2,7 +2,7 @@
 
 *High noon. Low ping.*
 
-**Spurfire** is a third-person, peer-hosted open-range shooter where every player fights from horseback, performs dangerous flying dismounts, develops a bond with their mount, and battles across terrain that scales with the size of the lobby.
+**Spurfire** is a third-person, peer-hosted open-range movement shooter where every player fights from horseback, performs dangerous flying dismounts, builds Spur with stylish riding, and battles across terrain that scales with the size of the lobby. Today the prototype ships mounted locomotion, the SF-series rifle range, and the networking spine; the Saddle Dive, on-foot kit, Spur meter, and Bounty Run are designed (see `docs/prototype-plan.md`) but not yet built.
 
 This repository contains the Rust **control plane** and the Godot game prototype. The control plane provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. The game uses Godot 4.7.1 with Rust GDExtension gameplay classes. Game clients embed pinned [RustScale](https://github.com/rajsinghtech/rustscale) native Rust UDP and play peer-to-peer; `spurfire-server` is never a permanent gameplay server.
 
@@ -102,4 +102,4 @@ The chart defaults to one credential-free dry-run replica with no public route. 
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat and a native `PeerSession`. Disposable live probes have verified three Godot peers exchanging sustained gameplay UDP with per-peer direct/DERP/peer-relay classification and application RTT, then deleting the child tailnet. Restart recovery, cross-platform packaging, full gameplay replication/interpolation, migration under real process loss, and RustScale's platform/telemetry gaps remain production blockers.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat (milestones M0–M1) and a native `PeerSession`. Disposable live probes have verified three Godot peers exchanging sustained gameplay UDP with per-peer direct/DERP/peer-relay classification and application RTT, then deleting the child tailnet. Gameplay milestones M2–M5 (Saddle Dive, on-foot kit, Spur meter, Bounty Run) are designed but unbuilt. M6 completion work (one unified migration rule, real match-state handoff, capped-rewind lag compensation, a client-driven lobby join flow, landing-page live stats) plus restart recovery, cross-platform packaging, and RustScale's platform/telemetry gaps remain before an alpha; see `docs/prototype-plan.md` and `docs/decisions.md`.

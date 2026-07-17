@@ -53,6 +53,10 @@ Player identity is client-asserted and development-grade. These headers are not 
 
 JSON bodies larger than 64 KiB return 413; missing or wrong JSON content type returns 415.
 
+Planned (M6-complete, not yet implemented): a secret-free aggregate stats surface for the
+public landing page — riders online, lobbies by state, direct-connection rate, median RTT.
+No lobby IDs, join material, or per-player detail.
+
 ## State machine
 
 - **PROVISIONING** — persisted first. Shared mode evaluates cached key/device/ACL evidence. Tailnet-per-lobby performs the bounded organization create after persistence; success moves to `FORMING`, while denied or ambiguous work moves to `FAILED` with a safe machine reason.

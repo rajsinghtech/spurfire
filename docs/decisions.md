@@ -27,7 +27,8 @@ Capability reporting keeps organization-tailnet access independent from these sh
 
 Keep this decision provisional until child one-use key issuance is live-verified and the in-memory
 vault is replaced by an encrypted secret manager with reconciliation, rotation, audit, and cleanup
-recovery; see `docs/tailscale-api.md`.
+recovery; see `docs/tailscale-api.md`. Production custody intent: **setec** (secrets service) backing
+the child-OAuth vault, with startup reconciliation against upstream tailnets.
 
 ## D3 — Rust monorepo for the control plane
 
@@ -49,17 +50,58 @@ Acceptance does not erase platform risk: native libraries must be built and pack
 
 ## D5 — Ranked result verification
 
-**Status:** open
+**Status:** open (deferred past alpha; intended mechanism recorded)
 
-Peer-hosted matches need trustable results. Ranked results need co-signing or a lightweight
-witness/replay-validation service. No mechanism selected yet.
+Peer-hosted matches need trustable results. Intended mechanism: peer co-sign quorum — the
+results DTO already records co-signers as untrusted inputs, so adopting it later is not a
+wire break. No ranked play ships before this is designed.
 
-## Open questions (from docs/design.md)
+## D6 — Mid-match authority is peer-owned; one migration rule
 
-1. Visual setting (realistic Old West / arcade / fantasy / post-apoc)?
-2. Win condition for main mode?
-3. Lobby size target (provisional 6–16)?
-4. Starting loadout vs found weapons?
-5. Horse: persistent named companion vs per-match pick?
-6. Friends-only party game vs public ranked?
-7. Which encrypted secret manager and startup reconciliation design will safely retain one-time child OAuth credentials in production?
+**Status:** accepted (design; implementation in M6-complete)
+
+The match must survive without the control plane. On authority silence, every surviving
+peer recomputes `election_v1` over the match-start measurement matrix restricted to the
+survivor set — deterministic and coordination-free, so all peers and the service reach the
+same successor independently. `SessionState`'s lowest-connected-ID rule becomes the
+degraded fallback inside the same protocol scoring function, replacing today's three
+divergent rules (server scored re-election / peer lowest-ID / election_v1). The server's
+scored re-election applies only in `READY`; during `IN_MATCH` the service validates
+successor heartbeats by recomputing the shared function. Epoch checks remain the guard
+against stale authorities.
+
+## D7 — Lag compensation: authority-side rewind, hard-capped at 150ms
+
+**Status:** accepted (design; implementation in M6-complete)
+
+`CombatAuthority` keeps ~250ms of position **and stance** history per target (crouch/roll
+hitboxes must rewind too). `ShotCommand` carries the shooter's view tick; the authority
+rewinds targets to it, capped at 150ms — beyond the cap, shooters lead. The authority
+player's own shots run the same path with ~0 rewind; fairness gate: authority-vs-peer hit%
+gap < 5%. Consequence for gameplay milestones: snapshot DTOs carry a stance field from M2
+onward, and the Tactical Roll gets no invulnerability frames (displacement + smaller
+hitbox only) because i-frames are unadjudicable under peer authority at real RTTs.
+
+## D8 — No accounts or persistent user state through alpha
+
+**Status:** accepted
+
+Identity is ephemeral per lobby (client UUID + display name). Lobby access control is a
+creator-shared join code on top of service rate limits. No persistent leaderboards, no
+user database; the single-process JSON store remains the only durable state. The public
+landing page shows only secret-free aggregates (riders online, lobbies by state,
+direct-connection rate, median RTT).
+
+## Settled design questions (formerly open, 2026-07-17)
+
+1. **Visual setting** — stylized arcade West: Kenney low-poly CC0 pipeline, saturated
+   desert palette, fictional SF-series weapons (no real-world brands).
+2. **Win condition** — Bounty Run score race: 15 min, highest bounty wins, respawns on.
+3. **Lobby size** — 6–16, default 8, validated at 6/12/16.
+4. **Loadout** — starting rifle pick at spawn/respawn; no ground scavenging; pickups only
+   as dynamic-objective rewards.
+5. **Horse persistence** — per-match archetype pick; cosmetic-only persistence later;
+   stats never persist.
+6. **Audience** — friends-first party game through alpha; public/ranked deferred (D5).
+7. **Production secret custody** — intent: setec-backed vault with startup reconciliation
+   replacing the in-memory prototype vault (see D2). Implementation details remain open.
