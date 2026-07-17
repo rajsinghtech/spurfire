@@ -1,0 +1,81 @@
+# Safe default: credential-free, zero-mutation dry-run mode.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/rajsinghtech/spurfire-server
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+config:
+  dryRun: true
+  dryRunTtlSeconds: 300
+  maxPlayers: 16
+  provisioningMode: dry_run
+  sharedTailnet: "-"
+  statePath: /var/lib/spurfire/server-state.json
+
+tailscale:
+  apiBase: https://api.tailscale.com/api/v2
+  # Real mode reads OAuth credentials from this pre-existing Secret. The chart
+  # never accepts or renders credential values.
+  existingSecret: ""
+  clientIdKey: TS_CLIENT_ID
+  clientSecretKey: TS_CLIENT_SECRET
+
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  retain: true
+  annotations: {}
+
+service:
+  annotations: {}
+  port: 80
+
+# Gateway API must already be installed. Public routing is opt-in because the
+# prototype API uses client-asserted identity rather than authentication.
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: public
+      namespace: home
+  hostnames:
+    - spurfire.rajsingh.info
+  path:
+    type: PathPrefix
+    value: /
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+terminationGracePeriodSeconds: 30
+revisionHistoryLimit: 3

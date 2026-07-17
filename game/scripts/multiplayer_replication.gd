@@ -262,11 +262,15 @@ func _on_route_updated(peer_ip: String, route: String) -> void:
 func get_peer_status() -> Array:
 	var authority_id := str(peer_session.get("authority_player_id"))
 	var local_name := _demo_node if _demo_mode else "you"
+	var local_ip := str(peer_session.get("tailnet_ip"))
+	var local_port := int(peer_session.get("local_port"))
+	var local_endpoint := "%s:%d" % [local_ip, local_port] if not local_ip.is_empty() else "--"
 	var result: Array = [{
 		"name": local_name,
 		"you": true,
 		"authority": _demo_mode and DEMO_PLAYERS.get(local_name, "") == authority_id,
 		"route": "LOCAL",
+		"endpoint": local_endpoint,
 		"rtt_ms": 0,
 		"last_seen_ms": 0,
 	}]
@@ -280,6 +284,7 @@ func get_peer_status() -> Array:
 			"you": false,
 			"authority": _demo_mode and DEMO_PLAYERS.get(name, "") == authority_id,
 			"route": str(peer.route),
+			"endpoint": "%s:%d" % [str(peer.ip), int(peer.port)],
 			"rtt_ms": int(peer.rtt_ms),
 			"last_seen_ms": now - int(peer.last_seen_ms) if int(peer.last_seen_ms) > 0 else -1,
 		})

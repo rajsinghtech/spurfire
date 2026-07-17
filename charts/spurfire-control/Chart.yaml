@@ -1,0 +1,19 @@
+apiVersion: v2
+name: spurfire-control
+description: Hardened single-replica deployment for the Spurfire lobby control service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/rajsinghtech/spurfire
+sources:
+  - https://github.com/rajsinghtech/spurfire
+maintainers:
+  - name: Raj Singh
+annotations:
+  artifacthub.io/license: BSD-3-Clause
+  artifacthub.io/links: |
+    - name: Source
+      url: https://github.com/rajsinghtech/spurfire
+    - name: Deployment documentation
+      url: https://github.com/rajsinghtech/spurfire/blob/main/docs/deployment.md

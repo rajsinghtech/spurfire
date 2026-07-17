@@ -1,0 +1,11 @@
+# VCS and editor files
+.git/
+.gitignore
+.DS_Store
+*.swp
+*.tmp
+
+# Local Helm output
+*.tgz
+*.prov
+charts/

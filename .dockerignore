@@ -1,0 +1,28 @@
+# Deny by default: only the server build graph enters the BuildKit context.
+**
+
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!LICENSE
+
+# Cargo.lock describes every workspace member. Their manifests and sources are
+# needed for a locked workspace load; cargo still compiles only spurfire-server.
+!crates/
+!crates/**
+
+# Workspace patch paths are included because Cargo validates them while loading
+# the root manifest, even though spurfire-server does not compile game networking.
+!vendor/
+!vendor/boringtun/
+!vendor/boringtun/**
+!vendor/rustscale-netstack/
+!vendor/rustscale-netstack/**
+
+# Never re-include local credentials if one appears below an allowed tree.
+**/.env
+**/.env.*
+**/*.key
+**/*.p12
+**/*.pem

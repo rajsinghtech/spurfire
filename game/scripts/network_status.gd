@@ -62,7 +62,8 @@ func _refresh_roster() -> void:
 		var rtt_text := "-- ms" if rtt < 0 else "%d ms" % rtt
 		var age := int(peer.get("last_seen_ms", -1))
 		var health := "WAITING" if age < 0 else ("LIVE" if age < 500 else "STALE")
-		lines.append("RIDER %s%-11s  %-10s  %7s  %s" % [name, badges, route, rtt_text, health])
+		var endpoint := str(peer.get("endpoint", "--"))
+		lines.append("RIDER %s%-11s  %-10s  %7s  %s\n    ENDPOINT  %s" % [name, badges, route, rtt_text, health, endpoint])
 	roster_label.text = "\n".join(lines)
 
 func _route_label(route: String) -> String:

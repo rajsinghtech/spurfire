@@ -8,6 +8,8 @@ Cargo.lock.bak
 node_modules
 dist
 /tmp
+*.tgz
+*.prov
 
 # Godot editor/import state and generated native extension artifacts
 /game/.godot/

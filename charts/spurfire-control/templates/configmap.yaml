@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+data:
+  SPURFIRE_BIND_ADDR: "0.0.0.0:8080"
+  SPURFIRE_DRY_RUN: {{ ternary "1" "0" .Values.config.dryRun | quote }}
+  SPURFIRE_DRY_RUN_TTL_SECS: {{ .Values.config.dryRunTtlSeconds | quote }}
+  SPURFIRE_MAX_PLAYERS: {{ .Values.config.maxPlayers | quote }}
+  SPURFIRE_PROVISIONING_MODE: {{ .Values.config.provisioningMode | quote }}
+  SPURFIRE_SHARED_TAILNET: {{ .Values.config.sharedTailnet | quote }}
+  SPURFIRE_STATE_PATH: {{ .Values.config.statePath | quote }}
+  TS_API_BASE: {{ .Values.tailscale.apiBase | quote }}

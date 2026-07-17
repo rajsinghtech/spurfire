@@ -15,7 +15,9 @@ crates/spurfire-server/    spurfire-server Axum lobby control service
 crates/spurfire-cli/       spurfire-ctl development and operations CLI
 crates/spurfire-gdext/     Rust gameplay classes for Godot
 game/                      Godot 4.7.1 project and graybox tests
+charts/spurfire-control/   Hardened OCI-published Helm deployment chart
 scripts/                   API probes and game build/test helpers
+Dockerfile                 Multi-stage, non-root spurfire-server image
 docs/design.md             Product and game design source of truth
 docs/architecture.md       Control/data planes and trust boundaries
 docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
@@ -24,6 +26,7 @@ docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
 docs/p2p-networking.md       Peer protocol, replication, migration, and live UDP proof
 docs/testing.md              Local, Godot, manual, and live test steps
+docs/deployment.md           Container, Helm, GHCR, and deployment operations
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
 docs/asset-licenses.md     Verified provenance and licenses for imported game assets
@@ -74,11 +77,23 @@ Useful commands:
 - `just p2p-live` — headless real-UDP and forced-authority-migration probe.
 - `just --list` — all recipes.
 
+## Packaged control service
+
+GitHub Actions publishes Linux amd64/arm64 images and the OCI chart; local workflows only validate them:
+
+```text
+ghcr.io/rajsinghtech/spurfire-server
+oci://ghcr.io/rajsinghtech/charts/spurfire-control
+```
+
+The chart defaults to one credential-free dry-run replica with no public route. It includes opt-in Gateway API values for `spurfire.rajsingh.info`; the prototype API must be protected by external authentication before public use. See [docs/deployment.md](docs/deployment.md) for tags, digest/signature verification, Helm installation, existing-Secret real mode, persistence, and restart caveats.
+
 ## Documentation
 
 - [docs/design.md](docs/design.md) — game design and product source of truth.
 - [docs/architecture.md](docs/architecture.md) — system architecture and boundaries.
 - [docs/lobby-service.md](docs/lobby-service.md) — server routes, state machine, examples, and security limits.
+- [docs/deployment.md](docs/deployment.md) — OCI artifacts, Docker, Helm, Gateway API, and operations.
 - [docs/decisions.md](docs/decisions.md) — decisions and open questions.
 - [docs/tailscale-api.md](docs/tailscale-api.md) — current API permission evidence.
 - [docs/rustscale-integration.md](docs/rustscale-integration.md) — sibling integration readiness.
