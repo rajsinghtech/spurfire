@@ -384,7 +384,12 @@ async fn landing_page_links_public_downloads_and_sets_browser_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("High noon. Low ping."));
+    assert!(html.contains("A temporary posse, not a game server."));
+    assert!(html.contains("What the lobby knows—and what it does not."));
+    assert!(html.contains("Public preview: zero Tailscale mutations"));
+    assert!(html.contains("brew install --cask rajsinghtech/tap/spurfire"));
     assert!(html.contains("github.com/rajsinghtech/spurfire/releases/latest"));
+    assert!(html.contains("fetch('/v1/capabilities'"));
 }
 
 #[tokio::test]
