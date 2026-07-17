@@ -534,6 +534,10 @@ impl CombatKernel {
         self.dive_context
     }
 
+    const fn has_open_dive_context(&self) -> bool {
+        matches!(self.dive_context, Some(context) if !context.closed_to_new_shots)
+    }
+
     /// Begins an authority-accepted Saddle Dive before same-tick fire/reload.
     /// Active reload progress is discarded without transferring rounds.
     pub fn begin_saddle_dive(
@@ -608,6 +612,10 @@ impl CombatKernel {
             return Err(DiveContextError::ContextMismatch);
         }
         context.closed_to_new_shots = true;
+        let elapsed = landing_tick
+            .checked_duration_since(self.last_advanced_tick)
+            .expect("landing regression was rejected");
+        self.recoil.recover(elapsed, self.tick_rate);
         self.last_advanced_tick = landing_tick;
         self.riding.stance = RiderStance::LandingProne;
         self.riding.dive_id = None;
@@ -636,7 +644,8 @@ impl CombatKernel {
     /// Selects an owned rifle and cancels any reload. Dive-airborne weapon
     /// switching is refused so it cannot reset or enlarge the shot cap.
     pub fn equip_weapon(&mut self, weapon_id: WeaponId) -> bool {
-        if self.riding.stance == RiderStance::SaddleDiveAirborne
+        if self.has_open_dive_context()
+            || self.riding.stance == RiderStance::SaddleDiveAirborne
             || !self.inventory.contains_key(&weapon_id)
         {
             return false;
@@ -717,10 +726,12 @@ impl CombatKernel {
         if tick < self.last_advanced_tick {
             return Err(ReloadStartError::TickReplay);
         }
-        if matches!(
-            riding.stance,
-            RiderStance::MountedAirborne | RiderStance::SaddleDiveAirborne
-        ) {
+        if self.has_open_dive_context()
+            || matches!(
+                riding.stance,
+                RiderStance::MountedAirborne | RiderStance::SaddleDiveAirborne
+            )
+        {
             return Err(ReloadStartError::Airborne);
         }
         if riding.stance != RiderStance::Mounted || !riding.is_consistent() {
@@ -789,7 +800,9 @@ impl CombatKernel {
         if tick < self.last_advanced_tick {
             return Err(FireRejection::wire(ShotRejectionReason::TickReplay));
         }
-        if !riding.is_consistent() {
+        if !riding.is_consistent()
+            || (self.has_open_dive_context() && riding.stance != RiderStance::SaddleDiveAirborne)
+        {
             return Err(FireRejection::dive(
                 ShotRejectionReason::Dismounted,
                 DiveFireRejection::ContextMismatch,
@@ -935,7 +948,7 @@ impl CombatKernel {
         distance_mm: u32,
         tick: SimulationTick,
     ) -> Result<PickupOutcome, PickupError> {
-        if self.riding.stance == RiderStance::SaddleDiveAirborne {
+        if self.has_open_dive_context() || self.riding.stance == RiderStance::SaddleDiveAirborne {
             return Err(PickupError::Airborne);
         }
         if distance_mm > PICKUP_RANGE_MM {
@@ -2721,6 +2734,21 @@ mod tests {
             .request_fire(SimulationTick::new(0), forward(), dive)
             .is_ok());
 
+        let before_spoof = dive_kernel.clone();
+        let spoofed_mounted = dive_kernel
+            .request_fire_detailed(
+                SimulationTick::new(1),
+                forward(),
+                riding(),
+                dive_kernel.next_spread_seed(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            spoofed_mounted.dive_reason,
+            Some(DiveFireRejection::ContextMismatch)
+        );
+        assert_eq!(dive_kernel, before_spoof);
+
         let mut mismatch = dive;
         mismatch.dive_id = DiveId::new(2);
         let before = dive_kernel.clone();
@@ -2867,6 +2895,11 @@ mod tests {
         let before_reload = kernel.clone();
         assert_eq!(
             kernel.request_reload(SimulationTick::new(1), dive),
+            Err(ReloadStartError::Airborne)
+        );
+        assert_eq!(kernel, before_reload);
+        assert_eq!(
+            kernel.request_reload(SimulationTick::new(1), riding()),
             Err(ReloadStartError::Airborne)
         );
         assert_eq!(kernel, before_reload);
