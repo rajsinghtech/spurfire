@@ -14,3 +14,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 godot = { version = "=0.5.4", features = ["api-4-7"] }
 spurfire-protocol = { path = "../spurfire-protocol" }
+spurfire-net = { path = "../spurfire-net", features = ["rustscale"] }
+tokio.workspace = true
+zeroize.workspace = true

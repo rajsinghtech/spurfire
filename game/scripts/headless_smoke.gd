@@ -12,7 +12,7 @@ const REQUIRED_NODES := [
 	"TestCourse/SlalomPost_0", "TestCourse/TurnCircle_0", "WorldEnvironment",
 	"Sun", "KillResetZone", "HorseSpawn", "Horse/HeadProxy", "Horse/FrontLeftLeg",
 	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
-	"ArchetypeLayer/ArchetypeSelector", "HUD"
+	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "NetworkLayer/Panel/Margin/Label"
 ]
 
 func _ready() -> void:
@@ -20,6 +20,34 @@ func _ready() -> void:
 	for action in REQUIRED_ACTIONS:
 		if not InputMap.has_action(action):
 			failures.append("missing InputMap action: %s" % action)
+	if not ClassDB.class_exists(&"PeerSession"):
+		failures.append("native class PeerSession is unavailable")
+	else:
+		var peer_session := ClassDB.instantiate(&"PeerSession") as Node
+		if peer_session == null:
+			failures.append("PeerSession could not be instantiated")
+		else:
+			for method in ["configure_session", "make_heartbeat", "make_rider_input", "accept_packet", "connect_rustscale", "send_packet", "shutdown"]:
+				if not peer_session.has_method(method):
+					failures.append("PeerSession lacks %s" % method)
+			if not peer_session.has_signal("packet_received"):
+				failures.append("PeerSession lacks packet_received signal")
+			var configured := bool(peer_session.call(
+				"configure_session",
+				"00000000-0000-4000-8000-000000000001",
+				"00000000-0000-4000-8000-000000000002",
+				"00000000-0000-4000-8000-000000000002",
+				0
+			))
+			if not configured:
+				failures.append("PeerSession rejected valid session identifiers")
+			else:
+				var heartbeat := peer_session.call("make_heartbeat", 1) as PackedByteArray
+				if heartbeat.is_empty() or int(peer_session.call("accept_packet", heartbeat, 1)) != 0:
+					failures.append("PeerSession heartbeat codec/validation failed")
+				elif int(peer_session.call("accept_packet", heartbeat, 2)) != 1:
+					failures.append("PeerSession failed to reject a replayed heartbeat")
+			peer_session.free()
 	if not ClassDB.class_exists(&"HorseController"):
 		failures.append("native class HorseController is unavailable")
 	else:

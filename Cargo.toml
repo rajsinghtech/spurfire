@@ -18,3 +18,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
 zeroize = "1"
+
+[patch.crates-io]
+# RustScale 8511e0b requires its receive-pipeline BoringTun fork.
+# This vendored copy is from that exact pinned revision.
+boringtun = { path = "vendor/boringtun" }

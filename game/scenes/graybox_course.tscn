@@ -1,4 +1,4 @@
-[gd_scene load_steps=29 format=3]
+[gd_scene load_steps=30 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -15,6 +15,7 @@
 [ext_resource type="PackedScene" path="res://combat/target_range_props.tscn" id="13_range"]
 [ext_resource type="PackedScene" path="res://combat/combat_effects.tscn" id="14_effects"]
 [ext_resource type="Script" path="res://scripts/combat_player.gd" id="15_combat_player"]
+[ext_resource type="Script" path="res://scripts/network_status.gd" id="16_network_status"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -257,6 +258,32 @@ layer = 5
 [node name="ArchetypeSelector" parent="ArchetypeLayer" instance=ExtResource("7_selector")]
 visible = false
 horse_path = NodePath("../../Horse")
+
+[node name="PeerSession" type="PeerSession" parent="."]
+
+[node name="NetworkLayer" type="CanvasLayer" parent="." node_paths=PackedStringArray("peer_session")]
+layer = 4
+script = ExtResource("16_network_status")
+peer_session = NodePath("../PeerSession")
+
+[node name="Panel" type="PanelContainer" parent="NetworkLayer"]
+offset_left = 20.0
+offset_top = 305.0
+offset_right = 310.0
+offset_bottom = 345.0
+
+[node name="Margin" type="MarginContainer" parent="NetworkLayer/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 7
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 7
+
+[node name="Label" type="Label" parent="NetworkLayer/Panel/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.38, 0.9, 1, 1)
+theme_override_font_sizes/font_size = 15
+text = "NET  OFFLINE"
 
 [node name="CombatLayer" type="CanvasLayer" parent="."]
 layer = 3

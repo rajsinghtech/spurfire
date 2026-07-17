@@ -57,6 +57,10 @@ e2e:
     fi
     scripts/ts-api.sh token
 
+# Provision a disposable child tailnet and exchange real Spurfire UDP frames through RustScale
+p2p-live:
+    scripts/live-rustscale-p2p.sh
+
 # Remove build artifacts
 clean:
     cargo clean

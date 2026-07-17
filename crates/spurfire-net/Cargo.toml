@@ -1,0 +1,27 @@
+[package]
+name = "spurfire-net"
+description = "Transport-independent Spurfire peer session with optional RustScale UDP adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+rustscale = ["dep:rustscale-tsnet", "dep:rustscale-netstack", "dep:tempfile"]
+
+[dependencies]
+spurfire-protocol = { path = "../spurfire-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "8511e0b78074bf07b59d53cf1a2eb349cd0d2407", optional = true }
+rustscale-netstack = { git = "https://github.com/rajsinghtech/rustscale", rev = "8511e0b78074bf07b59d53cf1a2eb349cd0d2407", optional = true }
+tempfile = { version = "3", optional = true }
+zeroize.workspace = true
+
+[[bin]]
+name = "spurfire-p2p-smoke"
+path = "src/bin/p2p_smoke.rs"
+required-features = ["rustscale"]

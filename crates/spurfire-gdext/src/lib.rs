@@ -6,6 +6,7 @@ pub mod archetype;
 mod horse_controller;
 pub mod locomotion;
 pub mod mounted_weapon_controller;
+mod peer_session;
 
 // godot-rust requires this one unsafe marker to acknowledge the engine ABI.
 // Unsafe code remains denied everywhere else in this crate.

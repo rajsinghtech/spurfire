@@ -4,7 +4,7 @@
 
 **Spurfire** is a third-person, peer-hosted open-range shooter where every player fights from horseback, performs dangerous flying dismounts, develops a bond with their mount, and battles across terrain that scales with the size of the lobby.
 
-This repository contains the Rust **control plane** and the Godot game prototype. The control plane provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. The game uses Godot 4.7.1 with Rust GDExtension gameplay classes. Game clients will embed [RustScale](https://github.com/rajsinghtech/rustscale) and play peer-to-peer after M0 movement validation; `spurfire-server` is never a permanent gameplay server.
+This repository contains the Rust **control plane** and the Godot game prototype. The control plane provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. The game uses Godot 4.7.1 with Rust GDExtension gameplay classes. Game clients embed pinned [RustScale](https://github.com/rajsinghtech/rustscale) native Rust UDP and play peer-to-peer; `spurfire-server` is never a permanent gameplay server.
 
 ## Repository layout
 
@@ -22,6 +22,7 @@ docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
 docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
+docs/p2p-networking.md       Peer protocol, Godot adapter, and live UDP proof
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
 docs/asset-licenses.md     Verified provenance and licenses for imported game assets
@@ -83,4 +84,4 @@ Useful commands:
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension is accepted for the client, with M0 focused strictly on graybox movement validation. RustScale networking begins after that gate. Restart recovery, live child-key verification, shared-tailnet permissions, cross-platform Godot packaging, and RustScale's platform/telemetry gaps remain production blockers.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat and a native `PeerSession`. A disposable live probe has verified two embedded RustScale peers exchanging bounded Spurfire gameplay UDP directly and then deleting the child tailnet. Restart recovery, cross-platform packaging, full gameplay replication/interpolation, migration under real process loss, and RustScale's platform/telemetry gaps remain production blockers.
