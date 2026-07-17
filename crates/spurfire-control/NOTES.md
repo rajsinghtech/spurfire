@@ -1,44 +1,34 @@
-# Tailscale API probe notes
+# Tailscale API implementation notes
 
-Probed with OAuth client credentials from the gitignored `.env`. No credentials, OAuth tokens,
-or auth keys are recorded here. Date: 2025-02-14.
+Latest verified evidence is documented in `docs/tailscale-api.md`. Credentials, bearer tokens, child OAuth values, and auth keys are not recorded here.
 
-`TS_API_BASE` already ends in `/api/v2`; paths below are relative to that base. JSON request
-bodies are shown verbatim. Response bodies are redacted if they contain secret fields.
+## Organization tailnets
 
-| Request | Body | Status | Response |
-|---|---|---:|---|
-| `POST /tailnets` | `{"name":"spurfire-probe"}` | 404 | `{"message":"404 page not found"}` |
-| `POST /tailnet` | `{"name":"spurfire-probe"}` | 404 | `{"message":"404 page not found"}` |
-| `POST /tailnet` | `{"displayName":"spurfire-probe"}` | 404 | `{"message":"404 page not found"}` |
-| `POST /tailnet/-` | `{"name":"spurfire-probe"}` | 405 | empty |
-| `POST /tailnet/create` | `{"name":"spurfire-probe"}` | 404 | `{"message":"tailnet \"create\" not found"}` |
-| `POST /tailnets/create` | `{"name":"spurfire-probe"}` | 404 | `{"message":"404 page not found"}` |
-| `POST /tailnet/-/create` | `{"name":"spurfire-probe"}` | 404 | `404 page not found` |
-| `GET /tailnet/-/settings` | none | 200 | `{}` |
-| `GET /tailnet/-/devices` | none | 403 | `{"message":"calling actor does not have enough permissions to perform this function"}` |
-| `POST /tailnet/-/keys` | `{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:spurfire-probe"]}}},"expirySeconds":300}` | 403 | `{"message":"calling actor does not have enough permissions to perform this function"}` |
-| `DELETE /device/spurfire-probe-invalid-id` | none | 404 | `{"message":"no manageable device matching this ID found"}` |
+The correct API-only child-tailnet collection is:
 
-An initial diagnostic accidentally appended `/api/v2` to the configured base a second time.
-Every request below consequently returned `404 {"message":"404 page not found"}`; retained here
-for completeness:
+```text
+GET  /organizations/-/tailnets
+POST /organizations/-/tailnets  {"displayName":"spurfire-probe-*"}
+```
 
-- `POST /api/v2/tailnets` with `{"name":"spurfire-probe"}`
-- `POST /api/v2/tailnet` with `{"name":"spurfire-probe"}`
-- `POST /api/v2/tailnet` with `{"displayName":"spurfire-probe"}`
-- `POST /api/v2/tailnet/-` with `{"name":"spurfire-probe"}`
-- `POST /api/v2/tailnet/create` with `{"name":"spurfire-probe"}`
-- `POST /api/v2/tailnets/create` with `{"name":"spurfire-probe"}`
-- `GET /api/v2/tailnet/-/settings`
-- `GET /api/v2/tailnet/-/devices`
-- `POST /api/v2/tailnet/-/keys` with the auth-key body shown above
-- `DELETE /api/v2/device/spurfire-probe-invalid-id`
+The create response includes typed `id`, `dnsName`, `displayName`, and one-time `oauthClient.{id,secret}` fields. `spurfire-control` must decode that shape directly. Never restore the former generic `raw: serde_json::Value` field: it would retain the one-time child secret.
 
-## Conclusion
+The returned child OAuth pair exchanges at `POST /oauth/token`. Tailnet deletion requires that child scope:
 
-The OAuth endpoint and tailnet settings endpoint work. This OAuth client lacks device-list and
-auth-key permissions. No tested tailnet-create route exists, so dedicated tailnet provisioning
-must report that the alpha API is unavailable. Shared-tailnet provisioning can use the standard
-`/tailnet/{tailnet}/keys`, `/tailnet/{tailnet}/devices`, and `/device/{id}` endpoints when the
-OAuth client is granted the corresponding scopes.
+```text
+DELETE /tailnet/{dnsName}
+```
+
+A successful guarded probe created exactly one child, deleted it with the child token, and confirmed its stable ID was absent from the organization listing. No further live mutation was performed during implementation.
+
+## Historical wrong-route evidence
+
+`POST /tailnet` and `POST /tailnets` returned 404. Those guessed top-level collection paths are still wrong, but they no longer imply that organization tailnet creation is unavailable. Do not reintroduce an `UnavailableApi404` capability verdict.
+
+## Shared-tailnet evidence
+
+Historical calls to `/tailnet/-/keys`, `/tailnet/-/devices`, and `/tailnet/-/acl` returned 403 for the tested organization OAuth client. Shared-tailnet methods remain API-compatible, but capability reporting and readiness must stay separate from organization-tailnet listing/creation.
+
+## Secret lifecycle invariant
+
+Child OAuth ID, secret, and token use explicit redacted wrappers and zeroized allocations where practical. They may enter only a child-scoped client held by the server provider's in-memory vault. They must not enter public DTOs, durable records, logs, error bodies, or generic retained JSON. After restart, the server fails closed and reports `child_secret_unavailable_manual_remediation`; production needs encrypted secret custody and reconciliation.

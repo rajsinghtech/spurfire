@@ -47,11 +47,6 @@ impl ApiError {
     #[must_use]
     pub fn validation(error: &ApiValidationError, dry_run: bool) -> Self {
         let (status, code, message) = match error {
-            ApiValidationError::ModeUnavailable => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "mode_unavailable",
-                "tailnet_per_lobby is unavailable because tested create routes returned 404",
-            ),
             ApiValidationError::WireVersionIncompatible(_) => (
                 StatusCode::CONFLICT,
                 "wire_version_incompatible",

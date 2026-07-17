@@ -1,176 +1,136 @@
 # Tailscale API research for lobby provisioning
 
-Probe time: 2026-07-16 UTC. API origin is redacted; `.env` sets `TS_API_BASE` to an origin whose path already ends in `/api/v2`. All requests below therefore show paths beginning at `/api/v2`. Credentials, bearer tokens, client IDs, client secrets, and generated auth-key material are redacted. No resources were created by these probes, so no cleanup was required.
+Latest verification: 2026-07-16 UTC. API origin is redacted; `.env` sets `TS_API_BASE` to a root ending in `/api/v2`, so paths below are relative to `/api/v2`. OAuth credentials, bearer tokens, child OAuth credentials, and auth keys are never recorded here.
 
-## Authentication
+The latest organization-tailnet probe created exactly one disposable resource and deleted it in the same guarded run. Evidence resource: display name `spurfire-probe-1784254715`, stable ID `TtN3u6hGMV11CNTRL`, DNS name `tail9a1c23.ts.net`. It was already deleted before this implementation work began; no additional live mutation was performed for the implementation.
 
-Exact redacted request shape:
+## Verified organization authentication and listing
+
+Organization token exchange succeeded:
 
 ```http
 POST /api/v2/oauth/token
 Accept: application/json
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=client_credentials&client_id=<redacted-client-id>&client_secret=<redacted-client-secret>
+grant_type=client_credentials&client_id=<redacted>&client_secret=<redacted>
 ```
 
-Response:
+The bearer token was used for the verified organization collection:
 
 ```http
+GET /api/v2/organizations/-/tailnets
+Authorization: Bearer <redacted-organization-token>
+
 200
-{"access_token":"<redacted-token>","token_type":"Bearer","expires_in":3600,"scope":"tailnets"}
+{"tailnets":[...]}
 ```
 
-The token lasts one hour. A fresh token must be fetched after expiry; the scripts do not persist it.
+The response contained 415 existing tailnets at probe time. That count is evidence, not an assumed limit. Probe tooling suppresses entries by default rather than printing the full organization inventory.
 
-Unless stated otherwise, every JSON API probe below used these exact headers:
+## Verified child-tailnet creation
+
+The correct create route is the organization collection, not the previously guessed top-level `/tailnet` or `/tailnets` collections:
 
 ```http
-Accept: application/json
-Authorization: Bearer <redacted-token>
-Content-Type: application/json   # only when a JSON body is present
+POST /api/v2/organizations/-/tailnets
+Authorization: Bearer <redacted-organization-token>
+Content-Type: application/json
+
+{"displayName":"spurfire-probe-1784254715"}
 ```
 
-## Tailnet creation (multiple-tailnets alpha)
+The call returned success and a typed object containing these fields:
 
-The plausible collection paths do not exist for this client/API deployment. Each response body was exactly `{"message":"404 page not found"}`.
+```json
+{
+  "id": "<stable-tailnet-id>",
+  "dnsName": "<child-dns-name>",
+  "displayName": "spurfire-probe-1784254715",
+  "oauthClient": {
+    "id": "<redacted-child-oauth-id>",
+    "secret": "<redacted-one-time-child-secret>"
+  }
+}
+```
+
+`oauthClient.secret` is shown once. `spurfire-control` decodes directly into typed fields and never retains the full create JSON as a generic value. Child OAuth ID, secret, and cached bearer token are redacted in diagnostics and zeroized on drop where practical.
+
+The verified `displayName` grammar used by the reference tooling is `^[A-Za-z0-9' -]{1,50}$`. Spurfire generates an ASCII `spurfire-<lobby-uuid>` value instead of forwarding user-controlled lobby text.
+
+## Verified child token and deletion
+
+The returned child OAuth pair minted a child-scoped token:
 
 ```http
-GET /api/v2/tailnet
-# 404 {"message":"404 page not found"}
+POST /api/v2/oauth/token
+Content-Type: application/x-www-form-urlencoded
 
-GET /api/v2/tailnets
-# 404 {"message":"404 page not found"}
+grant_type=client_credentials&client_id=<redacted-child-id>&client_secret=<redacted-child-secret>
 
-POST /api/v2/tailnet
-{"name":"spurfire-probe-api-research"}
-# 404 {"message":"404 page not found"}
-
-POST /api/v2/tailnets
-{"name":"spurfire-probe-api-research"}
-# 404 {"message":"404 page not found"}
-
-POST /api/v2/tailnet
-{"tailnet":"spurfire-probe-api-research"}
-# 404 {"message":"404 page not found"}
-
-POST /api/v2/tailnets
-{"tailnet":"spurfire-probe-api-research"}
-# 404 {"message":"404 page not found"}
+200
+{"access_token":"<redacted-child-token>", ...}
 ```
 
-The singular instance path was also tested:
+The organization token was not used for deletion. The child token deleted the child by DNS selector:
 
 ```http
-GET /api/v2/tailnet/-
-# 405 <empty body>
+DELETE /api/v2/tailnet/tail9a1c23.ts.net
+Authorization: Bearer <redacted-child-token>
+
+200
 ```
 
-No create call succeeded. Consequently there was no new tailnet in which to mint a key and no tailnet to delete. The expected script-side deletion shape is `DELETE /api/v2/tailnet/{url-encoded-tailnet-name}`, but it could not safely be validated without a disposable tailnet.
+A follow-up `GET /api/v2/organizations/-/tailnets` no longer contained stable ID `TtN3u6hGMV11CNTRL`. Spurfire treats a delete-time 404 as idempotent success.
 
-## Auth keys
+## Earlier route probes, retained as negative evidence
 
-Exact requested lobby-key probe:
+Earlier probes against guessed collection routes returned 404:
+
+```http
+GET  /api/v2/tailnet
+GET  /api/v2/tailnets
+POST /api/v2/tailnet   {"name":"spurfire-probe-api-research"}
+POST /api/v2/tailnets  {"name":"spurfire-probe-api-research"}
+```
+
+Those results only prove that the guessed top-level collection routes do not exist. They do **not** contradict the now-verified organization route and must not be used to report `TailnetPerLobby` as `unavailable_api_404`.
+
+An initial diagnostic also accidentally appended `/api/v2` to a base that already contained it. Those doubled-base requests returned 404 and remain irrelevant to capability reporting.
+
+## Shared-tailnet scope evidence
+
+The same historical organization OAuth client was denied the shared-tailnet operations Spurfire needs:
 
 ```http
 POST /api/v2/tailnet/-/keys
-Content-Type: application/json
-
 {"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:spurfire-probe"]}}},"expirySeconds":300}
-```
+# 403 actor lacks permission
 
-Response:
-
-```http
-403
-{"message":"calling actor does not have enough permissions to perform this function"}
-```
-
-Key listing is denied identically:
-
-```http
 GET /api/v2/tailnet/-/keys
-# 403 {"message":"calling actor does not have enough permissions to perform this function"}
-```
+# 403
 
-A deliberately invalid key ID established the delete route shape without touching a real key:
-
-```http
-DELETE /api/v2/tailnet/-/keys/spurfire-probe-nonexistent
-# 400 {"message":"invalid key ID"}
-```
-
-No key was minted, and no key material was exposed or persisted.
-
-## Devices
-
-```http
 GET /api/v2/tailnet/-/devices
-# 403 {"message":"calling actor does not have enough permissions to perform this function"}
+# 403
 
-DELETE /api/v2/device/spurfire-probe-nonexistent
-# 404 {"message":"no manageable device matching this ID found"}
-```
-
-The delete probe confirms the route/request shape but not deletion permission: the synthetic ID cannot identify a manageable device. Device IDs cannot be discovered with this OAuth client because listing is denied.
-
-## ACL and settings
-
-```http
 GET /api/v2/tailnet/-/acl
-# 403 {"message":"calling actor does not have enough permissions to perform this function"}
-
-GET /api/v2/tailnet/-/settings
-# 200 {}
+# 403
 ```
 
-The empty settings object is the only successful tailnet read tested. It does not provide the operations needed for lobby isolation.
+`GET /api/v2/tailnet/-/settings` returned 200 with `{}`. A synthetic device-delete ID reached the recognized route but returned 404. These facts do not establish key issuance, ACL/tag ownership, device discovery, or cleanup permission in the shared tailnet.
 
-## Other provisioning-adjacent probes
+## Capability verdict
 
-```http
-GET /api/v2/tailnet/-/dns/nameservers
-# 403 {"message":"calling actor does not have enough permissions to perform this function"}
-
-GET /api/v2/tailnet/-/dns/preferences
-# 403 {"message":"calling actor does not have enough permissions to perform this function"}
-
-GET /api/v2/tailnet/-/routes
-# 404 404 page not found\n
-GET /api/v2/tailnet/-/webhooks
-# 404 {"message":"not found"}
-```
-
-DNS administration is permission-gated. The guessed tailnet-level routes and webhooks collection paths do not exist.
-
-## Base-path correction probes
-
-`TS_API_BASE` already includes `/api/v2`. An initial diagnostic intentionally confirmed that adding another `/api/v2` is wrong. These were real probes and are retained for completeness. Every request below returned `404 {"message":"404 page not found"}`:
-
-```http
-GET /api/v2/api/v2/tailnet
-GET /api/v2/api/v2/tailnets
-GET /api/v2/api/v2/tailnet/-
-GET /api/v2/api/v2/tailnet/-/settings
-GET /api/v2/api/v2/tailnet/-/acl
-GET /api/v2/api/v2/tailnet/-/devices
-POST /api/v2/api/v2/tailnet
-{"name":"spurfire-probe-api-research"}
-```
-
-## Verdict
-
-| Capability / endpoint | Status | Evidence |
+| Capability | Latest status | Evidence |
 |---|---:|---|
-| OAuth token `POST /oauth/token` | 200 | Bearer token, `scope=tailnets`, `expires_in=3600` |
-| Create tailnet `POST /tailnet` | 404 | Route absent for both `name` and `tailnet` bodies |
-| Create tailnet `POST /tailnets` | 404 | Route absent for both `name` and `tailnet` bodies |
-| Tailnet settings `GET /tailnet/-/settings` | 200 | Empty object `{}` |
-| Create auth key `POST /tailnet/-/keys` | 403 | Actor lacks permission |
-| List auth keys `GET /tailnet/-/keys` | 403 | Actor lacks permission |
-| List devices `GET /tailnet/-/devices` | 403 | Actor lacks permission |
-| Delete device `DELETE /device/{id}` | 404 with synthetic ID | Route recognized; no manageable matching device |
-| Read ACL `GET /tailnet/-/acl` | 403 | Actor lacks permission |
-| Read DNS configuration | 403 | Actor lacks permission |
+| Organization token exchange | Verified | `POST /oauth/token` succeeded |
+| Organization list | Verified | `GET /organizations/-/tailnets`; 415 entries at probe time |
+| API-only child create | Verified | `POST /organizations/-/tailnets` with `{displayName}` created exactly one probe |
+| Child token exchange | Verified | Returned child OAuth pair minted a child-scoped token |
+| Child tailnet delete | Verified | `DELETE /tailnet/{dnsName}` with child token; stable ID absent afterward |
+| Child one-use auth-key mint | Implemented/mock-tested | No new live mutation was allowed in this implementation workflow |
+| Shared auth-key/device/ACL scopes | Blocked in historical probe | Required reads/mutation returned 403 |
 
-**Provisioning verdict today:** this OAuth client supports **neither** tailnet-per-lobby nor shared-tailnet-plus-tags end to end. Tailnet-per-lobby is blocked because no tested alpha create endpoint exists. The shared-tailnet fallback is also blocked because the client cannot mint tagged ephemeral auth keys, read/update ACL policy, or list devices. If permissions are expanded, shared-tailnet-plus-tags is the nearer viable mode because its standard API routes exist; isolation still requires ACL grants/tag ownership and successful key/device cleanup tests before production use.
+**API fact:** organization-tailnet creation is available and is independent of shared-tailnet key/device/ACL scopes. `/v1/capabilities` reports those dimensions separately.
+
+**Production-readiness verdict:** the verified create/token/delete lifecycle is enough for a guarded prototype, not production. The server currently keeps each one-time child OAuth pair only in a provider-owned in-memory vault keyed by public lobby ID. A restart deliberately fails closed with `child_secret_unavailable_manual_remediation`; durable state never contains the secret. Production requires an encrypted secret manager plus live end-to-end verification of child-scoped one-use key issuance and cleanup/reconciliation under failure.

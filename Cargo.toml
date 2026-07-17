@@ -17,3 +17,4 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
+zeroize = "1"

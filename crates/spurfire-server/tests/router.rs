@@ -30,6 +30,7 @@ struct RecordingProvider {
     cleanups: AtomicU64,
     mutations: AtomicU64,
     fail_mint_scopes: AtomicBool,
+    missing_child_secret: AtomicBool,
     pending_cleanup_calls: AtomicU64,
     cleanup_requests: Mutex<Vec<CleanupLobbyRequest>>,
 }
@@ -42,6 +43,7 @@ impl RecordingProvider {
             cleanups: AtomicU64::new(0),
             mutations: AtomicU64::new(0),
             fail_mint_scopes: AtomicBool::new(false),
+            missing_child_secret: AtomicBool::new(false),
             pending_cleanup_calls: AtomicU64::new(0),
             cleanup_requests: Mutex::new(Vec::new()),
         }
@@ -51,6 +53,7 @@ impl RecordingProvider {
         Self {
             capabilities: ProviderCapabilities {
                 oauth_token_ok: true,
+                can_manage_organization_tailnets: true,
                 can_mint_auth_keys: false,
                 can_list_devices: false,
                 can_manage_acl: false,
@@ -85,6 +88,10 @@ impl RecordingProvider {
         self.mutations.load(Ordering::SeqCst)
     }
 
+    fn lose_child_secrets(&self) {
+        self.missing_child_secret.store(true, Ordering::SeqCst);
+    }
+
     fn cleanup_requests(&self) -> Vec<CleanupLobbyRequest> {
         self.cleanup_requests.lock().unwrap().clone()
     }
@@ -96,16 +103,30 @@ impl NetworkProvider for RecordingProvider {
         self.capabilities
     }
 
+    fn lobby_access_error(
+        &self,
+        _lobby_id: spurfire_protocol::LobbyId,
+        mode: ProvisioningMode,
+        dry_run: bool,
+    ) -> Option<ProviderError> {
+        (!dry_run
+            && mode == ProvisioningMode::TailnetPerLobby
+            && self.missing_child_secret.load(Ordering::SeqCst))
+        .then_some(ProviderError::ChildSecretUnavailable)
+    }
+
     async fn prepare_lobby(
         &self,
         request: PrepareLobbyRequest,
     ) -> Result<PreparedNetwork, ProviderError> {
-        if request.mode == ProvisioningMode::TailnetPerLobby {
-            return Err(ProviderError::ModeUnavailable);
+        if request.mode == ProvisioningMode::TailnetPerLobby && !request.dry_run {
+            self.mutations.fetch_add(1, Ordering::SeqCst);
         }
         Ok(PreparedNetwork {
             tailnet: if request.dry_run {
                 "dry-run.invalid".to_owned()
+            } else if request.mode == ProvisioningMode::TailnetPerLobby {
+                "child-test.ts.net".to_owned()
             } else {
                 "-".to_owned()
             },
@@ -150,6 +171,11 @@ impl NetworkProvider for RecordingProvider {
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError> {
         self.cleanups.fetch_add(1, Ordering::SeqCst);
+        if request.mode == ProvisioningMode::TailnetPerLobby
+            && self.missing_child_secret.load(Ordering::SeqCst)
+        {
+            return Err(ProviderError::ChildSecretUnavailable);
+        }
         if !request.dry_run {
             self.mutations.fetch_add(1, Ordering::SeqCst);
         }
@@ -527,6 +553,36 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     assert!(!error.to_string().contains("tskey-"));
     assert_eq!(failing.mint_count(), 1);
     assert_eq!(get(&app, lobby_id).await.1["state"], "FAILED");
+}
+
+#[tokio::test]
+async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(45_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, _, _) = live_app(clock, provider.clone());
+
+    let (status, created) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let (status, replay) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["lobby_id"], created["lobby_id"]);
+    assert_eq!(provider.mutation_count(), 1);
+
+    let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
+    assert_eq!(capabilities["modes"]["tailnet_per_lobby"], "available");
+    assert_eq!(capabilities["can_manage_organization_tailnets"], true);
+    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+
+    provider.lose_child_secrets();
+    let (_, failed) = get(&app, lobby_id).await;
+    assert_eq!(failed["state"], "FAILED");
+    assert_eq!(
+        failed["state_reason"],
+        "child_secret_unavailable_manual_remediation"
+    );
+    assert_eq!(failed["cleanup_pending"], true);
+    assert!(!failed.to_string().contains("child-oauth"));
 }
 
 #[tokio::test]

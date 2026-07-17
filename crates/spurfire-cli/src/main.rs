@@ -199,11 +199,13 @@ async fn create(args: CreateArgs, json: bool) -> Result<()> {
     }
 
     let mode = ProvisioningMode::from(args.mode);
+    if mode == ProvisioningMode::TailnetPerLobby {
+        bail!(
+            "tailnet-per-lobby is server-only: spurfire-ctl will not persist child OAuth secrets; use spurfire-server"
+        );
+    }
     let client = TailscaleClient::from_env().await?;
-    let tailnet = match mode {
-        ProvisioningMode::TailnetPerLobby => client.create_tailnet(name).await?.name,
-        ProvisioningMode::SharedTailnet => SHARED_TAILNET.to_owned(),
-    };
+    let tailnet = SHARED_TAILNET.to_owned();
 
     let tag = lobby_tag(name);
     let lobby = Lobby {
@@ -277,15 +279,17 @@ fn list(json: bool) -> Result<()> {
 async fn status(name: &str, json: bool) -> Result<()> {
     let store = Store::load()?;
     let lobby = store.get(name)?;
+    if lobby.mode == ProvisioningMode::TailnetPerLobby {
+        bail!(
+            "tailnet-per-lobby status requires the server's in-memory child OAuth vault; no secret is stored by spurfire-ctl"
+        );
+    }
     let client = TailscaleClient::from_env().await?;
     let devices = client
         .list_devices(&lobby.tailnet)
         .await?
         .into_iter()
-        .filter(|device| {
-            lobby.mode == ProvisioningMode::TailnetPerLobby
-                || device.tags.iter().any(|tag| tag == &lobby.tag)
-        })
+        .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
         .collect::<Vec<_>>();
     if json {
         print_json(&StatusOutput { lobby, devices })
@@ -313,24 +317,21 @@ async fn destroy(name: &str, json: bool) -> Result<()> {
         .position(|lobby| lobby.name == name)
         .ok_or_else(|| anyhow!("lobby {name:?} is not tracked locally"))?;
     let lobby = store.data.lobbies[position].clone();
+    if lobby.mode == ProvisioningMode::TailnetPerLobby {
+        bail!(
+            "tailnet-per-lobby cleanup requires manual remediation because spurfire-ctl never persisted the child OAuth secret"
+        );
+    }
     let client = TailscaleClient::from_env().await?;
-    let deleted_devices = match lobby.mode {
-        ProvisioningMode::TailnetPerLobby => {
-            client.delete_tailnet(&lobby.tailnet).await?;
-            0
-        }
-        ProvisioningMode::SharedTailnet => {
-            let devices = client.list_devices(&lobby.tailnet).await?;
-            let matching = devices
-                .into_iter()
-                .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
-                .collect::<Vec<_>>();
-            for device in &matching {
-                client.delete_device(&device.id).await?;
-            }
-            matching.len()
-        }
-    };
+    let devices = client.list_devices(&lobby.tailnet).await?;
+    let matching = devices
+        .into_iter()
+        .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
+        .collect::<Vec<_>>();
+    for device in &matching {
+        client.delete_device(&device.id).await?;
+    }
+    let deleted_devices = matching.len();
 
     store.data.lobbies.remove(position);
     store.save()?;

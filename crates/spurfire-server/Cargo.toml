@@ -22,6 +22,7 @@ spurfire-protocol = { path = "../spurfire-protocol" }
 thiserror.workspace = true
 tokio.workspace = true
 uuid = { version = "1", features = ["v4"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -58,8 +58,7 @@ pub struct CreateLobbyRequest {
     /// Roster capacity; defaults to 8 and may not exceed 16.
     #[serde(default = "default_max_players")]
     pub max_players: u8,
-    /// Shared-tailnet or dry-run behavior. Tailnet-per-lobby is parsed so the
-    /// service can return the explicit `mode_unavailable` response.
+    /// Shared-tailnet, dedicated child-tailnet, or dry-run behavior.
     pub provisioning_mode: ProvisioningMode,
     /// Optional placement hint; it does not affect election behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,9 +73,6 @@ impl CreateLobbyRequest {
             return Err(ApiValidationError::InvalidMaxPlayers {
                 value: self.max_players,
             });
-        }
-        if self.provisioning_mode.is_known_unavailable() {
-            return Err(ApiValidationError::ModeUnavailable);
         }
         Ok(())
     }
@@ -493,10 +489,10 @@ pub struct DestroyLobbyResponse {
 pub enum CapabilityModeStatus {
     /// Required calls are currently permitted.
     Available,
-    /// Standard routes exist but tested OAuth scopes are insufficient.
+    /// Standard shared-tailnet routes exist but OAuth scopes are insufficient.
     BlockedScopes,
-    /// Tested alpha create routes returned 404.
-    UnavailableApi404,
+    /// Organization tailnet listing/creation access is unavailable.
+    BlockedOrganizationAccess,
     /// Status introduced by a newer service.
     #[default]
     #[serde(other)]
@@ -515,9 +511,11 @@ pub struct CapabilityModes {
 /// `GET /v1/capabilities` response. It contains booleans and verdicts only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
-    /// OAuth token/settings probe succeeded.
+    /// OAuth token exchange succeeded.
     pub oauth_token_ok: bool,
-    /// Auth-key mint probe is permitted.
+    /// Organization tailnet listing is permitted.
+    pub can_manage_organization_tailnets: bool,
+    /// Shared-tailnet auth-key probe is permitted.
     pub can_mint_auth_keys: bool,
     /// Device-list probe is permitted.
     pub can_list_devices: bool,
@@ -560,9 +558,6 @@ pub enum ApiValidationError {
         /// Supplied capacity.
         value: u8,
     },
-    /// Tailnet-per-lobby is explicitly unavailable under the verified 404 verdict.
-    #[error("tailnet_per_lobby is unavailable: tested create API routes returned 404")]
-    ModeUnavailable,
     /// Client and service major versions differ.
     #[error(transparent)]
     WireVersionIncompatible(WireVersionMismatch),
@@ -630,7 +625,7 @@ impl fmt::Display for CapabilityModeStatus {
         let value = match self {
             Self::Available => "available",
             Self::BlockedScopes => "blocked_scopes",
-            Self::UnavailableApi404 => "unavailable_api_404",
+            Self::BlockedOrganizationAccess => "blocked_organization_access",
             Self::Unknown => "unknown",
         };
         formatter.write_str(value)

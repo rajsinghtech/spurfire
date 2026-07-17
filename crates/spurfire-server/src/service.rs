@@ -203,7 +203,7 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
         || state
             .provider
             .cached_capabilities()
-            .shared_tailnet_available();
+            .mode_available(state.config.provisioning_mode);
     Json(HealthResponse {
         status: if ready { "ok" } else { "degraded" },
         provisioning_ready: ready,
@@ -252,19 +252,8 @@ async fn create_lobby(
         fingerprint(&(request.clone(), effective_mode, actor), effective_dry_run)?;
     let now = state.clock.now();
     let lobby_id = new_lobby_id();
-    // This method only prepares record-local metadata; all capability evidence
-    // was cached by startup probes, so create never waits on Tailscale.
-    let prepared = state
-        .provider
-        .prepare_lobby(PrepareLobbyRequest {
-            lobby_id,
-            mode: effective_mode,
-            dry_run: effective_dry_run,
-        })
-        .await
-        .map_err(|error| provider_api_error(&error, effective_dry_run))?;
-
-    let absolute_ttl_ms = if prepared.dry_run {
+    let _lobby = state.lock_lobby(lobby_id).await;
+    let absolute_ttl_ms = if effective_dry_run {
         state.config.dry_run_ttl_ms()
     } else {
         ABSOLUTE_TTL_MS
@@ -284,20 +273,18 @@ async fn create_lobby(
             absolute_expires_at: now.saturating_add(absolute_ttl_ms),
         },
         wire_version: WIRE_VERSION,
-        provisioning_mode: if prepared.dry_run {
-            ProvisioningMode::DryRun
-        } else {
-            effective_mode
-        },
+        provisioning_mode: effective_mode,
         created_at: now,
         cleanup_pending: false,
     };
+    // Persist PROVISIONING before a child-tailnet mutation. This makes create idempotency resolve
+    // before `prepare_lobby` and prevents a retry from creating a second child tailnet.
     let stored = StoredLobby::new(
         lobby,
         actor,
-        prepared.tailnet,
+        "provisioning.invalid",
         lobby_tag(lobby_id),
-        prepared.dry_run,
+        effective_dry_run,
         idle_ttl_ms,
     );
 
@@ -305,29 +292,61 @@ async fn create_lobby(
         .store
         .create(idempotency_key, request_fingerprint, actor, now, stored)
         .await
-        .map_err(|error| store_api_error(&error, prepared.dry_run))?;
+        .map_err(|error| store_api_error(&error, effective_dry_run))?;
     match outcome {
-        CreateStoreOutcome::Created(created) => {
-            let response = create_response(&created, prepared.metadata);
-            let mut advanced = created;
-            if advanced.dry_run
-                || state
-                    .provider
-                    .cached_capabilities()
-                    .shared_tailnet_available()
-            {
-                transition(&mut advanced.lobby, LobbyState::Forming, effective_dry_run)?;
-            } else {
-                transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
-                advanced.lobby.state_reason = Some(
-                    state
-                        .provider
-                        .cached_capabilities()
-                        .blocked_state_reason()
-                        .to_owned(),
-                );
-                advanced.terminal_at = Some(now);
-            }
+        CreateStoreOutcome::Created(mut advanced) => {
+            let prepared = tokio::time::timeout(
+                PROVIDER_OPERATION_TIMEOUT,
+                state.provider.prepare_lobby(PrepareLobbyRequest {
+                    lobby_id,
+                    mode: effective_mode,
+                    dry_run: effective_dry_run,
+                }),
+            )
+            .await
+            .unwrap_or(Err(ProviderError::Unavailable {
+                operation: "prepare_lobby",
+            }));
+            let metadata = match prepared {
+                Ok(prepared) => {
+                    advanced.tailnet = prepared.tailnet;
+                    advanced.dry_run = prepared.dry_run;
+                    if prepared.dry_run
+                        || state
+                            .provider
+                            .cached_capabilities()
+                            .mode_available(effective_mode)
+                    {
+                        transition(&mut advanced.lobby, LobbyState::Forming, effective_dry_run)?;
+                    } else {
+                        transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
+                        advanced.lobby.state_reason = Some(
+                            state
+                                .provider
+                                .cached_capabilities()
+                                .blocked_state_reason(effective_mode)
+                                .to_owned(),
+                        );
+                        advanced.terminal_at = Some(now);
+                    }
+                    prepared.metadata
+                }
+                Err(error) => {
+                    transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
+                    let ambiguous_child_create = effective_mode
+                        == ProvisioningMode::TailnetPerLobby
+                        && matches!(error, ProviderError::Unavailable { .. });
+                    advanced.lobby.state_reason = Some(if ambiguous_child_create {
+                        "tailnet_create_outcome_unknown_manual_remediation".to_owned()
+                    } else {
+                        error.state_reason().to_owned()
+                    });
+                    advanced.cleanup_pending = ambiguous_child_create;
+                    advanced.terminal_at = Some(now);
+                    metadata_for(effective_dry_run)
+                }
+            };
+            let response = create_response(&advanced, metadata);
             state
                 .store
                 .replace(advanced)
@@ -527,6 +546,7 @@ async fn join_lobby(
         PROVIDER_OPERATION_TIMEOUT,
         state.provider.mint_credential(MintCredentialRequest {
             lobby_id,
+            mode: stored.lobby.provisioning_mode,
             player_id: request.player_id,
             tailnet: stored.tailnet.clone(),
             tag: stored.tag.clone(),
@@ -553,7 +573,8 @@ async fn join_lobby(
             stored.lobby.authority = None;
             stored.last_election = None;
             stored.terminal_at = Some(now);
-            stored.cleanup_pending = !stored.credentials.is_empty();
+            stored.cleanup_pending = !stored.credentials.is_empty()
+                || matches!(error, ProviderError::ChildSecretUnavailable);
             state
                 .store
                 .replace(stored)
@@ -1399,7 +1420,41 @@ async fn load_maintained_lobby(
         .get(lobby_id)
         .await
         .ok_or_else(|| lobby_not_found(dry_hint))?;
-    let transitioned = apply_time_transitions(&mut stored, now);
+    let mut transitioned = false;
+    let requires_provider_access = stored.cleanup_pending
+        || !matches!(
+            stored.lobby.state,
+            LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+        );
+    if let Some(error) = requires_provider_access
+        .then(|| {
+            state.provider.lobby_access_error(
+                stored.lobby.lobby_id,
+                stored.lobby.provisioning_mode,
+                stored.dry_run,
+            )
+        })
+        .flatten()
+    {
+        if !matches!(
+            stored.lobby.state,
+            LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+        ) && stored
+            .lobby
+            .state
+            .validate_transition(LobbyState::Failed)
+            .is_ok()
+        {
+            stored.lobby.state = LobbyState::Failed;
+        }
+        stored.lobby.state_reason = Some(error.state_reason().to_owned());
+        stored.lobby.authority = None;
+        stored.last_election = None;
+        stored.cleanup_pending = true;
+        stored.terminal_at.get_or_insert(now);
+        transitioned = true;
+    }
+    transitioned |= apply_time_transitions(&mut stored, now);
     let freshness_changed = refresh_freshness_state(&mut stored, now);
     if transitioned || freshness_changed {
         state
@@ -1684,6 +1739,7 @@ fn cleanup_request(
 ) -> CleanupLobbyRequest {
     CleanupLobbyRequest {
         lobby_id: stored.lobby.lobby_id,
+        mode: stored.lobby.provisioning_mode,
         tailnet: stored.tailnet.clone(),
         tag: stored.tag.clone(),
         credentials: stored
@@ -1766,7 +1822,9 @@ async fn cleanup_resources(
         {
             stored.lobby.state = LobbyState::Destroyed;
         }
-        stored.lobby.state_reason = None;
+        if !stored.cleanup_pending {
+            stored.lobby.state_reason = None;
+        }
         stored.lobby.authority = None;
         stored.terminal_at = Some(now);
     }
@@ -1778,6 +1836,9 @@ fn apply_cleanup_result(
     now: UnixMillis,
     result: Result<CleanupOutcome, ProviderError>,
 ) {
+    if let Err(ProviderError::ChildSecretUnavailable) = &result {
+        stored.lobby.state_reason = Some("child_secret_unavailable_manual_remediation".to_owned());
+    }
     if let Ok(outcome) = &result {
         let revoked: BTreeSet<&str> = outcome
             .revoked_credential_ids
@@ -1881,10 +1942,10 @@ fn invalid_results(message: &str, dry_run: bool) -> ApiError {
 
 fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
     let (status, code, message) = match error {
-        ProviderError::ModeUnavailable => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "mode_unavailable",
-            "requested network provisioning mode is unavailable",
+        ProviderError::ChildSecretUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "manual_remediation_required",
+            "provider credentials needed for this lobby are unavailable after restart",
         ),
         ProviderError::InsufficientScopes { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
