@@ -289,10 +289,7 @@ async fn status(name: &str, json: bool) -> Result<()> {
         .list_devices(&lobby.tailnet)
         .await?
         .into_iter()
-        .filter(|device| {
-            lobby.mode == ProvisioningMode::TailnetPerLobby
-                || device.tags.iter().any(|tag| tag == &lobby.tag)
-        })
+        .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
         .collect::<Vec<_>>();
     if json {
         print_json(&StatusOutput { lobby, devices })
@@ -320,25 +317,21 @@ async fn destroy(name: &str, json: bool) -> Result<()> {
         .position(|lobby| lobby.name == name)
         .ok_or_else(|| anyhow!("lobby {name:?} is not tracked locally"))?;
     let lobby = store.data.lobbies[position].clone();
+    if lobby.mode == ProvisioningMode::TailnetPerLobby {
+        bail!(
+            "tailnet-per-lobby cleanup requires manual remediation because spurfire-ctl never persisted the child OAuth secret"
+        );
+    }
     let client = TailscaleClient::from_env().await?;
-    let deleted_devices = match lobby.mode {
-        ProvisioningMode::TailnetPerLobby => {
-            bail!(
-                "tailnet-per-lobby cleanup requires manual remediation because spurfire-ctl never persisted the child OAuth secret"
-            );
-        }
-        ProvisioningMode::SharedTailnet => {
-            let devices = client.list_devices(&lobby.tailnet).await?;
-            let matching = devices
-                .into_iter()
-                .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
-                .collect::<Vec<_>>();
-            for device in &matching {
-                client.delete_device(&device.id).await?;
-            }
-            matching.len()
-        }
-    };
+    let devices = client.list_devices(&lobby.tailnet).await?;
+    let matching = devices
+        .into_iter()
+        .filter(|device| device.tags.iter().any(|tag| tag == &lobby.tag))
+        .collect::<Vec<_>>();
+    for device in &matching {
+        client.delete_device(&device.id).await?;
+    }
+    let deleted_devices = matching.len();
 
     store.data.lobbies.remove(position);
     store.save()?;

@@ -20,6 +20,7 @@ docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
 docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
 docs/rustscale-integration.md  RustScale readiness survey
+docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 .github/workflows/         Locked CI gates and manual credentialed e2e
 justfile                   Task runner recipes
 ```
@@ -46,7 +47,7 @@ cargo run -p spurfire-server -- --dry-run --bind 127.0.0.1:8080
 Invoke-RestMethod http://127.0.0.1:8080/healthz
 ```
 
-For live API probing only, copy `.env.example` to the gitignored `.env` and fill in `TS_CLIENT_ID` and `TS_CLIENT_SECRET`. The currently tested OAuth client lacks required shared-tailnet permissions, so dry-run is the supported local server path. Never place OAuth credentials in a game client.
+For live API probing only, copy `.env.example` to the gitignored `.env` and fill in `TS_CLIENT_ID` and `TS_CLIENT_SECRET`. Organization-tailnet list/create, child token exchange, and child deletion are verified; shared-tailnet key/device/ACL scopes remain blocked in the historical probe. Dry-run remains the safe default. Never place organization or child OAuth credentials in a game client.
 
 Useful commands:
 
@@ -64,7 +65,8 @@ Useful commands:
 - [docs/decisions.md](docs/decisions.md) — decisions and open questions.
 - [docs/tailscale-api.md](docs/tailscale-api.md) — current API permission evidence.
 - [docs/rustscale-integration.md](docs/rustscale-integration.md) — sibling integration readiness.
+- [docs/rustscale-tailnet-tooling.md](docs/rustscale-tailnet-tooling.md) — reference script comparison and safe wrapper policy.
 
 ## Status
 
-The control plane, protocol, CLI, and dry-run HTTP lobby prototype are implemented. Live shared-tailnet provisioning remains blocked by OAuth scopes and ACL/tag-ownership verification; the game itself is not yet playable.
+The control plane, protocol, CLI, and HTTP lobby prototype now implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. This is not production-ready: restart recovery requires an encrypted secret manager and child key issuance still needs live end-to-end verification. Shared-tailnet provisioning remains blocked by historical OAuth scope/ACL evidence; the game itself is not yet playable.

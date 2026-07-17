@@ -16,6 +16,7 @@ use spurfire_protocol::{
     ProvisioningMode, ResponseMetadata, UnixMillis, DRY_RUN_AUTH_KEY,
 };
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 /// Provider request made while a lobby record is being prepared.
@@ -435,6 +436,7 @@ pub struct TailscaleProvider {
     simulated_mints: AtomicU64,
     capabilities: RwLock<ProviderCapabilities>,
     child_vault: RwLock<BTreeMap<LobbyId, ChildTailnetAccess>>,
+    child_create_lock: AsyncMutex<()>,
 }
 
 impl TailscaleProvider {
@@ -447,6 +449,7 @@ impl TailscaleProvider {
             simulated_mints: AtomicU64::new(0),
             capabilities: RwLock::new(ProviderCapabilities::blocked()),
             child_vault: RwLock::new(BTreeMap::new()),
+            child_create_lock: AsyncMutex::new(()),
         }
     }
 
@@ -565,6 +568,10 @@ impl NetworkProvider for TailscaleProvider {
             });
         }
 
+        // Serialize the check-create-insert sequence. The HTTP store normally serializes lobby
+        // creation, but the provider boundary must also be safe when called directly or by a
+        // future multi-request adapter.
+        let _create_guard = self.child_create_lock.lock().await;
         if let Ok(vault) = self.child_vault.read() {
             if let Some(access) = vault.get(&request.lobby_id) {
                 return Ok(PreparedNetwork {
@@ -1030,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tailnet_per_lobby_uses_child_scope_then_deletes_and_evicts() {
+    async fn concurrent_tailnet_prepare_is_idempotent_then_child_scope_deletes_and_evicts() {
         const CHILD_ID: &str = "child-client-provider-canary";
         const CHILD_SECRET: &str = "child-secret-provider-canary";
         let mut server = Server::new_async().await;
@@ -1094,21 +1101,24 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let provider = TailscaleProvider::new(
+        let provider = Arc::new(TailscaleProvider::new(
             TailscaleClient::new(server.url(), "org-client", "org-secret"),
             "-",
-        );
+        ));
         let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let player_id = PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap();
+        let prepare_request = PrepareLobbyRequest {
+            lobby_id,
+            mode: ProvisioningMode::TailnetPerLobby,
+            dry_run: false,
+        };
 
-        let prepared = provider
-            .prepare_lobby(PrepareLobbyRequest {
-                lobby_id,
-                mode: ProvisioningMode::TailnetPerLobby,
-                dry_run: false,
-            })
-            .await
-            .unwrap();
+        let (first, second) = tokio::join!(
+            provider.prepare_lobby(prepare_request),
+            provider.prepare_lobby(prepare_request)
+        );
+        let prepared = first.unwrap();
+        assert_eq!(second.unwrap().tailnet, prepared.tailnet);
         assert_eq!(prepared.tailnet, "tail-provider.ts.net");
         assert_eq!(provider.child_secret_count(), 1);
         let provider_debug = format!("{provider:?}");

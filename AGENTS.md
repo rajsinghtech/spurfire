@@ -18,6 +18,7 @@ This repository is the Rust control plane. It provisions Tailscale-backed lobbie
 - `docs/decisions.md` — ADR-lite decisions and blocking questions.
 - `docs/tailscale-api.md` — redacted API probe evidence and provisioning verdict.
 - `docs/rustscale-integration.md` — RustScale readiness and integration survey.
+- `docs/rustscale-tailnet-tooling.md` — RustScale organization-tailnet script comparison and safe probe policy.
 - `docs/lobby-service.md` — HTTP routes, lifecycle, dry-run, configuration, and trust boundaries.
 - `.github/workflows/ci.yml` — continuous integration gates.
 
@@ -48,12 +49,12 @@ Copy `.env.example` to the gitignored `.env` for local live-API work:
 - `SPURFIRE_BIND_ADDR` — server listen socket, loopback by default.
 - `SPURFIRE_STATE_PATH` — durable non-secret real-mode state file.
 
-OAuth credentials are control-plane secrets. They must never be committed, logged, embedded in binaries, or shipped in game clients. Clients may receive only narrowly scoped, one-use, short-lived join credentials. Keep `.env` gitignored; redact OAuth tokens and generated auth keys from reports and fixtures.
+Organization and child OAuth credentials are control-plane secrets. They must never be committed, logged, embedded in binaries, persisted in the prototype JSON store, or shipped in game clients. Clients may receive only narrowly scoped, one-use, short-lived join credentials. Keep `.env` gitignored; redact OAuth tokens, one-time child secrets, and generated auth keys from reports and fixtures.
 
 ## Provisioning modes
 
-- `TailnetPerLobby`: implemented as an explicit unavailable path, not operational. Verified singular and plural tailnet-create endpoints returned 404, so the alpha create API is unavailable to the tested deployment.
-- `SharedTailnet`: implemented and the nearest viable mode, but not verified end to end with the current OAuth client. The tested client received 403 for auth-key, device-list, and ACL operations. It requires appropriate scopes plus successful key issuance, ACL/tag ownership, device cleanup, and live integration tests before production use.
+- `TailnetPerLobby`: implemented through verified `GET/POST /organizations/-/tailnets`, child OAuth token exchange, and child-scoped tailnet deletion. The one-time child OAuth pair lives only in a provider-owned in-memory vault keyed by lobby ID. Restart fails closed with manual remediation; production requires an encrypted secret manager and reconciliation. Child auth-key minting is mock-tested but still needs live end-to-end verification.
+- `SharedTailnet`: remains implemented but historically received 403 for auth-key, device-list, and ACL operations. Its readiness is reported independently from organization-tailnet access and still requires appropriate scopes, ACL/tag ownership, device cleanup, and live integration tests.
 
 See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changing either verdict.
 
@@ -77,6 +78,7 @@ For parallel agent work, create one branch and sibling worktree per disjoint tas
 
 ## Known issues
 
-- Tailnet-per-lobby cannot operate because no verified tailnet-create API route is available.
-- Shared-tailnet live provisioning is blocked for the tested OAuth client by insufficient auth-key, device, and ACL permissions.
+- Tailnet-per-lobby prototype secrets are process-local; restart makes retained child lobbies `cleanup_pending` with manual remediation until an encrypted secret manager/reconciler is integrated.
+- Child one-use auth-key issuance is implemented and mock-tested but was not live-mutated in this correction workflow.
+- Shared-tailnet live provisioning is blocked by the historical OAuth client's insufficient auth-key, device, and ACL permissions.
 - RustScale's C ABI lacks gameplay UDP, RTT/status telemetry is incomplete, and peer-relay Hostinfo advertisement may regress during refresh; track these in the sibling repository.

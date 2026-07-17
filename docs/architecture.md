@@ -8,11 +8,10 @@ through the control plane.
 
 - **`spurfire-control`** — library crate wrapping the Tailscale API: lobby tailnet
   provisioning, one-use auth-key minting, ephemeral device cleanup, tailnet teardown.
-- **`spurfire-ctl`** — CLI binary exposing the lobby lifecycle (create/join/list/destroy) for
-  development, testing, and ops.
-- **Future backend service** — a small service built on `spurfire-control` handling
-  provisioning, matchmaking, cleanup, identity, and leaderboards. There is no permanent
-  dedicated gameplay server.
+- **`spurfire-ctl`** — shared-tailnet development/operations CLI. It deliberately refuses
+  tailnet-per-lobby creation because it will not persist child OAuth credentials.
+- **`spurfire-server`** — Axum lobby service handling provisioning metadata, one-use credential
+  issuance, cleanup, and prototype results. There is no permanent dedicated gameplay server.
 
 ## Data plane (game clients)
 
@@ -25,9 +24,10 @@ through the control plane.
 
 ## Trust boundaries
 
-- **Tailscale OAuth credentials** (`TS_CLIENT_ID` / `TS_CLIENT_SECRET`) exist **only in the
-  control plane** (local `.env` for dev, the backend service in production). The tailnet admin
-  credential **never ships in the game client**.
+- **Tailscale organization OAuth credentials** (`TS_CLIENT_ID` / `TS_CLIENT_SECRET`) exist
+  **only in the control plane**. A created child tailnet's one-time OAuth pair is held only in
+  the provider's in-memory vault in this prototype; it is never durable or client-visible. The
+  production design requires an encrypted secret manager and restart reconciliation.
 - Game clients receive **one-use, short-lived auth keys** scoped to a single lobby tailnet.
   Joining a lobby grants tailnet access only — never API access.
 - Match results cross the boundary back into the control plane for verification before they
@@ -36,14 +36,14 @@ through the control plane.
 ## Lobby lifecycle
 
 1. Player creates a lobby.
-2. Control service creates the lobby tailnet.
-3. One-use, short-lived credential minted per player.
+2. Tailnet-per-lobby mode creates an API-only organization child and vaults its child OAuth pair; shared mode selects the configured shared tailnet.
+3. One-use, short-lived credential is minted in the selected scope per player.
 4. Clients join via embedded RustScale.
 5. Peers exchange version, roster, map seed, connectivity measurements.
 6. Authority host elected.
 7. Match runs (peer-to-peer gameplay traffic only).
 8. Results submitted and verified.
-9. Peers disconnect; ephemeral devices removed; tailnet destroyed.
+9. Peers disconnect; shared resources are cleaned by tag, or the API-only child tailnet is deleted and its vault entry evicted.
 
 ```mermaid
 sequenceDiagram
@@ -54,7 +54,7 @@ sequenceDiagram
 
     P->>CP: Create lobby
     CP->>TS: Create lobby tailnet
-    TS-->>CP: tailnet id
+    TS-->>CP: typed id / dnsName / one-time child OAuth pair
     P->>CP: Join lobby
     CP->>TS: Mint one-use short-lived auth key
     TS-->>CP: auth key
