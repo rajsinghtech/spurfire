@@ -2,6 +2,7 @@
 **/*.rs.bk
 Cargo.lock.bak
 .env
+/.spurfire/
 *.log
 .DS_Store
 node_modules

@@ -23,6 +23,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn default_authority_formula_version() -> String {
+    AUTHORITY_FORMULA_VERSION.to_owned()
+}
+
 /// Non-secret description of a mutating call suppressed or planned by dry-run mode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedAction {
@@ -40,8 +44,9 @@ pub struct ResponseMetadata {
     /// True when no mutating Tailscale call was made.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
-    /// Calls that would have occurred in a real request.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Calls that would have occurred in a real request. This is always
+    /// serialized so a dry-run response with no mutations still carries `[]`.
+    #[serde(default)]
     pub planned_actions: Vec<PlannedAction>,
 }
 
@@ -118,6 +123,10 @@ pub struct JoinLobbyRequest {
     pub display_name: String,
     /// Client protocol version.
     pub client_wire_version: WireVersion,
+    /// Authority formula implemented by the client. Older clients default to
+    /// the current formula, while mixed-formula rosters are rejected at start.
+    #[serde(default = "default_authority_formula_version")]
+    pub authority_formula_version: String,
     /// Optional horse choice for lobby display and match setup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horse_selection: Option<HorseSelection>,
@@ -347,8 +356,11 @@ pub struct AuthorityResponse {
     pub eligible: Vec<AuthorityScore>,
     /// Deterministic winner.
     pub winner_player_id: PlayerId,
-    /// SHA-256 canonical matrix fingerprint.
+    /// SHA-256 canonical election-input fingerprint.
     pub input_hash: InputHash,
+    /// Exact public input needed for peer recomputation, including the
+    /// eligibility evaluation time and server-stamped measurement times.
+    pub input: crate::AuthorityElectionInput,
     /// True when normal eligibility was empty and raw scores decided.
     #[serde(default, skip_serializing_if = "is_false")]
     pub degraded: bool,
@@ -361,6 +373,7 @@ impl From<&AuthorityElection> for AuthorityResponse {
             eligible: election.eligible.clone(),
             winner_player_id: election.winner_player_id,
             input_hash: election.input_hash,
+            input: election.input.clone(),
             degraded: election.degraded,
         }
     }
@@ -408,6 +421,29 @@ pub struct FinalScore {
     /// Deaths recorded for auditing.
     #[serde(default)]
     pub deaths: u32,
+}
+
+/// `POST /v1/lobbies/{lobby_id}/heartbeat` request body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityHeartbeatRequest {
+    /// Must be the currently elected authority.
+    pub player_id: PlayerId,
+    /// Election view under which the authority is operating.
+    pub input_hash: InputHash,
+}
+
+/// Authority heartbeat acceptance response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityHeartbeatResponse {
+    /// True when the heartbeat was accepted.
+    pub accepted: bool,
+    /// `IN_MATCH` after the first accepted heartbeat.
+    pub state: LobbyState,
+    /// Current authority summary.
+    pub authority: AuthoritySummary,
+    /// Dry-run metadata.
+    #[serde(flatten)]
+    pub metadata: ResponseMetadata,
 }
 
 /// `POST /v1/lobbies/{lobby_id}/results` request body.
@@ -631,6 +667,7 @@ mod tests {
             wire_version: WIRE_VERSION,
             provisioning_mode: ProvisioningMode::SharedTailnet,
             created_at: UnixMillis::new(0),
+            cleanup_pending: false,
         }
     }
 
@@ -650,6 +687,7 @@ mod tests {
             player_id: player_id(),
             display_name: "Rider".into(),
             client_wire_version: WireVersion::new(WIRE_VERSION.major(), 99),
+            authority_formula_version: AUTHORITY_FORMULA_VERSION.into(),
             horse_selection: None,
         };
         assert!(request.validate(WIRE_VERSION).is_ok());

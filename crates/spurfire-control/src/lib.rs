@@ -10,7 +10,10 @@
 //!   tailnet-create API was not present during probing.
 //! - [`ProvisioningMode::SharedTailnet`] uses normal auth-key and device endpoints.
 
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -56,10 +59,20 @@ impl Default for AuthKeyOpts {
 }
 
 /// A minted auth key. `key` is a secret — never log it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthKey {
     pub id: String,
     pub key: String,
+}
+
+impl fmt::Debug for AuthKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthKey")
+            .field("id", &self.id)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A device joined to a tailnet.
@@ -74,11 +87,11 @@ pub struct Device {
     pub last_seen: Option<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum ControlError {
     #[error("missing env var: {0}")]
     Env(String),
-    #[error("http {status}: {body}")]
+    #[error("http {status}: upstream response body redacted")]
     Http { status: u16, body: String },
     #[error("Tailscale alpha tailnet provisioning is unavailable: {0}")]
     ProvisioningUnavailable(String),
@@ -86,6 +99,24 @@ pub enum ControlError {
     Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl fmt::Debug for ControlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Env(name) => formatter.debug_tuple("Env").field(name).finish(),
+            Self::Http { status, .. } => formatter
+                .debug_struct("Http")
+                .field("status", status)
+                .field("body", &"<redacted>")
+                .finish(),
+            Self::ProvisioningUnavailable(_) => {
+                formatter.write_str("ProvisioningUnavailable(<redacted>)")
+            }
+            Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
+            Self::Json(_) => formatter.write_str("Json(<redacted>)"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -131,7 +162,11 @@ impl TailscaleClient {
         client_secret: impl Into<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("built-in reqwest timeout configuration is valid"),
             api_base: api_base.into().trim_end_matches('/').to_owned(),
             client_id: client_id.into(),
             client_secret: client_secret.into(),
@@ -248,6 +283,38 @@ impl TailscaleClient {
         });
         let response = self.send(Method::POST, &path, Some(&body)).await?;
         Self::decode(response).await
+    }
+
+    /// Revoke an auth key by its non-secret receipt identifier.
+    pub async fn delete_auth_key(
+        &self,
+        tailnet: &str,
+        credential_id: &str,
+    ) -> Result<(), ControlError> {
+        let path = format!("/tailnet/{tailnet}/keys/{credential_id}");
+        self.send(Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    /// Probe token/settings access without mutating the tailnet.
+    pub async fn probe_settings(&self, tailnet: &str) -> Result<(), ControlError> {
+        self.probe_get(&format!("/tailnet/{tailnet}/settings"))
+            .await
+    }
+
+    /// Probe auth-key scope using the non-mutating key-list endpoint.
+    pub async fn probe_auth_keys(&self, tailnet: &str) -> Result<(), ControlError> {
+        self.probe_get(&format!("/tailnet/{tailnet}/keys")).await
+    }
+
+    /// Probe ACL scope using the non-mutating policy-read endpoint.
+    pub async fn probe_acl(&self, tailnet: &str) -> Result<(), ControlError> {
+        self.probe_get(&format!("/tailnet/{tailnet}/acl")).await
+    }
+
+    async fn probe_get(&self, path: &str) -> Result<(), ControlError> {
+        self.send(Method::GET, path, None).await?;
+        Ok(())
     }
 
     /// List devices currently joined to a tailnet.
@@ -374,8 +441,32 @@ mod tests {
         let result = client.create_auth_key("shared", &opts).await.unwrap();
 
         assert_eq!(result.id, "key-id");
+        assert!(!format!("{result:?}").contains("tskey-auth-secret"));
+        assert!(format!("{result:?}").contains("<redacted>"));
         token.assert_async().await;
         key.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn revokes_auth_key_by_receipt_before_device_cleanup() {
+        let mut server = Server::new_async().await;
+        let token = token_mock(&mut server, 3600, 1).await;
+        let delete = server
+            .mock("DELETE", "/tailnet/shared/keys/key-receipt")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(server.url(), "client", "secret");
+
+        client
+            .delete_auth_key("shared", "key-receipt")
+            .await
+            .unwrap();
+
+        token.assert_async().await;
+        delete.assert_async().await;
     }
 
     #[tokio::test]
@@ -391,6 +482,9 @@ mod tests {
         let client = TailscaleClient::new(server.url(), "client", "secret");
 
         let error = client.list_devices("shared").await.unwrap_err();
+        assert!(!error.to_string().contains("permission denied"));
+        assert!(!format!("{error:?}").contains("permission denied"));
+        assert!(error.to_string().contains("redacted"));
 
         match error {
             ControlError::Http { status, body } => {

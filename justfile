@@ -10,7 +10,7 @@ setup:
     @command -v just >/dev/null 2>&1 || { echo "error: just not found (https://github.com/casey/just)"; exit 1; }
     cargo --version
     just --version
-    cargo fetch
+    cargo fetch --locked
 
 # Format all code
 fmt:
@@ -18,17 +18,21 @@ fmt:
 
 # Lint with warnings denied
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 
 # Run the test suite
 test:
-    cargo test
+    cargo test --locked
+
+# Run the HTTP service in zero-mutation mode on loopback
+serve-dry:
+    cargo run --locked -p spurfire-server -- --dry-run --bind 127.0.0.1:8080
 
 # Full local gate: fmt check + lint + test
 check:
     cargo fmt --check
-    cargo clippy --all-targets -- -D warnings
-    cargo test
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo test --locked
 
 # Live Tailscale API smoke test (skips cleanly without .env)
 e2e:

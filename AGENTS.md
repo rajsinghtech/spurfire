@@ -4,11 +4,13 @@
 
 **Pitch:** *High noon. Low ping.* Spurfire is a third-person, peer-hosted horseback shooter with flying dismounts, mount bonding, and lobby-scaled open terrain.
 
-This repository is the Rust control plane. It provisions Tailscale-backed lobbies and join credentials through `spurfire-control`, and exposes development and operations workflows through the `spurfire-ctl` CLI. Gameplay is peer-to-peer; a future backend may handle matchmaking, provisioning, cleanup, identity, and results, but it is not a permanent gameplay server.
+This repository is the Rust control plane. It provisions Tailscale-backed lobbies and join credentials through `spurfire-control`, exposes the `spurfire-server` HTTP lobby service, and provides development and operations workflows through the `spurfire-ctl` CLI. Gameplay is peer-to-peer; the control service handles metadata, provisioning, cleanup, and prototype results but is not a permanent gameplay server.
 
 ## Repository layout
 
 - `crates/spurfire-control/` — Tailscale API client and lobby lifecycle library.
+- `crates/spurfire-protocol/` — wire DTOs, lobby state machine, and deterministic authority election.
+- `crates/spurfire-server/` — `spurfire-server` Axum HTTP lobby control service.
 - `crates/spurfire-cli/` — `spurfire-ctl` command-line client.
 - `scripts/` — safe API probes and development helpers.
 - `docs/design.md` — product and game design source of truth.
@@ -16,6 +18,7 @@ This repository is the Rust control plane. It provisions Tailscale-backed lobbie
 - `docs/decisions.md` — ADR-lite decisions and blocking questions.
 - `docs/tailscale-api.md` — redacted API probe evidence and provisioning verdict.
 - `docs/rustscale-integration.md` — RustScale readiness and integration survey.
+- `docs/lobby-service.md` — HTTP routes, lifecycle, dry-run, configuration, and trust boundaries.
 - `.github/workflows/ci.yml` — continuous integration gates.
 
 ## Development commands
@@ -27,6 +30,8 @@ Use the `justfile` recipes when available:
 - `just lint` — run Clippy for all targets with warnings denied.
 - `just test` — run all tests.
 - `just check` — run the complete local gate (`fmt --check`, Clippy, tests).
+- `just serve-dry` — run `spurfire-server` on loopback with zero provider mutations.
+- `cargo run -p spurfire-server -- --help` — inspect server options.
 - `just e2e` — run the live, credentialed Tailscale smoke test.
 - `just clean` — remove build artifacts.
 
@@ -39,6 +44,9 @@ Copy `.env.example` to the gitignored `.env` for local live-API work:
 - `TS_CLIENT_ID` — Tailscale OAuth client ID.
 - `TS_CLIENT_SECRET` — Tailscale OAuth client secret.
 - `TS_API_BASE` — API root, normally `https://api.tailscale.com/api/v2`.
+- `SPURFIRE_DRY_RUN=1` — force zero-mutation server mode.
+- `SPURFIRE_BIND_ADDR` — server listen socket, loopback by default.
+- `SPURFIRE_STATE_PATH` — durable non-secret real-mode state file.
 
 OAuth credentials are control-plane secrets. They must never be committed, logged, embedded in binaries, or shipped in game clients. Clients may receive only narrowly scoped, one-use, short-lived join credentials. Keep `.env` gitignored; redact OAuth tokens and generated auth keys from reports and fixtures.
 
@@ -59,7 +67,7 @@ For parallel agent work, create one branch and sibling worktree per disjoint tas
 
 ## Model routing policy
 
-- Design work: `moonshotai/kimi-k3` — limited quantity; use sparingly.
+- Design work: `ai/moonshotai/kimi-k3` — limited quantity; use sparingly.
 - Execution and coding: `openai-codex/gpt-5.6-sol`.
 
 ## Blocking open questions

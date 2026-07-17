@@ -45,13 +45,19 @@ impl LobbyState {
     #[must_use]
     pub const fn legal_successors(self) -> &'static [Self] {
         match self {
-            Self::Provisioning => &[Self::Forming, Self::Failed],
-            Self::Forming => &[Self::Ready, Self::Closing, Self::Expired],
-            Self::Ready => &[Self::Starting, Self::Forming, Self::Closing, Self::Expired],
-            Self::Starting => &[Self::InMatch, Self::Failed],
+            Self::Provisioning => &[Self::Forming, Self::Closing, Self::Failed],
+            Self::Forming => &[Self::Ready, Self::Closing, Self::Failed, Self::Expired],
+            Self::Ready => &[
+                Self::Starting,
+                Self::Forming,
+                Self::Closing,
+                Self::Failed,
+                Self::Expired,
+            ],
+            Self::Starting => &[Self::InMatch, Self::Closing, Self::Failed],
             Self::InMatch => &[Self::Closing, Self::Failed],
-            Self::Closing => &[Self::Destroyed],
-            Self::Failed | Self::Expired | Self::Destroyed => &[],
+            Self::Closing | Self::Failed | Self::Expired => &[Self::Destroyed],
+            Self::Destroyed => &[],
         }
     }
 
@@ -76,10 +82,12 @@ impl LobbyState {
         }
     }
 
-    /// Returns whether no future state mutation is legal.
+    /// Returns whether no future state mutation is legal. `FAILED` and
+    /// `EXPIRED` reject normal API mutations but retain one cleanup-finalization
+    /// edge to `DESTROYED`.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(Self::legal_successors(self), [])
+        matches!(self, Self::Destroyed)
     }
 
     /// Returns whether connectivity reports are accepted in this state.
@@ -113,19 +121,25 @@ mod tests {
     fn transition_matrix_is_exhaustive() {
         let legal = [
             (LobbyState::Provisioning, LobbyState::Forming),
+            (LobbyState::Provisioning, LobbyState::Closing),
             (LobbyState::Provisioning, LobbyState::Failed),
             (LobbyState::Forming, LobbyState::Ready),
             (LobbyState::Forming, LobbyState::Closing),
+            (LobbyState::Forming, LobbyState::Failed),
             (LobbyState::Forming, LobbyState::Expired),
             (LobbyState::Ready, LobbyState::Starting),
             (LobbyState::Ready, LobbyState::Forming),
             (LobbyState::Ready, LobbyState::Closing),
+            (LobbyState::Ready, LobbyState::Failed),
             (LobbyState::Ready, LobbyState::Expired),
             (LobbyState::Starting, LobbyState::InMatch),
+            (LobbyState::Starting, LobbyState::Closing),
             (LobbyState::Starting, LobbyState::Failed),
             (LobbyState::InMatch, LobbyState::Closing),
             (LobbyState::InMatch, LobbyState::Failed),
             (LobbyState::Closing, LobbyState::Destroyed),
+            (LobbyState::Failed, LobbyState::Destroyed),
+            (LobbyState::Expired, LobbyState::Destroyed),
         ];
 
         for from in LobbyState::ALL {
@@ -142,9 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_expired_and_destroyed_are_terminal() {
-        assert!(LobbyState::Failed.is_terminal());
-        assert!(LobbyState::Expired.is_terminal());
+    fn only_destroyed_has_no_cleanup_finalization_edge() {
+        assert!(!LobbyState::Failed.is_terminal());
+        assert!(!LobbyState::Expired.is_terminal());
         assert!(LobbyState::Destroyed.is_terminal());
         assert!(!LobbyState::Closing.is_terminal());
     }

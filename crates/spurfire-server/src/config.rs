@@ -1,20 +1,22 @@
 //! Non-secret service configuration.
 
-use std::{fmt, net::SocketAddr, time::Duration};
+use std::{fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
-use spurfire_protocol::{ProvisioningMode, ABSOLUTE_TTL_MS, MAX_PLAYERS};
+use spurfire_protocol::{ProvisioningMode, MAX_PLAYERS};
 use thiserror::Error;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_SHARED_TAILNET: &str = "-";
+const DEFAULT_STATE_PATH: &str = ".spurfire/server-state.json";
+const DEFAULT_DRY_RUN_TTL_SECS: u64 = 5 * 60;
 
 /// HTTP service configuration. OAuth values deliberately do not live here.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     /// Socket address used by the binary.
     pub bind_addr: SocketAddr,
-    /// Fixed lobby absolute TTL (60 minutes by default).
-    pub default_ttl: Duration,
+    /// Dry-run lobby TTL, hard-capped at five minutes.
+    pub dry_run_ttl: Duration,
     /// Deployment-level roster cap, bounded by the protocol hard cap.
     pub max_players: u8,
     /// Deployment provisioning mode.
@@ -23,6 +25,8 @@ pub struct Config {
     pub force_dry_run: bool,
     /// Shared tailnet selector passed to Tailscale (`-` means the token's tailnet).
     pub shared_tailnet: String,
+    /// Durable non-secret state path used in real mode.
+    pub state_path: PathBuf,
 }
 
 impl Default for Config {
@@ -31,11 +35,12 @@ impl Default for Config {
             bind_addr: DEFAULT_BIND_ADDR
                 .parse()
                 .expect("the built-in bind address is valid"),
-            default_ttl: Duration::from_millis(ABSOLUTE_TTL_MS),
+            dry_run_ttl: Duration::from_secs(DEFAULT_DRY_RUN_TTL_SECS),
             max_players: MAX_PLAYERS,
             provisioning_mode: ProvisioningMode::SharedTailnet,
             force_dry_run: false,
             shared_tailnet: DEFAULT_SHARED_TAILNET.to_owned(),
+            state_path: PathBuf::from(DEFAULT_STATE_PATH),
         }
     }
 }
@@ -45,11 +50,12 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("bind_addr", &self.bind_addr)
-            .field("default_ttl", &self.default_ttl)
+            .field("dry_run_ttl", &self.dry_run_ttl)
             .field("max_players", &self.max_players)
             .field("provisioning_mode", &self.provisioning_mode)
             .field("force_dry_run", &self.force_dry_run)
             .field("shared_tailnet", &"<configured>")
+            .field("state_path", &self.state_path)
             .finish()
     }
 }
@@ -58,24 +64,23 @@ impl Config {
     /// Loads non-secret settings from the process environment.
     ///
     /// Supported variables are `SPURFIRE_BIND_ADDR`,
-    /// `SPURFIRE_DEFAULT_TTL_SECS`, `SPURFIRE_MAX_PLAYERS`,
-    /// `SPURFIRE_PROVISIONING_MODE`, `SPURFIRE_SHARED_TAILNET`, and
-    /// `SPURFIRE_DRY_RUN`. Simulation is service-wide only when the last value
-    /// is exactly `1`.
+    /// `SPURFIRE_DRY_RUN_TTL_SECS`, `SPURFIRE_MAX_PLAYERS`,
+    /// `SPURFIRE_PROVISIONING_MODE`, `SPURFIRE_SHARED_TAILNET`,
+    /// `SPURFIRE_STATE_PATH`, and `SPURFIRE_DRY_RUN`.
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
         if let Some(value) = env_value("SPURFIRE_BIND_ADDR")? {
             config.bind_addr = value.parse().map_err(|_| ConfigError::InvalidBindAddress)?;
         }
-        if let Some(value) = env_value("SPURFIRE_DEFAULT_TTL_SECS")? {
+        if let Some(value) = env_value("SPURFIRE_DRY_RUN_TTL_SECS")? {
             let seconds = value
                 .parse::<u64>()
-                .map_err(|_| ConfigError::InvalidDefaultTtl)?;
-            if seconds == 0 {
-                return Err(ConfigError::InvalidDefaultTtl);
+                .map_err(|_| ConfigError::InvalidDryRunTtl)?;
+            if seconds == 0 || seconds > DEFAULT_DRY_RUN_TTL_SECS {
+                return Err(ConfigError::InvalidDryRunTtl);
             }
-            config.default_ttl = Duration::from_secs(seconds);
+            config.dry_run_ttl = Duration::from_secs(seconds);
         }
         if let Some(value) = env_value("SPURFIRE_MAX_PLAYERS")? {
             let players = value
@@ -94,6 +99,12 @@ impl Config {
                 return Err(ConfigError::InvalidSharedTailnet);
             }
             config.shared_tailnet = value;
+        }
+        if let Some(value) = env_value("SPURFIRE_STATE_PATH")? {
+            if value.trim().is_empty() {
+                return Err(ConfigError::InvalidStatePath);
+            }
+            config.state_path = PathBuf::from(value);
         }
         if let Some(value) = env_value("SPURFIRE_DRY_RUN")? {
             config.force_dry_run = match value.as_str() {
@@ -115,10 +126,10 @@ impl Config {
         Ok(config)
     }
 
-    /// Returns the configured TTL in milliseconds, saturating for extreme input.
+    /// Returns the configured dry-run TTL in milliseconds.
     #[must_use]
-    pub fn default_ttl_ms(&self) -> u64 {
-        u64::try_from(self.default_ttl.as_millis()).unwrap_or(u64::MAX)
+    pub fn dry_run_ttl_ms(&self) -> u64 {
+        u64::try_from(self.dry_run_ttl.as_millis()).unwrap_or(5 * 60 * 1_000)
     }
 }
 
@@ -148,9 +159,9 @@ pub enum ConfigError {
     /// Bind address could not be parsed.
     #[error("SPURFIRE_BIND_ADDR must be a socket address")]
     InvalidBindAddress,
-    /// TTL was absent, zero, or not an integer.
-    #[error("SPURFIRE_DEFAULT_TTL_SECS must be a positive integer")]
-    InvalidDefaultTtl,
+    /// Dry-run TTL was outside 1..=300 seconds.
+    #[error("SPURFIRE_DRY_RUN_TTL_SECS must be between 1 and 300")]
+    InvalidDryRunTtl,
     /// Deployment cap violated the protocol bound.
     #[error("SPURFIRE_MAX_PLAYERS must be between 1 and {MAX_PLAYERS}")]
     InvalidMaxPlayers,
@@ -169,4 +180,7 @@ pub enum ConfigError {
     /// Shared tailnet selector was empty.
     #[error("SPURFIRE_SHARED_TAILNET must not be empty")]
     InvalidSharedTailnet,
+    /// Durable state path was empty.
+    #[error("SPURFIRE_STATE_PATH must not be empty")]
+    InvalidStatePath,
 }

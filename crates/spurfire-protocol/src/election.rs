@@ -19,7 +19,7 @@ pub const MIN_AUTHORITY_MEMBERSHIP_MS: u64 = 30_000;
 
 const LOSS_ELIGIBILITY_LIMIT_MILLI: u32 = 5_000;
 const MEDIAN_RTT_ELIGIBILITY_LIMIT_MS: u32 = 150;
-const CANONICAL_PREFIX: &[u8] = b"spurfire-authority\0election_v1\0";
+const CANONICAL_PREFIX: &[u8] = b"spurfire-authority-input\0v1\0election_v1\0";
 
 /// Candidate metadata and the latest complete measurement row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +140,23 @@ pub struct RejectedAuthorityCandidate {
     pub reason: CandidateRejectionReason,
 }
 
+/// Exact, client-visible context hashed and evaluated by an authority election.
+/// Candidate rows are always sorted by raw player UUID bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityElectionInput {
+    /// Formula whose fixed clamps and weights were evaluated.
+    pub formula_version: String,
+    /// Time at which freshness and membership eligibility were evaluated.
+    pub election_at: UnixMillis,
+    /// Wire version against which major compatibility was checked.
+    pub expected_wire_version: WireVersion,
+    /// Full lobby roster size. This may exceed `candidates.len()` during a
+    /// migration election that explicitly excludes a silent authority.
+    pub roster_size: u32,
+    /// Canonical player-sorted measurement matrix.
+    pub candidates: Vec<AuthorityCandidate>,
+}
+
 /// Deterministic election output with both API summary and auditable details.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityElection {
@@ -150,8 +167,10 @@ pub struct AuthorityElection {
     pub eligible: Vec<AuthorityScore>,
     /// Highest score, with smallest `PlayerId` bytes winning an exact tie.
     pub winner_player_id: PlayerId,
-    /// SHA-256 fingerprint of the canonical player-ID-sorted input matrix.
+    /// SHA-256 fingerprint of the complete canonical election input.
     pub input_hash: InputHash,
+    /// Exact public context from which the hash and winner can be recomputed.
+    pub input: AuthorityElectionInput,
     /// True when no candidate passed normal eligibility and raw scores were used.
     pub degraded: bool,
     /// Complete score derivations, sorted by `PlayerId`.
@@ -171,6 +190,14 @@ pub enum AuthorityElectionError {
     DuplicatePlayer {
         /// Duplicated identity.
         player_id: PlayerId,
+    },
+    /// The supplied full-roster size cannot contain the candidate rows.
+    #[error("invalid authority roster size {roster_size} for {candidate_count} candidates")]
+    InvalidRosterSize {
+        /// Full roster size used by score normalization.
+        roster_size: usize,
+        /// Number of supplied candidate rows.
+        candidate_count: usize,
     },
     /// Every candidate had a stale, future, malformed, or incomplete row.
     #[error("no candidate has a fresh, complete measurement")]
@@ -291,18 +318,17 @@ impl<'de> Deserialize<'de> for InputHash {
     }
 }
 
-/// Returns the canonical, player-ID-sorted, fixed-width big-endian matrix bytes.
+/// Returns player-ID-sorted, fixed-width big-endian measurement-row bytes.
 ///
-/// Format: domain/formula prefix, `u32` row count, then for each row: 16 UUID
-/// bytes, wire major/minor (`u16` each), joined/measured timestamps (`u64` each),
-/// followed by ten `u32` measurement integers in protocol field order.
+/// Each row contains 16 UUID bytes, wire major/minor (`u16` each),
+/// joined/measured timestamps (`u64` each), followed by ten `u32` measurement
+/// integers in protocol field order. The election hash additionally frames
+/// these rows with the evaluation context via [`canonical_election_input`].
 pub fn canonical_measurement_matrix(
     candidates: &[AuthorityCandidate],
 ) -> Result<Vec<u8>, AuthorityElectionError> {
     let sorted = sorted_candidates(candidates)?;
-    let mut bytes = Vec::with_capacity(CANONICAL_PREFIX.len() + 4 + sorted.len() * 80);
-    bytes.extend_from_slice(CANONICAL_PREFIX);
-    bytes.extend_from_slice(&(sorted.len() as u32).to_be_bytes());
+    let mut bytes = Vec::with_capacity(sorted.len() * 80);
     for candidate in sorted {
         bytes.extend_from_slice(candidate.player_id.as_bytes());
         bytes.extend_from_slice(&candidate.wire_version.major().to_be_bytes());
@@ -327,11 +353,42 @@ pub fn canonical_measurement_matrix(
     Ok(bytes)
 }
 
-/// SHA-256 hash of [`canonical_measurement_matrix`].
+/// Returns the complete canonical bytes hashed for split-brain detection.
+/// Evaluation time is included because freshness and membership eligibility
+/// change at exact time boundaries even when measurement rows do not.
+pub fn canonical_election_input(
+    input: &AuthorityElectionInput,
+) -> Result<Vec<u8>, AuthorityElectionError> {
+    if input.roster_size < 2
+        || usize::try_from(input.roster_size)
+            .ok()
+            .is_none_or(|size| size < input.candidates.len())
+    {
+        return Err(AuthorityElectionError::InvalidRosterSize {
+            roster_size: usize::try_from(input.roster_size).unwrap_or(usize::MAX),
+            candidate_count: input.candidates.len(),
+        });
+    }
+    let rows = canonical_measurement_matrix(&input.candidates)?;
+    let formula = input.formula_version.as_bytes();
+    let mut bytes = Vec::with_capacity(CANONICAL_PREFIX.len() + 24 + formula.len() + rows.len());
+    bytes.extend_from_slice(CANONICAL_PREFIX);
+    bytes.extend_from_slice(&(formula.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(formula);
+    bytes.extend_from_slice(&input.election_at.as_millis().to_be_bytes());
+    bytes.extend_from_slice(&input.expected_wire_version.major().to_be_bytes());
+    bytes.extend_from_slice(&input.expected_wire_version.minor().to_be_bytes());
+    bytes.extend_from_slice(&input.roster_size.to_be_bytes());
+    bytes.extend_from_slice(&(input.candidates.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&rows);
+    Ok(bytes)
+}
+
+/// SHA-256 hash of [`canonical_election_input`].
 pub fn authority_input_hash(
-    candidates: &[AuthorityCandidate],
+    input: &AuthorityElectionInput,
 ) -> Result<InputHash, AuthorityElectionError> {
-    canonical_measurement_matrix(candidates).map(|matrix| InputHash::digest(&matrix))
+    canonical_election_input(input).map(|bytes| InputHash::digest(&bytes))
 }
 
 /// Computes one candidate's `election_v1` score without freshness or eligibility filtering.
@@ -365,13 +422,44 @@ pub fn elect_authority_for_wire(
     if candidates.len() < 2 {
         return Err(AuthorityElectionError::NotEnoughCandidates);
     }
+    elect_authority_for_roster(candidates, now, expected_wire_version, candidates.len())
+}
+
+/// Elects over a subset of a larger roster. This is used for deterministic
+/// migration after excluding a silent authority while retaining the full
+/// roster denominator in route scoring and validation.
+pub fn elect_authority_for_roster(
+    candidates: &[AuthorityCandidate],
+    now: UnixMillis,
+    expected_wire_version: WireVersion,
+    roster_size: usize,
+) -> Result<AuthorityElection, AuthorityElectionError> {
+    if candidates.is_empty() {
+        return Err(AuthorityElectionError::NotEnoughCandidates);
+    }
+    if roster_size < 2 || roster_size < candidates.len() || u32::try_from(roster_size).is_err() {
+        return Err(AuthorityElectionError::InvalidRosterSize {
+            roster_size,
+            candidate_count: candidates.len(),
+        });
+    }
     let sorted = sorted_candidates(candidates)?;
-    let input_hash = authority_input_hash(candidates)?;
+    let input = AuthorityElectionInput {
+        formula_version: AUTHORITY_FORMULA_VERSION.to_owned(),
+        election_at: now,
+        expected_wire_version,
+        roster_size: u32::try_from(roster_size).expect("roster size was checked above"),
+        candidates: sorted
+            .iter()
+            .map(|candidate| (*candidate).clone())
+            .collect(),
+    };
+    let input_hash = authority_input_hash(&input)?;
     let mut scored = Vec::with_capacity(sorted.len());
     let mut rejected = Vec::new();
 
     for candidate in sorted {
-        if let Err(error) = candidate.measurement.validate_for_roster(candidates.len()) {
+        if let Err(error) = candidate.measurement.validate_for_roster(roster_size) {
             rejected.push(RejectedAuthorityCandidate {
                 player_id: candidate.player_id,
                 reason: CandidateRejectionReason::InvalidMeasurement { error },
@@ -398,8 +486,8 @@ pub fn elect_authority_for_wire(
             continue;
         }
 
-        let peer_count = u32::try_from(candidates.len() - 1)
-            .expect("candidate count was already represented by measurement u32 fields");
+        let peer_count = u32::try_from(roster_size - 1)
+            .expect("roster size was checked before candidate scoring");
         let breakdown = score_measurement(&candidate.measurement, peer_count);
         let membership_age_ms = now.checked_duration_since(candidate.joined_at).unwrap_or(0);
         let mut reasons = Vec::new();
@@ -471,6 +559,7 @@ pub fn elect_authority_for_wire(
         eligible,
         winner_player_id,
         input_hash,
+        input,
         degraded,
         scored_candidates: scored,
         rejected_candidates: rejected,
@@ -757,7 +846,7 @@ mod tests {
         assert_eq!(second.input_hash, third.input_hash);
         assert_eq!(
             first.input_hash.to_string(),
-            "1e3c5eb49314416556a902c3ef17cdc891dfe77a810bc9dd6fe492fc82f361eb"
+            "55a5fc1bed2c4f7248bd4eed71680ed085e9417f996460d603310f3ef4b397c4"
         );
     }
 
@@ -890,8 +979,7 @@ mod tests {
         let mut row = candidate(1, 1);
         row.measurement.rtt_ms_median = 0x0102_0304;
         let matrix = canonical_measurement_matrix(&[row, candidate(2, 1)]).unwrap();
-        let row_start = CANONICAL_PREFIX.len() + 4;
-        let median_offset = row_start + 16 + 2 + 2 + 8 + 8 + (3 * 4);
+        let median_offset = 16 + 2 + 2 + 8 + 8 + (3 * 4);
         assert_eq!(
             &matrix[median_offset..median_offset + 4],
             &[0x01, 0x02, 0x03, 0x04]
@@ -900,11 +988,41 @@ mod tests {
 
     #[test]
     fn input_hash_wire_form_round_trips() {
-        let hash = authority_input_hash(&[candidate(1, 1), candidate(2, 1)]).unwrap();
+        let election = elect_authority(&[candidate(1, 1), candidate(2, 1)], NOW).unwrap();
+        let hash = authority_input_hash(&election.input).unwrap();
+        assert_eq!(hash, election.input_hash);
         assert_eq!(hash.to_string().parse::<InputHash>().unwrap(), hash);
         assert_eq!(
             serde_json::from_str::<InputHash>(&serde_json::to_string(&hash).unwrap()).unwrap(),
             hash
         );
+    }
+
+    #[test]
+    fn eligibility_time_boundaries_change_hash_and_winner_view() {
+        let mut young_fast = candidate(1, 1);
+        young_fast.joined_at = UnixMillis::new(70_001);
+        young_fast.measurement.measured_at = UnixMillis::new(99_000);
+        let mut established_slow = candidate(2, 1);
+        established_slow.measurement.rtt_ms_median = 140;
+
+        let matrix = [young_fast, established_slow];
+        let before = elect_authority(&matrix, UnixMillis::new(100_000)).unwrap();
+        let boundary = elect_authority(&matrix, UnixMillis::new(100_001)).unwrap();
+        assert_ne!(before.input_hash, boundary.input_hash);
+        assert_eq!(before.winner_player_id, player(2));
+        assert_eq!(boundary.winner_player_id, player(1));
+    }
+
+    #[test]
+    fn freshness_59999_and_60000_have_distinct_hashed_inputs() {
+        let mut first = candidate(1, 1);
+        first.measurement.measured_at = UnixMillis::new(40_001);
+        let matrix = [first, candidate(2, 1)];
+        let fresh = elect_authority(&matrix, UnixMillis::new(100_000)).unwrap();
+        let stale = elect_authority(&matrix, UnixMillis::new(100_001)).unwrap();
+        assert_ne!(fresh.input_hash, stale.input_hash);
+        assert_eq!(fresh.rejected_candidates.len(), 0);
+        assert_eq!(stale.rejected_candidates.len(), 1);
     }
 }

@@ -303,6 +303,10 @@ pub struct Lobby {
     pub provisioning_mode: ProvisioningMode,
     /// Creation timestamp.
     pub created_at: UnixMillis,
+    /// At least one upstream key or device cleanup needs a retry. No resource
+    /// identifier is exposed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cleanup_pending: bool,
 }
 
 impl Lobby {

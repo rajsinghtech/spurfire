@@ -16,11 +16,12 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigError};
 pub use error::ApiError;
 pub use provider::{
-    CleanupLobbyRequest, CleanupOutcome, DryRunProvider, MintCredentialRequest, MintedCredential,
-    NetworkProvider, PrepareLobbyRequest, PreparedNetwork, ProviderError, SecretString,
-    TailscaleProvider,
+    CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest,
+    MintedCredential, NetworkProvider, PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities,
+    ProviderError, SecretString, TailscaleProvider,
 };
 pub use service::{build_router, router, AppState};
 pub use store::{
-    CreateStoreOutcome, InMemoryStore, LobbyStore, StoreError, StoredCredential, StoredLobby,
+    CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError, StoredCredential,
+    StoredLobby,
 };
