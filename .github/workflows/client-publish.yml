@@ -102,10 +102,20 @@ jobs:
             all(.artifacts[]; (.expired == false) and (.size_in_bytes > 0))' \
             <<< "$artifacts_json" > /dev/null
 
-          if gh release view "$RELEASE_TAG" \
-            --repo "$expected_repository" > /dev/null 2>&1; then
-            echo "release $RELEASE_TAG already exists; refusing to overwrite it" >&2
-            exit 1
+          releases_json="$(
+            gh api "/repos/$expected_repository/releases?per_page=100"
+          )"
+          matching_releases="$(
+            jq --arg tag "$RELEASE_TAG" \
+              '[.[] | select(.tag_name == $tag)]' <<< "$releases_json"
+          )"
+          release_count="$(jq length <<< "$matching_releases")"
+          test "$release_count" -le 1
+          if test "$release_count" -eq 1; then
+            jq -e '.[0].draft == true' <<< "$matching_releases" > /dev/null || {
+              echo "release $RELEASE_TAG is already published; refusing to overwrite it" >&2
+              exit 1
+            }
           fi
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -138,22 +148,36 @@ jobs:
           sha256sum "${expected[@]}" > SHA256SUMS
           cd ..
 
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --draft \
-            --title "Spurfire ${RELEASE_TAG#v}" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" \
-            release/Spurfire-linux-x86_64.tar.gz \
-            release/Spurfire-macos-universal.zip \
-            release/Spurfire-windows-x86_64.zip \
-            release/SHA256SUMS
+          releases_json="$(
+            gh api "/repos/$GITHUB_REPOSITORY/releases?per_page=100"
+          )"
+          release_count="$(
+            jq --arg tag "$RELEASE_TAG" \
+              '[.[] | select(.tag_name == $tag)] | length' <<< "$releases_json"
+          )"
+          test "$release_count" -le 1
+          if test "$release_count" -eq 0; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "Spurfire ${RELEASE_TAG#v}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              release/Spurfire-linux-x86_64.tar.gz \
+              release/Spurfire-macos-universal.zip \
+              release/Spurfire-windows-x86_64.zip \
+              release/SHA256SUMS > /dev/null
+          fi
 
           release_json="$(
-            gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+            gh api "/repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -c --arg tag "$RELEASE_TAG" \
+                '[.[] | select(.tag_name == $tag)] |
+                 if length == 1 then .[0] else error("expected one draft release") end'
           )"
-          jq -e --arg tag "$RELEASE_TAG" '
+          jq -e --arg tag "$RELEASE_TAG" --arg name "Spurfire ${RELEASE_TAG#v}" '
             (.tag_name == $tag) and
+            (.name == $name) and
             (.draft == true) and
             (.prerelease == false) and
             (([.assets[].name] | sort) ==
@@ -163,14 +187,42 @@ jobs:
                "Spurfire-macos-universal.zip",
                "Spurfire-windows-x86_64.zip"
              ] | sort)) and
-            all(.assets[]; .size > 0)' <<< "$release_json" > /dev/null
+            all(.assets[]; (.state == "uploaded") and (.size > 0))' \
+            <<< "$release_json" > /dev/null
 
-          gh release edit "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false
+          verify_dir="$(mktemp -d)"
+          for file in "${expected[@]}" SHA256SUMS; do
+            asset_id="$(
+              jq -er --arg name "$file" '
+                [.assets[] | select(.name == $name)] |
+                if length == 1 then .[0].id else error("asset mismatch") end' \
+                <<< "$release_json"
+            )"
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "$verify_dir/$file"
+            cmp -s "release/$file" "$verify_dir/$file"
+          done
+
+          release_id="$(jq -er .id <<< "$release_json")"
+          jq -n --arg name "Spurfire ${RELEASE_TAG#v}" \
+            --rawfile body "$RUNNER_TEMP/release-notes.md" \
+            '{name: $name, body: $body, draft: false, prerelease: false}' \
+            > "$RUNNER_TEMP/publish-release.json"
+          gh api --method PATCH \
+            "/repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            --input "$RUNNER_TEMP/publish-release.json" > /dev/null
 
           gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" |
             jq -e --arg tag "$RELEASE_TAG" '
               (.tag_name == $tag) and
               (.draft == false) and
-              (.prerelease == false)' > /dev/null
+              (.prerelease == false) and
+              (([.assets[].name] | sort) ==
+               ([
+                 "SHA256SUMS",
+                 "Spurfire-linux-x86_64.tar.gz",
+                 "Spurfire-macos-universal.zip",
+                 "Spurfire-windows-x86_64.zip"
+               ] | sort))' > /dev/null
