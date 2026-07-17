@@ -175,8 +175,12 @@ pub const fn dive_sway_scale_milli(elapsed_ticks: u64, nominal_ticks: u64) -> u1
     }
     let numerator = 400_u64.saturating_mul(elapsed_ticks - decay_start);
     let denominator = nominal_ticks - decay_start;
-    let scale = 600_u64.saturating_add(numerator / denominator).min(1_000);
-    scale as u16
+    let scale = 600_u64.saturating_add(numerator / denominator);
+    if scale > 1_000 {
+        1_000
+    } else {
+        scale as u16
+    }
 }
 
 /// Vertical velocity requested for an airborne tick offset.
