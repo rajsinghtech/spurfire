@@ -47,7 +47,7 @@ gait_down={
 }
 hard_brake={
 "deadzone": 0.15,
-"events": [Object(InputEventKey,"physical_keycode":4194324), Object(InputEventJoypadMotion,"axis":4,"axis_value":1.0)]
+"events": [Object(InputEventKey,"physical_keycode":4194328), Object(InputEventJoypadMotion,"axis":4,"axis_value":1.0)]
 }
 jump={
 "deadzone": 0.15,

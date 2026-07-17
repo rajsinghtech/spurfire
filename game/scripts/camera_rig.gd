@@ -7,9 +7,10 @@ extends Node3D
 @export var mouse_sensitivity := 0.0025
 @export var stick_speed := 2.2
 
-var _yaw := 0.0
+var _orbit_yaw := 0.0
 var _pitch := deg_to_rad(-12.0)
 var _speed_fraction := 0.0
+var _yaw_rate_degs := 0.0
 
 @onready var pivot: Node3D = $PitchPivot
 @onready var arm: SpringArm3D = $PitchPivot/SpringArm3D
@@ -21,13 +22,13 @@ func _ready() -> void:
 	camera.position.x = shoulder_offset
 	if target:
 		global_position = target.global_position + Vector3.UP * pivot_height
-		_yaw = target.global_rotation.y
+		rotation.y = target.global_rotation.y
 		if target.has_signal("telemetry_updated"):
 			target.telemetry_updated.connect(_on_telemetry)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_yaw -= event.relative.x * mouse_sensitivity
+		_orbit_yaw -= event.relative.x * mouse_sensitivity
 		_pitch = clampf(_pitch - event.relative.y * mouse_sensitivity, deg_to_rad(-35.0), deg_to_rad(35.0))
 	if event.is_action_pressed(&"release_mouse"):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -38,11 +39,13 @@ func _process(delta: float) -> void:
 	if not target:
 		return
 	var look := Input.get_vector(&"camera_left", &"camera_right", &"camera_up", &"camera_down")
-	_yaw -= look.x * stick_speed * delta
+	_orbit_yaw -= look.x * stick_speed * delta
 	_pitch = clampf(_pitch - look.y * stick_speed * delta, deg_to_rad(-35.0), deg_to_rad(35.0))
-	var wanted_position := target.global_position + Vector3.UP * pivot_height
+	var sway := clampf(_yaw_rate_degs / 35.0, -1.0, 1.0) * _speed_fraction * 0.3
+	var wanted_position := target.global_position + Vector3.UP * pivot_height + target.global_basis.x * sway
 	global_position = global_position.lerp(wanted_position, 1.0 - exp(-8.0 * delta))
-	rotation = Vector3(0.0, lerp_angle(rotation.y, _yaw, 1.0 - exp(-5.0 * delta)), 0.0)
+	var wanted_yaw := target.global_rotation.y + _orbit_yaw
+	rotation = Vector3(0.0, lerp_angle(rotation.y, wanted_yaw, 1.0 - exp(-5.0 * delta)), 0.0)
 	pivot.rotation.x = _pitch
 	arm.spring_length = move_toward(arm.spring_length, chase_distance, 6.0 * delta)
 	var wanted_fov := lerpf(70.0, 78.0, clampf(_speed_fraction, 0.0, 1.0))
@@ -50,3 +53,4 @@ func _process(delta: float) -> void:
 
 func _on_telemetry(data: Dictionary) -> void:
 	_speed_fraction = float(data.get("speed_fraction", 0.0))
+	_yaw_rate_degs = float(data.get("yaw_rate_degs", 0.0))

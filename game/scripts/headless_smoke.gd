@@ -6,7 +6,11 @@ const REQUIRED_ACTIONS := [
 ]
 const REQUIRED_NODES := [
 	"Horse", "Horse/CollisionShape3D", "CameraRig/PitchPivot/SpringArm3D/Camera3D",
-	"TestCourse", "WorldEnvironment", "Sun", "KillResetZone", "HUD"
+	"TestCourse", "TestCourse/BroadGround", "TestCourse/FlatStraight",
+	"TestCourse/RoughStrip", "TestCourse/Ramp15", "TestCourse/Ramp25",
+	"TestCourse/Face45", "TestCourse/JumpFence_0Rail", "TestCourse/BridgeDeck",
+	"TestCourse/SlalomPost_0", "TestCourse/TurnCircle_0", "WorldEnvironment",
+	"Sun", "KillResetZone", "HorseSpawn", "HUD"
 ]
 
 func _ready() -> void:
