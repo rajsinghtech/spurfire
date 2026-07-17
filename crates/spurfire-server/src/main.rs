@@ -64,11 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reaper = tokio::spawn(expiry_reaper(state.clone()));
 
     eprintln!(
-        "spurfire-server listening on {} (mode={:?}, dry_run={}, shared_tailnet_ready={})",
+        "spurfire-server listening on {} (mode={:?}, dry_run={}, selected_mode_ready={})",
         config.bind_addr,
         config.provisioning_mode,
         config.force_dry_run,
-        capabilities.shared_tailnet_available()
+        capabilities.mode_available(config.provisioning_mode)
     );
     let result = axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())

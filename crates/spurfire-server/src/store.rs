@@ -672,6 +672,13 @@ mod tests {
 
     #[tokio::test]
     async fn durable_store_survives_reopen_without_secret_material() {
+        const CHILD_SECRET_CANARY: &str = "child-oauth-secret-must-not-persist";
+        let child_credentials = spurfire_control::ChildOAuthCredentials::new(
+            "child-oauth-id-must-not-persist",
+            CHILD_SECRET_CANARY,
+        );
+        assert!(!format!("{child_credentials:?}").contains(CHILD_SECRET_CANARY));
+        drop(child_credentials);
         let path =
             std::env::temp_dir().join(format!("spurfire-store-test-{}.json", std::process::id()));
         let _ = tokio::fs::remove_file(&path).await;
@@ -691,6 +698,8 @@ mod tests {
         assert_eq!(reopened.len().await, 1);
         let encoded = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(!encoded.contains("auth_key"));
+        assert!(!encoded.contains("child_oauth"));
+        assert!(!encoded.contains(CHILD_SECRET_CANARY));
         let _ = tokio::fs::remove_file(&path).await;
     }
 

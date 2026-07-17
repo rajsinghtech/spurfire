@@ -264,16 +264,8 @@ pub enum ProvisioningMode {
     SharedTailnet,
     /// Simulated lifecycle with no mutating Tailscale requests.
     DryRun,
-    /// Explicitly unavailable because tested create endpoints return 404.
+    /// API-only child tailnet created for one lobby through the organization API.
     TailnetPerLobby,
-}
-
-impl ProvisioningMode {
-    /// Whether this mode is unconditionally unavailable under the verified API verdict.
-    #[must_use]
-    pub const fn is_known_unavailable(self) -> bool {
-        matches!(self, Self::TailnetPerLobby)
-    }
 }
 
 /// Public lobby model and pollable snapshot. It contains no secret material.

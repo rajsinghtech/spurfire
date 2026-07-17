@@ -114,9 +114,6 @@ impl Config {
             };
         }
 
-        if config.provisioning_mode == ProvisioningMode::TailnetPerLobby {
-            return Err(ConfigError::ModeUnavailable);
-        }
         if config.provisioning_mode == ProvisioningMode::DryRun && !config.force_dry_run {
             return Err(ConfigError::DryRunRequiresOptIn);
         }
@@ -166,11 +163,8 @@ pub enum ConfigError {
     #[error("SPURFIRE_MAX_PLAYERS must be between 1 and {MAX_PLAYERS}")]
     InvalidMaxPlayers,
     /// Provisioning mode was unknown.
-    #[error("SPURFIRE_PROVISIONING_MODE must be shared_tailnet or dry_run")]
+    #[error("SPURFIRE_PROVISIONING_MODE must be shared_tailnet, tailnet_per_lobby, or dry_run")]
     InvalidProvisioningMode,
-    /// Tailnet-per-lobby remains unavailable.
-    #[error("tailnet_per_lobby is unavailable because tested create routes returned 404")]
-    ModeUnavailable,
     /// Dry-run mode was selected without the explicit switch.
     #[error("dry_run service mode requires SPURFIRE_DRY_RUN=1")]
     DryRunRequiresOptIn,

@@ -248,8 +248,8 @@ pub struct Device {
 pub enum ControlError {
     #[error("missing env var: {0}")]
     Env(String),
-    #[error("http {status}: upstream response body redacted")]
-    Http { status: u16, body: String },
+    #[error("http {status}: upstream response body discarded")]
+    Http { status: u16 },
     #[error("tailnet provisioning request is invalid: {0}")]
     InvalidTailnetName(&'static str),
     #[error("tailnet operation requires child-scoped OAuth credentials: {0}")]
@@ -276,10 +276,10 @@ impl fmt::Debug for ControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Env(name) => formatter.debug_tuple("Env").field(name).finish(),
-            Self::Http { status, .. } => formatter
+            Self::Http { status } => formatter
                 .debug_struct("Http")
                 .field("status", status)
-                .field("body", &REDACTED)
+                .field("body", &"<discarded>")
                 .finish(),
             Self::InvalidTailnetName(reason) => formatter
                 .debug_tuple("InvalidTailnetName")
@@ -380,20 +380,19 @@ impl OAuthSession {
 
     async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, ControlError> {
         let status = response.status();
-        let bytes = response.bytes().await?;
         if !status.is_success() {
             return Err(ControlError::Http {
                 status: status.as_u16(),
-                body: String::from_utf8_lossy(&bytes).into_owned(),
             });
         }
+        let bytes = response.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     async fn http_error(response: reqwest::Response) -> ControlError {
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        ControlError::Http { status, body }
+        ControlError::Http {
+            status: response.status().as_u16(),
+        }
     }
 
     async fn probe_token(&self) -> Result<(), ControlError> {
@@ -463,7 +462,7 @@ impl OAuthSession {
     async fn delete_tailnet(&self, dns_name: &str) -> Result<(), ControlError> {
         let path = format!("/tailnet/{dns_name}");
         match self.send(Method::DELETE, &path, None).await {
-            Ok(_) | Err(ControlError::Http { status: 404, .. }) => Ok(()),
+            Ok(_) | Err(ControlError::Http { status: 404 }) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -966,7 +965,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_debug_and_display_never_include_upstream_secret_body() {
+    async fn error_discards_upstream_secret_body() {
         const CANARY: &str = "child-secret-must-not-leak";
         let mut server = Server::new_async().await;
         let _token = token_mock(&mut server, 3600, 1).await;
@@ -985,7 +984,7 @@ mod tests {
 
         assert!(!error.to_string().contains(CANARY));
         assert!(!format!("{error:?}").contains(CANARY));
-        assert!(error.to_string().contains("redacted"));
+        assert!(error.to_string().contains("discarded"));
     }
 
     #[test]

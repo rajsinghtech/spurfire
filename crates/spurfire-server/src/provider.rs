@@ -1,6 +1,7 @@
 //! Network-provider boundary and Tailscale/dry-run implementations.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -9,12 +10,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use spurfire_control::{AuthKeyOpts, ControlError, TailscaleClient};
+use spurfire_control::{AuthKeyOpts, ChildTailscaleClient, ControlError, TailscaleClient};
 use spurfire_protocol::{
     CapabilitiesResponse, CapabilityModeStatus, CapabilityModes, LobbyId, PlannedAction, PlayerId,
     ProvisioningMode, ResponseMetadata, UnixMillis, DRY_RUN_AUTH_KEY,
 };
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Provider request made while a lobby record is being prepared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,8 @@ pub struct PreparedNetwork {
 pub struct MintCredentialRequest {
     /// Lobby receiving the player.
     pub lobby_id: LobbyId,
+    /// Provisioning mode selected by the durable lobby record.
+    pub mode: ProvisioningMode,
     /// Player receiving the credential.
     pub player_id: PlayerId,
     /// Provider tailnet selector.
@@ -57,19 +61,20 @@ pub struct MintCredentialRequest {
 
 /// A secret string that always redacts its diagnostic representation.
 #[derive(Clone, PartialEq, Eq)]
-pub struct SecretString(String);
+pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {
     /// Wraps provider-returned secret material.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Zeroizing::new(value.into()))
     }
 
-    /// Explicitly transfers secret material into the one allowed join response.
+    /// Explicitly transfers a copy of secret material into the one allowed join response. The
+    /// provider-owned allocation is zeroized as this wrapper is dropped.
     #[must_use]
     pub fn into_exposed(self) -> String {
-        self.0
+        self.0.to_string()
     }
 }
 
@@ -106,6 +111,8 @@ pub struct CredentialCleanup {
 pub struct CleanupLobbyRequest {
     /// Lobby being cleaned.
     pub lobby_id: LobbyId,
+    /// Provisioning mode selected by the durable lobby record.
+    pub mode: ProvisioningMode,
     /// Provider tailnet selector.
     pub tailnet: String,
     /// Tag used to discover only this lobby's devices.
@@ -136,13 +143,15 @@ pub struct CleanupOutcome {
 /// Cached, non-secret capability verdict.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProviderCapabilities {
-    /// OAuth token plus settings read succeeded.
+    /// OAuth client-credentials exchange succeeded.
     pub oauth_token_ok: bool,
-    /// Non-mutating auth-key scope probe succeeded.
+    /// Read-only organization tailnet listing succeeded.
+    pub can_manage_organization_tailnets: bool,
+    /// Non-mutating shared-tailnet auth-key scope probe succeeded.
     pub can_mint_auth_keys: bool,
-    /// Device-list probe succeeded.
+    /// Shared-tailnet device-list probe succeeded.
     pub can_list_devices: bool,
-    /// ACL policy probe succeeded.
+    /// Shared-tailnet ACL policy probe succeeded.
     pub can_manage_acl: bool,
 }
 
@@ -152,6 +161,7 @@ impl ProviderCapabilities {
     pub const fn blocked() -> Self {
         Self {
             oauth_token_ok: false,
+            can_manage_organization_tailnets: false,
             can_mint_auth_keys: false,
             can_list_devices: false,
             can_manage_acl: false,
@@ -164,6 +174,7 @@ impl ProviderCapabilities {
     pub const fn available() -> Self {
         Self {
             oauth_token_ok: true,
+            can_manage_organization_tailnets: true,
             can_mint_auth_keys: true,
             can_list_devices: true,
             can_manage_acl: true,
@@ -179,11 +190,29 @@ impl ProviderCapabilities {
             && self.can_manage_acl
     }
 
+    /// Whether organization-tailnet creation may advance to `FORMING`.
+    #[must_use]
+    pub const fn tailnet_per_lobby_available(self) -> bool {
+        self.oauth_token_ok && self.can_manage_organization_tailnets
+    }
+
+    /// Whether the requested real provisioning mode is ready.
+    #[must_use]
+    pub const fn mode_available(self, mode: ProvisioningMode) -> bool {
+        match mode {
+            ProvisioningMode::SharedTailnet => self.shared_tailnet_available(),
+            ProvisioningMode::TailnetPerLobby => self.tailnet_per_lobby_available(),
+            ProvisioningMode::DryRun => true,
+        }
+    }
+
     /// Stable reason for a fail-closed provisioning transition.
     #[must_use]
-    pub const fn blocked_state_reason(self) -> &'static str {
+    pub const fn blocked_state_reason(self, mode: ProvisioningMode) -> &'static str {
         if !self.oauth_token_ok {
             "token_fetch_failed"
+        } else if matches!(mode, ProvisioningMode::TailnetPerLobby) {
+            "provisioning_blocked_organization_tailnets"
         } else if !self.can_mint_auth_keys {
             "provisioning_blocked_auth_keys_403"
         } else if !self.can_list_devices {
@@ -198,6 +227,7 @@ impl ProviderCapabilities {
     pub fn response(self, metadata: ResponseMetadata) -> CapabilitiesResponse {
         CapabilitiesResponse {
             oauth_token_ok: self.oauth_token_ok,
+            can_manage_organization_tailnets: self.can_manage_organization_tailnets,
             can_mint_auth_keys: self.can_mint_auth_keys,
             can_list_devices: self.can_list_devices,
             can_manage_acl: self.can_manage_acl,
@@ -207,7 +237,11 @@ impl ProviderCapabilities {
                 } else {
                     CapabilityModeStatus::BlockedScopes
                 },
-                tailnet_per_lobby: CapabilityModeStatus::UnavailableApi404,
+                tailnet_per_lobby: if self.tailnet_per_lobby_available() {
+                    CapabilityModeStatus::Available
+                } else {
+                    CapabilityModeStatus::BlockedOrganizationAccess
+                },
             },
             metadata,
         }
@@ -217,9 +251,9 @@ impl ProviderCapabilities {
 /// Safe provider failure classification. Upstream bodies are always discarded.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ProviderError {
-    /// The verified alpha create route is unavailable.
-    #[error("requested provisioning mode is unavailable")]
-    ModeUnavailable,
+    /// A child-tailnet record survived a process restart but its in-memory OAuth material did not.
+    #[error("child tailnet credentials are unavailable; manual remediation is required")]
+    ChildSecretUnavailable,
     /// OAuth scopes denied a required operation.
     #[error("provider scopes are insufficient for {operation}")]
     InsufficientScopes {
@@ -247,7 +281,10 @@ impl ProviderError {
     #[must_use]
     pub fn state_reason(&self) -> &'static str {
         match self {
-            Self::ModeUnavailable => "provisioning_mode_unavailable_api_404",
+            Self::ChildSecretUnavailable => "child_secret_unavailable_manual_remediation",
+            Self::InsufficientScopes {
+                operation: "organization_tailnet_create",
+            } => "provisioning_blocked_organization_tailnets",
             Self::InsufficientScopes {
                 operation: "auth_keys",
             } => "provisioning_blocked_auth_keys_403",
@@ -276,6 +313,16 @@ pub trait NetworkProvider: Send + Sync {
     /// Refreshes capability evidence. Implementations must not mutate upstream state.
     async fn refresh_capabilities(&self) -> ProviderCapabilities {
         self.cached_capabilities()
+    }
+
+    /// Returns a safe fail-closed error when process-local child credentials are unavailable.
+    fn lobby_access_error(
+        &self,
+        _lobby_id: LobbyId,
+        _mode: ProvisioningMode,
+        _dry_run: bool,
+    ) -> Option<ProviderError> {
+        None
     }
 
     /// Prepares non-secret backing metadata. Shared mode performs no mutating call here.
@@ -353,11 +400,8 @@ impl NetworkProvider for DryRunProvider {
 
     async fn prepare_lobby(
         &self,
-        request: PrepareLobbyRequest,
+        _request: PrepareLobbyRequest,
     ) -> Result<PreparedNetwork, ProviderError> {
-        if request.mode == ProvisioningMode::TailnetPerLobby {
-            return Err(ProviderError::ModeUnavailable);
-        }
         Ok(dry_prepared_network())
     }
 
@@ -378,12 +422,19 @@ impl NetworkProvider for DryRunProvider {
     }
 }
 
-/// Adapter around [`spurfire_control::TailscaleClient`].
+struct ChildTailnetAccess {
+    dns_name: String,
+    client: Arc<ChildTailscaleClient>,
+}
+
+/// Adapter around [`spurfire_control::TailscaleClient`]. Child OAuth material exists only in the
+/// process-local `child_vault`; it is never returned to the service store.
 pub struct TailscaleProvider {
     client: Arc<TailscaleClient>,
     shared_tailnet: String,
     simulated_mints: AtomicU64,
     capabilities: RwLock<ProviderCapabilities>,
+    child_vault: RwLock<BTreeMap<LobbyId, ChildTailnetAccess>>,
 }
 
 impl TailscaleProvider {
@@ -395,7 +446,31 @@ impl TailscaleProvider {
             shared_tailnet: shared_tailnet.into(),
             simulated_mints: AtomicU64::new(0),
             capabilities: RwLock::new(ProviderCapabilities::blocked()),
+            child_vault: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    fn child_access(
+        &self,
+        lobby_id: LobbyId,
+        expected_dns_name: &str,
+    ) -> Result<Arc<ChildTailscaleClient>, ProviderError> {
+        let vault = self
+            .child_vault
+            .read()
+            .map_err(|_| ProviderError::Unavailable {
+                operation: "child_secret_vault",
+            })?;
+        let access = vault
+            .get(&lobby_id)
+            .filter(|access| access.dns_name == expected_dns_name)
+            .ok_or(ProviderError::ChildSecretUnavailable)?;
+        Ok(Arc::clone(&access.client))
+    }
+
+    #[cfg(test)]
+    fn child_secret_count(&self) -> usize {
+        self.child_vault.read().map_or(0, |vault| vault.len())
     }
 
     /// Builds the control adapter from `TS_API_BASE`, `TS_CLIENT_ID`, and
@@ -414,6 +489,7 @@ impl fmt::Debug for TailscaleProvider {
             .debug_struct("TailscaleProvider")
             .field("client", &"<redacted>")
             .field("shared_tailnet", &"<configured>")
+            .field("child_secret_vault", &"<redacted>")
             .field("capabilities", &self.cached_capabilities())
             .finish()
     }
@@ -427,18 +503,46 @@ impl NetworkProvider for TailscaleProvider {
             .map_or_else(|_| ProviderCapabilities::blocked(), |cache| *cache)
     }
 
+    fn lobby_access_error(
+        &self,
+        lobby_id: LobbyId,
+        mode: ProvisioningMode,
+        dry_run: bool,
+    ) -> Option<ProviderError> {
+        if dry_run || mode != ProvisioningMode::TailnetPerLobby {
+            return None;
+        }
+        match self.child_vault.read() {
+            Ok(vault) if vault.contains_key(&lobby_id) => None,
+            Ok(_) => Some(ProviderError::ChildSecretUnavailable),
+            Err(_) => Some(ProviderError::Unavailable {
+                operation: "child_secret_vault",
+            }),
+        }
+    }
+
     async fn refresh_capabilities(&self) -> ProviderCapabilities {
-        // Every probe is read-only. A successful list/read is used as the
-        // conservative scope proxy; no key, ACL, or device mutation occurs.
-        let settings = self.client.probe_settings(&self.shared_tailnet).await;
-        let keys = self.client.probe_auth_keys(&self.shared_tailnet).await;
-        let devices = self.client.list_devices(&self.shared_tailnet).await;
-        let acl = self.client.probe_acl(&self.shared_tailnet).await;
+        // Every startup probe is read-only. Organization-tailnet access is deliberately reported
+        // separately from the shared-tailnet key/device/ACL scopes.
+        let oauth_token_ok = self.client.probe_oauth_token().await.is_ok();
+        let can_manage_organization_tailnets =
+            oauth_token_ok && self.client.list_organization_tailnets().await.is_ok();
+        let can_mint_auth_keys = oauth_token_ok
+            && self
+                .client
+                .probe_auth_keys(&self.shared_tailnet)
+                .await
+                .is_ok();
+        let can_list_devices =
+            oauth_token_ok && self.client.list_devices(&self.shared_tailnet).await.is_ok();
+        let can_manage_acl =
+            oauth_token_ok && self.client.probe_acl(&self.shared_tailnet).await.is_ok();
         let refreshed = ProviderCapabilities {
-            oauth_token_ok: settings.is_ok(),
-            can_mint_auth_keys: keys.is_ok(),
-            can_list_devices: devices.is_ok(),
-            can_manage_acl: acl.is_ok(),
+            oauth_token_ok,
+            can_manage_organization_tailnets,
+            can_mint_auth_keys,
+            can_list_devices,
+            can_manage_acl,
         };
         if let Ok(mut cache) = self.capabilities.write() {
             *cache = refreshed;
@@ -450,14 +554,58 @@ impl NetworkProvider for TailscaleProvider {
         &self,
         request: PrepareLobbyRequest,
     ) -> Result<PreparedNetwork, ProviderError> {
-        if request.mode == ProvisioningMode::TailnetPerLobby {
-            return Err(ProviderError::ModeUnavailable);
-        }
         if request.dry_run || request.mode == ProvisioningMode::DryRun {
             return Ok(dry_prepared_network());
         }
+        if request.mode == ProvisioningMode::SharedTailnet {
+            return Ok(PreparedNetwork {
+                tailnet: self.shared_tailnet.clone(),
+                dry_run: false,
+                metadata: ResponseMetadata::default(),
+            });
+        }
+
+        if let Ok(vault) = self.child_vault.read() {
+            if let Some(access) = vault.get(&request.lobby_id) {
+                return Ok(PreparedNetwork {
+                    tailnet: access.dns_name.clone(),
+                    dry_run: false,
+                    metadata: ResponseMetadata::default(),
+                });
+            }
+        }
+
+        // The verified displayName grammar is ASCII and at most 50 bytes. A UUIDv4 plus this
+        // prefix is 45 bytes and does not include user-controlled lobby text.
+        let display_name = format!("spurfire-{}", request.lobby_id);
+        let tailnet = self
+            .client
+            .create_tailnet(&display_name)
+            .await
+            .map_err(|error| map_control_error(error, "organization_tailnet_create"))?;
+        let dns_name = tailnet.dns_name.clone();
+        let child = Arc::new(
+            self.client
+                .child_scoped(tailnet.into_child_oauth_credentials()),
+        );
+        self.child_vault
+            .write()
+            .map_err(|_| ProviderError::Unavailable {
+                operation: "child_secret_vault",
+            })?
+            .insert(
+                request.lobby_id,
+                ChildTailnetAccess {
+                    dns_name: dns_name.clone(),
+                    client: child,
+                },
+            );
+        if let Ok(mut cache) = self.capabilities.write() {
+            cache.oauth_token_ok = true;
+            cache.can_manage_organization_tailnets = true;
+        }
         Ok(PreparedNetwork {
-            tailnet: self.shared_tailnet.clone(),
+            tailnet: dns_name,
             dry_run: false,
             metadata: ResponseMetadata::default(),
         })
@@ -467,7 +615,7 @@ impl NetworkProvider for TailscaleProvider {
         &self,
         request: MintCredentialRequest,
     ) -> Result<MintedCredential, ProviderError> {
-        if request.dry_run {
+        if request.dry_run || request.mode == ProvisioningMode::DryRun {
             let sequence = self.simulated_mints.fetch_add(1, Ordering::SeqCst) + 1;
             return Ok(dry_minted_credential(&request, sequence));
         }
@@ -479,15 +627,25 @@ impl NetworkProvider for TailscaleProvider {
             tags: vec![request.tag],
             ttl_secs: 300,
         };
-        let key = match self
-            .client
-            .create_auth_key(&request.tailnet, &options)
-            .await
-        {
+        let key = match request.mode {
+            ProvisioningMode::SharedTailnet => {
+                self.client
+                    .create_auth_key(&request.tailnet, &options)
+                    .await
+            }
+            ProvisioningMode::TailnetPerLobby => {
+                let child = self.child_access(request.lobby_id, &request.tailnet)?;
+                child.create_auth_key(&request.tailnet, &options).await
+            }
+            ProvisioningMode::DryRun => unreachable!("dry-run returned above"),
+        };
+        let key = match key {
             Ok(key) => key,
             Err(error) => {
                 let error = map_control_error(error, "auth_keys");
-                if matches!(error, ProviderError::InsufficientScopes { .. }) {
+                if request.mode == ProvisioningMode::SharedTailnet
+                    && matches!(error, ProviderError::InsufficientScopes { .. })
+                {
                     if let Ok(mut cache) = self.capabilities.write() {
                         cache.can_mint_auth_keys = false;
                     }
@@ -507,10 +665,73 @@ impl NetworkProvider for TailscaleProvider {
         &self,
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError> {
-        if request.dry_run {
+        if request.dry_run || request.mode == ProvisioningMode::DryRun {
             return Ok(dry_cleanup_outcome(&request));
         }
+        if request.mode == ProvisioningMode::TailnetPerLobby {
+            return self.cleanup_child_tailnet(request).await;
+        }
+        self.cleanup_shared_tailnet(request).await
+    }
+}
 
+impl TailscaleProvider {
+    async fn cleanup_child_tailnet(
+        &self,
+        request: CleanupLobbyRequest,
+    ) -> Result<CleanupOutcome, ProviderError> {
+        let child = self.child_access(request.lobby_id, &request.tailnet)?;
+        if request.include_devices {
+            child
+                .delete_tailnet(&request.tailnet)
+                .await
+                .map_err(|error| map_control_error(error, "child_tailnet_delete"))?;
+            self.child_vault
+                .write()
+                .map_err(|_| ProviderError::Unavailable {
+                    operation: "child_secret_vault",
+                })?
+                .remove(&request.lobby_id);
+            return Ok(CleanupOutcome {
+                cleanup_pending: false,
+                revoked_credential_ids: request
+                    .credentials
+                    .into_iter()
+                    .map(|credential| credential.credential_id)
+                    .collect(),
+                attempted_device_deletes: 0,
+                metadata: ResponseMetadata::default(),
+            });
+        }
+
+        let mut outcome = CleanupOutcome::default();
+        for credential in &request.credentials {
+            if credential.expires_at <= request.now {
+                outcome
+                    .revoked_credential_ids
+                    .push(credential.credential_id.clone());
+                continue;
+            }
+            match child
+                .delete_auth_key(&request.tailnet, &credential.credential_id)
+                .await
+            {
+                Ok(())
+                | Err(ControlError::Http {
+                    status: 400 | 404, ..
+                }) => outcome
+                    .revoked_credential_ids
+                    .push(credential.credential_id.clone()),
+                Err(_) => outcome.cleanup_pending = true,
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn cleanup_shared_tailnet(
+        &self,
+        request: CleanupLobbyRequest,
+    ) -> Result<CleanupOutcome, ProviderError> {
         let mut outcome = CleanupOutcome::default();
         for credential in &request.credentials {
             if credential.expires_at <= request.now {
@@ -524,11 +745,8 @@ impl NetworkProvider for TailscaleProvider {
                 .delete_auth_key(&request.tailnet, &credential.credential_id)
                 .await
             {
-                Ok(()) => outcome
-                    .revoked_credential_ids
-                    .push(credential.credential_id.clone()),
-                // A missing/invalid receipt cannot still enroll a device.
-                Err(ControlError::Http {
+                Ok(())
+                | Err(ControlError::Http {
                     status: 400 | 404, ..
                 }) => outcome
                     .revoked_credential_ids
@@ -646,7 +864,7 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
     match error {
         ControlError::Http { status: 403, .. } => ProviderError::InsufficientScopes { operation },
         ControlError::Http { status, .. } => ProviderError::Upstream { operation, status },
-        ControlError::ProvisioningUnavailable(_) => ProviderError::ModeUnavailable,
+        ControlError::ProvisioningUnavailable(_) => ProviderError::Unavailable { operation },
         ControlError::Env(_)
         | ControlError::InvalidTailnetName(_)
         | ControlError::Reqwest(_)
@@ -671,7 +889,10 @@ mod tests {
     fn blocked_capabilities_are_fail_closed() {
         let capabilities = ProviderCapabilities::blocked();
         assert!(!capabilities.shared_tailnet_available());
-        assert_eq!(capabilities.blocked_state_reason(), "token_fetch_failed");
+        assert_eq!(
+            capabilities.blocked_state_reason(ProvisioningMode::TailnetPerLobby),
+            "token_fetch_failed"
+        );
         assert_eq!(
             capabilities
                 .response(ResponseMetadata::default())
@@ -679,6 +900,68 @@ mod tests {
                 .shared_tailnet,
             CapabilityModeStatus::BlockedScopes
         );
+    }
+
+    #[tokio::test]
+    async fn organization_capability_is_independent_of_shared_scopes() {
+        let mut server = Server::new_async().await;
+        let token = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"token-canary","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let organization = server
+            .mock("GET", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let keys = server
+            .mock("GET", "/tailnet/-/keys")
+            .with_status(403)
+            .expect(1)
+            .create_async()
+            .await;
+        let devices = server
+            .mock("GET", "/tailnet/-/devices")
+            .with_status(403)
+            .expect(1)
+            .create_async()
+            .await;
+        let acl = server
+            .mock("GET", "/tailnet/-/acl")
+            .with_status(403)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = TailscaleProvider::new(
+            TailscaleClient::new(server.url(), "client-canary", "secret-canary"),
+            "-",
+        );
+
+        let capabilities = provider.refresh_capabilities().await;
+        let response = capabilities.response(ResponseMetadata::default());
+
+        assert!(capabilities.tailnet_per_lobby_available());
+        assert!(!capabilities.shared_tailnet_available());
+        assert_eq!(
+            response.modes.tailnet_per_lobby,
+            CapabilityModeStatus::Available
+        );
+        assert_eq!(
+            response.modes.shared_tailnet,
+            CapabilityModeStatus::BlockedScopes
+        );
+        token.assert_async().await;
+        organization.assert_async().await;
+        keys.assert_async().await;
+        devices.assert_async().await;
+        acl.assert_async().await;
     }
 
     #[tokio::test]
@@ -706,7 +989,7 @@ mod tests {
         provider
             .prepare_lobby(PrepareLobbyRequest {
                 lobby_id,
-                mode: ProvisioningMode::DryRun,
+                mode: ProvisioningMode::TailnetPerLobby,
                 dry_run: true,
             })
             .await
@@ -714,6 +997,7 @@ mod tests {
         let minted = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id,
+                mode: ProvisioningMode::DryRun,
                 player_id,
                 tailnet: "-".to_owned(),
                 tag: "tag:spurfire-lobby-test".to_owned(),
@@ -726,6 +1010,7 @@ mod tests {
         provider
             .cleanup_lobby(CleanupLobbyRequest {
                 lobby_id,
+                mode: ProvisioningMode::DryRun,
                 tailnet: "-".to_owned(),
                 tag: "tag:spurfire-lobby-test".to_owned(),
                 credentials: vec![CredentialCleanup {
@@ -739,8 +1024,166 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(provider.child_secret_count(), 0);
         no_posts.assert_async().await;
         no_deletes.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn tailnet_per_lobby_uses_child_scope_then_deletes_and_evicts() {
+        const CHILD_ID: &str = "child-client-provider-canary";
+        const CHILD_SECRET: &str = "child-secret-provider-canary";
+        let mut server = Server::new_async().await;
+        let organization_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("client_id".into(), "org-client".into()),
+                Matcher::UrlEncoded("client_secret".into(), "org-secret".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"organization-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .match_header("authorization", "Bearer organization-token")
+            .match_body(Matcher::Json(serde_json::json!({
+                "displayName":"spurfire-00000000-0000-4000-8000-000000000001"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "id":"TtProviderCNTRL",
+                    "dnsName":"tail-provider.ts.net",
+                    "displayName":"spurfire-00000000-0000-4000-8000-000000000001",
+                    "oauthClient":{"id":CHILD_ID,"secret":CHILD_SECRET}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let child_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("client_id".into(), CHILD_ID.into()),
+                Matcher::UrlEncoded("client_secret".into(), CHILD_SECRET.into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"child-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let key = server
+            .mock("POST", "/tailnet/tail-provider.ts.net/keys")
+            .match_header("authorization", "Bearer child-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"key-receipt","key":"tskey-auth-join-secret"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let delete = server
+            .mock("DELETE", "/tailnet/tail-provider.ts.net")
+            .match_header("authorization", "Bearer child-token")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = TailscaleProvider::new(
+            TailscaleClient::new(server.url(), "org-client", "org-secret"),
+            "-",
+        );
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let player_id = PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap();
+
+        let prepared = provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(prepared.tailnet, "tail-provider.ts.net");
+        assert_eq!(provider.child_secret_count(), 1);
+        let provider_debug = format!("{provider:?}");
+        assert!(!provider_debug.contains(CHILD_ID));
+        assert!(!provider_debug.contains(CHILD_SECRET));
+
+        let minted = provider
+            .mint_credential(MintCredentialRequest {
+                lobby_id,
+                mode: ProvisioningMode::TailnetPerLobby,
+                player_id,
+                tailnet: prepared.tailnet.clone(),
+                tag: "tag:spurfire-lobby-test".to_owned(),
+                expires_at: UnixMillis::new(300_000),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(minted.credential_id, "key-receipt");
+        assert_eq!(minted.auth_key.into_exposed(), "tskey-auth-join-secret");
+
+        let outcome = provider
+            .cleanup_lobby(CleanupLobbyRequest {
+                lobby_id,
+                mode: ProvisioningMode::TailnetPerLobby,
+                tailnet: prepared.tailnet,
+                tag: "tag:spurfire-lobby-test".to_owned(),
+                credentials: vec![CredentialCleanup {
+                    credential_id: "key-receipt".to_owned(),
+                    expires_at: UnixMillis::new(300_000),
+                }],
+                include_devices: true,
+                now: UnixMillis::new(0),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+        assert!(!outcome.cleanup_pending);
+        assert_eq!(outcome.revoked_credential_ids, ["key-receipt"]);
+        assert_eq!(provider.child_secret_count(), 0);
+
+        organization_token.assert_async().await;
+        create.assert_async().await;
+        child_token.assert_async().await;
+        key.assert_async().await;
+        delete.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn missing_child_vault_entry_fails_closed_with_stable_reason() {
+        let provider = TailscaleProvider::new(
+            TailscaleClient::new("http://127.0.0.1:1", "org-client", "org-secret"),
+            "-",
+        );
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let error = provider
+            .lobby_access_error(lobby_id, ProvisioningMode::TailnetPerLobby, false)
+            .unwrap();
+        assert_eq!(
+            error.state_reason(),
+            "child_secret_unavailable_manual_remediation"
+        );
+
+        let result = provider
+            .mint_credential(MintCredentialRequest {
+                lobby_id,
+                mode: ProvisioningMode::TailnetPerLobby,
+                player_id: PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
+                tailnet: "tail-restarted.ts.net".to_owned(),
+                tag: "tag:spurfire-lobby-test".to_owned(),
+                expires_at: UnixMillis::new(300_000),
+                dry_run: false,
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), ProviderError::ChildSecretUnavailable);
     }
 
     #[tokio::test]
@@ -754,9 +1197,11 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let settings = server
-            .mock("GET", "/tailnet/-/settings")
+        let organization_tailnets = server
+            .mock("GET", "/organizations/-/tailnets")
             .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[]}"#)
             .expect(1)
             .create_async()
             .await;
@@ -798,6 +1243,7 @@ mod tests {
         let result = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id: LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+                mode: ProvisioningMode::SharedTailnet,
                 player_id: PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
                 tailnet: "-".to_owned(),
                 tag: "tag:spurfire-lobby-test".to_owned(),
@@ -815,7 +1261,7 @@ mod tests {
         assert!(!provider.cached_capabilities().shared_tailnet_available());
 
         token.assert_async().await;
-        settings.assert_async().await;
+        organization_tailnets.assert_async().await;
         keys.assert_async().await;
         devices.assert_async().await;
         acl.assert_async().await;
