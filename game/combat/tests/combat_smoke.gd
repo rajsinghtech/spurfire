@@ -6,14 +6,14 @@ class FakeWeaponController:
 	signal ammo_changed(mag, reserve)
 	signal shot_fired(tick, weapon_id)
 	signal hit_confirmed(target_id, hit_zone, damage)
-	var weapon_id := &"dustwalker"
+	var weapon_id := 0
 	var fire_calls: Array = []
 	var reload_calls := 0
 	var mag := 30
 	var reserve := 120
 
 	func equip_weapon(id) -> bool:
-		weapon_id = StringName(id)
+		weapon_id = int(id)
 		weapon_changed.emit(weapon_id)
 		return true
 
@@ -117,7 +117,7 @@ func _ready() -> void:
 
 	for key in ["longspur", "rattler", "props"]:
 		add_child(loaded[key])
-	if str(loaded.longspur.weapon_id) != "longspur" or str(loaded.rattler.weapon_id) != "rattler":
+	if int(loaded.longspur.weapon_id) != 1 or int(loaded.rattler.weapon_id) != 2:
 		failures.append("rifle sidegrade identities are incorrect")
 
 	_check_native_api_if_available(failures)
@@ -133,7 +133,7 @@ func _check_native_api_if_available(failures: Array[String]) -> void:
 		failures.append("MountedWeaponController could not instantiate")
 		return
 	add_child(native)
-	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats"]:
+	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit"]:
 		if not native.has_method(method):
 			failures.append("MountedWeaponController lacks %s" % method)
 	for signal_name in [&"weapon_changed", &"ammo_changed", &"shot_fired", &"hit_confirmed"]:

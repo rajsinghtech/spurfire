@@ -3,7 +3,7 @@
 [ext_resource type="PackedScene" path="res://combat/mounted_rifle.tscn" id="1"]
 
 [node name="RattlerRifle" instance=ExtResource("1")]
-weapon_id = &"rattler"
+weapon_id = 2
 tracer_color = Color(0.48, 1, 0.3, 1)
 identity_color = Color(0.3, 0.42, 0.18, 1)
 stock_color = Color(0.2, 0.3, 0.12, 1)

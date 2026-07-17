@@ -25,6 +25,7 @@ docs/rustscale-integration.md  RustScale readiness survey
 docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
 docs/asset-licenses.md     Verified provenance and licenses for imported game assets
+docs/combat-m1.md          Mounted assault-rifle controls, authority boundary, and tests
 .github/workflows/         Locked CI gates and manual credentialed e2e
 justfile                   Task runner recipes
 ```

@@ -104,6 +104,36 @@ func _exercise_native_input(horse: CharacterBody3D, failures: Array[String]) -> 
 	if horse.rotation.y >= 0.0:
 		failures.append("D did not use Godot's negative-yaw right-turn convention")
 	horse.call("reset_horse")
+	await _exercise_native_combat(horse, failures)
+
+func _exercise_native_combat(horse: CharacterBody3D, failures: Array[String]) -> void:
+	var course := horse.get_parent()
+	var controller := horse.get_node_or_null("WeaponController")
+	var target := course.get_node_or_null("TargetBodyNear")
+	if controller == null or target == null:
+		failures.append("integrated weapon controller or target dummy is missing")
+		return
+	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit"]:
+		if not controller.has_method(method):
+			failures.append("MountedWeaponController lacks %s" % method)
+	if not failures.is_empty():
+		return
+	controller.call("equip_weapon", 0)
+	var origin: Vector3 = controller.global_position
+	var body_zone := target.get_node("BodyZone") as StaticBody3D
+	var direction := origin.direction_to(body_zone.global_position)
+	var tick := int(controller.get("current_tick"))
+	var vitality_before := float(target.get("vitality"))
+	if not bool(controller.call("request_fire", origin, direction, tick)):
+		failures.append("native mounted rifle rejected a valid first shot")
+		return
+	var distance := origin.distance_to(body_zone.global_position)
+	if not bool(controller.call("resolve_local_hit", 101, "body", distance)):
+		failures.append("native local authority rejected valid target evidence")
+		return
+	await get_tree().process_frame
+	if float(target.get("vitality")) >= vitality_before:
+		failures.append("authority-computed rifle damage did not reach target dummy")
 
 func _wait_physics_frames(count: int) -> void:
 	for _frame in range(count):

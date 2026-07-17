@@ -23,6 +23,7 @@ This repository contains the Rust control plane and the Godot 4.7.1 game prototy
 - `docs/rustscale-tailnet-tooling.md` — RustScale organization-tailnet script comparison and safe probe policy.
 - `docs/lobby-service.md` — HTTP routes, lifecycle, dry-run, configuration, and trust boundaries.
 - `docs/godot-m0.md` — Godot/GDExtension setup, commands, M0/M0.5 handling contract, and platform caveats.
+- `docs/combat-m1.md` — mounted rifle controls, deterministic shot authority, presentation, and M1 limits.
 - `docs/asset-licenses.md` — verified source URLs, licenses, and hashes for every imported asset.
 - `.github/workflows/ci.yml` — continuous integration gates.
 

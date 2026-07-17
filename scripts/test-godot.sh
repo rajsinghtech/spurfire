@@ -103,9 +103,8 @@ if [[ "$needs_import" == true ]]; then
     --headless \
     --display-driver headless \
     --audio-driver Dummy \
-    --editor \
     --path "$project_dir" \
-    --quit-after 5 >"$import_log" 2>&1 || import_status=$?
+    --import >"$import_log" 2>&1 || import_status=$?
   mv "$disabled_descriptor" "$descriptor"
   if [[ "$import_status" -ne 0 ]]; then
     cat "$import_log" >&2
@@ -125,6 +124,16 @@ run_bounded "$timeout_seconds" "$godot_bin" \
   --audio-driver Dummy \
   --path "$project_dir" \
   --scene "$smoke_scene"
+
+for extra_scene in res://ui/tests/polish_smoke.tscn res://combat/tests/combat_smoke.tscn; do
+  printf 'Running %s...\n' "$extra_scene"
+  run_bounded "$timeout_seconds" "$godot_bin" \
+    --headless \
+    --display-driver headless \
+    --audio-driver Dummy \
+    --path "$project_dir" \
+    --scene "$extra_scene"
+done
 
 # The dedicated smoke scene validates the native class and course contract, while a short run of
 # the configured main scene catches bootstrap/deferred-scene-change errors that the smoke scene

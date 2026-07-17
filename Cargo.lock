@@ -1363,6 +1363,7 @@ name = "spurfire-gdext"
 version = "0.1.0"
 dependencies = [
  "godot",
+ "spurfire-protocol",
 ]
 
 [[package]]

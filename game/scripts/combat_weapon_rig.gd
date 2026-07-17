@@ -1,10 +1,16 @@
 extends Node3D
 class_name CombatWeaponRig
 
+const ART_SCENES := [
+	preload("res://scenes/art/weapons/dustwalker_art.tscn"),
+	preload("res://scenes/art/weapons/longspur_art.tscn"),
+	preload("res://scenes/art/weapons/rattler_art.tscn"),
+]
+
 @export var controller: Node
 @export var aim_source: Node3D
 @export var muzzle: Marker3D
-@export var weapon_id: StringName = &"dustwalker"
+@export_range(0, 2, 1) var weapon_id := 0
 @export var tracer_color := Color("ffb84d")
 @export var identity_color := Color("b88752")
 @export var stock_color := Color("6f3e24")
@@ -16,6 +22,7 @@ var _tick := 0
 func _ready() -> void:
 	flash.visible = false
 	_apply_identity()
+	_install_verified_art()
 	if muzzle == null:
 		muzzle = %Muzzle
 	if controller != null:
@@ -29,6 +36,11 @@ func bind_controller(value: Node) -> void:
 func equip() -> void:
 	if controller != null and controller.has_method("equip_weapon"):
 		controller.call("equip_weapon", weapon_id)
+
+func set_weapon(id: int) -> void:
+	weapon_id = clampi(id, 0, 2)
+	_install_verified_art()
+	equip()
 
 func request_fire(tick: int = -1) -> Variant:
 	if controller == null or not controller.has_method("request_fire"):
@@ -49,10 +61,23 @@ func _physics_process(_delta: float) -> void:
 		flash.visible = _flash_frames > 0
 
 func _on_shot_fired(_shot_tick: Variant, fired_weapon_id: Variant) -> void:
-	if str(fired_weapon_id).to_lower() != str(weapon_id).to_lower():
+	if int(fired_weapon_id) != weapon_id:
 		return
 	flash.visible = true
 	_flash_frames = 2
+
+func _install_verified_art() -> void:
+	var previous := get_node_or_null("WeaponArt")
+	if previous:
+		remove_child(previous)
+		previous.queue_free()
+	for path in ["Receiver", "Stock", "Barrel", "Grip"]:
+		var fallback := get_node_or_null(path) as VisualInstance3D
+		if fallback:
+			fallback.visible = false
+	var art := ART_SCENES[clampi(weapon_id, 0, 2)].instantiate() as Node3D
+	art.name = "WeaponArt"
+	add_child(art)
 
 func _apply_identity() -> void:
 	for path in ["Receiver", "Stock"]:

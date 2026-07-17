@@ -3,14 +3,21 @@
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
 use spurfire_protocol::{
-    effective_spread_millidegrees, CombatGait, CombatKernel, HitZone, PlayerId, QuantizedDirection,
-    QuantizedOrigin, ReloadStartError, RidingState, ShotOutcome, ShotRejectionReason, ShotResult,
-    ShotTelemetry, SimulationTick, WeaponAmmo, WeaponId, WeaponStats, DIRECTION_UNITS,
-    ORIGIN_LEASH_MM,
+    effective_spread_millidegrees, CombatGait, CombatKernel, EntityId, HitZone, PlayerId,
+    QuantizedDirection, QuantizedOrigin, ReloadStartError, RidingState, ShotOutcome,
+    ShotRejectionReason, ShotResult, ShotTelemetry, SimulationTick, WeaponAmmo, WeaponId,
+    WeaponStats, DIRECTION_UNITS, ORIGIN_LEASH_MM,
 };
 
 const DEFAULT_TICK_RATE: u32 = 60;
 const DEFAULT_SHOOTER_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+#[derive(Clone, Copy)]
+struct PendingLocalShot {
+    tick: SimulationTick,
+    weapon_id: WeaponId,
+    direction: QuantizedDirection,
+}
 
 /// The single Godot-facing authority API for mounted rifles.
 #[derive(GodotClass)]
@@ -75,6 +82,7 @@ pub struct MountedWeaponController {
 
     kernel: CombatKernel,
     tick_accumulator: f64,
+    pending_local_shot: Option<PendingLocalShot>,
 }
 
 #[godot_api]
@@ -221,6 +229,11 @@ impl MountedWeaponController {
             distance_mm: None,
         };
         self.last_telemetry = telemetry_dictionary(&telemetry);
+        self.pending_local_shot = Some(PendingLocalShot {
+            tick,
+            weapon_id: prepared.weapon_id,
+            direction: prepared.resolved_direction,
+        });
         self.update_runtime_properties();
         let emitted_tick = self.current_tick;
         self.signals()
@@ -260,6 +273,58 @@ impl MountedWeaponController {
             self.kernel.is_holstered(),
         )
     }
+
+    /// Resolve one local-authority geometry hit for the most recently accepted shot.
+    ///
+    /// Godot supplies only target/zone/distance evidence from its physics ray. Damage and range
+    /// are derived from the locked native weapon row. Networked matches replace this bridge with
+    /// `CombatAuthority::validate_shot` over authority snapshots.
+    #[func]
+    pub fn resolve_local_hit(
+        &mut self,
+        target_id: i64,
+        hit_zone: GString,
+        distance_m: f64,
+    ) -> bool {
+        let Some(pending) = self.pending_local_shot.take() else {
+            return false;
+        };
+        let Ok(target_id) = u64::try_from(target_id) else {
+            return false;
+        };
+        if !distance_m.is_finite() || distance_m < 0.0 {
+            return false;
+        }
+        let distance_mm_f64 = (distance_m * 1_000.0).round();
+        if distance_mm_f64 > f64::from(u32::MAX) {
+            return false;
+        }
+        let distance_mm = distance_mm_f64 as u32;
+        let stats = *pending.weapon_id.stats();
+        if distance_mm > stats.hitscan_clamp_mm {
+            return false;
+        }
+        let zone = match hit_zone.to_string().to_ascii_lowercase().as_str() {
+            "head" => HitZone::Head,
+            "body" => HitZone::Body,
+            _ => return false,
+        };
+        let result = ShotResult {
+            tick: pending.tick,
+            shooter_peer_id: self.kernel.shooter_peer_id(),
+            weapon_id: pending.weapon_id,
+            outcome: ShotOutcome::Hit,
+            rejection_reason: None,
+            resolved_direction: Some(pending.direction),
+            target_id: Some(EntityId(target_id)),
+            hit_zone: Some(zone),
+            damage: stats.damage_at(distance_mm, zone),
+            distance_mm: Some(distance_mm),
+            eliminated: false,
+        };
+        self.apply_authority_result(&result);
+        true
+    }
 }
 
 #[godot_api]
@@ -297,6 +362,7 @@ impl INode3D for MountedWeaponController {
             last_telemetry: VarDictionary::new(),
             kernel,
             tick_accumulator: 0.0,
+            pending_local_shot: None,
         }
     }
 
@@ -359,6 +425,7 @@ impl MountedWeaponController {
         self.tick_accumulator = 0.0;
         self.last_reject_reason = GString::new();
         self.last_telemetry = VarDictionary::new();
+        self.pending_local_shot = None;
     }
 
     fn handling_state(&self) -> RidingState {
@@ -421,6 +488,7 @@ impl MountedWeaponController {
         self.last_shot_direction = finite_vector_or_zero(direction);
         self.last_reject_reason = GString::from(reason.as_str());
         self.last_telemetry = telemetry_dictionary(&telemetry);
+        self.pending_local_shot = None;
     }
 
     fn update_runtime_properties(&mut self) {
@@ -559,6 +627,7 @@ fn weapon_stats_dictionary(
     row.set("weapon_id", i64::from(stats.id.as_u8()));
     row.set("weapon_key", stats.id.as_str());
     row.set("name", stats.display_name);
+    row.set("display_name", stats.display_name);
     row.set("magazine", i64::from(stats.magazine_capacity));
     row.set("reserve", i64::from(stats.reserve_capacity));
     row.set("magazine_capacity", i64::from(stats.magazine_capacity));

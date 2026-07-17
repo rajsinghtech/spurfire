@@ -1,4 +1,4 @@
-[gd_scene load_steps=23 format=3]
+[gd_scene load_steps=29 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -9,6 +9,12 @@
 [ext_resource type="PackedScene" path="res://ui/archetype_selector.tscn" id="7_selector"]
 [ext_resource type="PackedScene" path="res://ui/stylized_feedback.tscn" id="8_feedback"]
 [ext_resource type="PackedScene" path="res://scenes/art/frontier_prop_set.tscn" id="9_props"]
+[ext_resource type="PackedScene" path="res://combat/mounted_rifle.tscn" id="10_rifle"]
+[ext_resource type="PackedScene" path="res://ui/combat/combat_hud.tscn" id="11_combat_hud"]
+[ext_resource type="PackedScene" path="res://combat/target_dummy.tscn" id="12_dummy"]
+[ext_resource type="PackedScene" path="res://combat/target_range_props.tscn" id="13_range"]
+[ext_resource type="PackedScene" path="res://combat/combat_effects.tscn" id="14_effects"]
+[ext_resource type="Script" path="res://scripts/combat_player.gd" id="15_combat_player"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -99,6 +105,26 @@ position = Vector3(-30, 0, 4)
 position = Vector3(24, 0, -32)
 rotation_degrees = Vector3(0, 150, 0)
 
+[node name="TargetRange" parent="." instance=ExtResource("13_range")]
+position = Vector3(0, 0.15, -12)
+
+[node name="TargetBodyNear" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
+position = Vector3(-4, 0, -28)
+target_id = 101
+controller = NodePath("../Horse/WeaponController")
+
+[node name="TargetHeadMid" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
+position = Vector3(0, 0, -42)
+target_id = 102
+controller = NodePath("../Horse/WeaponController")
+
+[node name="TargetBodyFar" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
+position = Vector3(5, 0, -58)
+target_id = 103
+controller = NodePath("../Horse/WeaponController")
+
+[node name="CombatEffects" parent="." instance=ExtResource("14_effects")]
+
 [node name="HorseSpawn" type="Marker3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 25)
 groups = ["respawn_anchor"]
@@ -169,6 +195,24 @@ mesh = SubResource("CylinderMesh_tail")
 [node name="VisualAnimator" type="Node" parent="Horse"]
 script = ExtResource("6_visual")
 
+[node name="WeaponController" type="MountedWeaponController" parent="Horse"]
+position = Vector3(0.52, 1.92, -0.18)
+
+[node name="MountedRifle" parent="Horse" node_paths=PackedStringArray("controller", "aim_source") instance=ExtResource("10_rifle")]
+position = Vector3(0.52, 1.92, -0.18)
+rotation_degrees = Vector3(-4, 0, 0)
+controller = NodePath("../WeaponController")
+aim_source = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
+
+[node name="CombatInput" type="Node" parent="Horse" node_paths=PackedStringArray("horse", "controller", "rifle", "aim_camera", "effects", "combat_hud")]
+script = ExtResource("15_combat_player")
+horse = NodePath("..")
+controller = NodePath("../WeaponController")
+rifle = NodePath("../MountedRifle")
+aim_camera = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
+effects = NodePath("../../CombatEffects")
+combat_hud = NodePath("../../CombatLayer/CombatHUD")
+
 [node name="ForwardMarker" type="MeshInstance3D" parent="Horse"]
 position = Vector3(0, 1.35, -1.35)
 scale = Vector3(0.3, 0.3, 0.3)
@@ -213,6 +257,12 @@ layer = 5
 [node name="ArchetypeSelector" parent="ArchetypeLayer" instance=ExtResource("7_selector")]
 visible = false
 horse_path = NodePath("../../Horse")
+
+[node name="CombatLayer" type="CanvasLayer" parent="."]
+layer = 3
+
+[node name="CombatHUD" parent="CombatLayer" node_paths=PackedStringArray("controller") instance=ExtResource("11_combat_hud")]
+controller = NodePath("../../Horse/WeaponController")
 
 [node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse")]
 layer = 2
@@ -261,4 +311,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "W/S ride  •  A/D steer; from rest A/D sidesteps  •  1/2/3 horse archetype\nH horse stats  •  Space jump  •  R reset  •  Esc release / Esc again quit"
+text = "W/S ride  •  A/D steer/sidestep  •  Mouse1 fire  •  Mouse2 aim  •  R reload\n4/5/6 rifles  •  T horse reset  •  1/2/3 horse archetype  •  H horse stats"

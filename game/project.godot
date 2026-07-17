@@ -55,7 +55,35 @@ jump={
 }
 reset_horse={
 "deadzone": 0.15,
-"events": [Object(InputEventKey,"physical_keycode":82), Object(InputEventJoypadButton,"button_index":6)]
+"events": [Object(InputEventKey,"physical_keycode":84), Object(InputEventJoypadButton,"button_index":6)]
+}
+combat_fire={
+"deadzone": 0.1,
+"events": [Object(InputEventMouseButton,"button_index":1), Object(InputEventJoypadMotion,"axis":5,"axis_value":1.0)]
+}
+combat_aim={
+"deadzone": 0.1,
+"events": [Object(InputEventMouseButton,"button_index":2)]
+}
+combat_reload={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":82)]
+}
+combat_interact={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":69)]
+}
+weapon_dustwalker={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":52)]
+}
+weapon_longspur={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":53)]
+}
+weapon_rattler={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":54)]
 }
 camera_left={
 "deadzone": 0.15,

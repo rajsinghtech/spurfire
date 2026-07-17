@@ -63,9 +63,10 @@ Set `GODOT_BIN` when the executable is not named `godot4` or `godot`. Headless c
 - **Shift/Ctrl / shoulder buttons:** optional immediate gait increase/decrease; normal W acceleration upshifts automatically.
 - **Option (Alt) / left trigger:** hard brake.
 - **Space / bottom face button:** jump.
-- **R / Start:** reset to spawn.
+- **T / Start:** reset to spawn (`R` is reload after M1).
 - **Mouse / right stick:** orbit camera.
 - **Escape once:** release mouse capture. **Escape again:** quit the prototype. Left-click recaptures.
+- **Mounted combat:** Mouse 1 fires, Mouse 2 aims, R reloads, and 4/5/6 select rifles; see `docs/combat-m1.md`.
 
 ## M0.5 horse handling and presentation
 
