@@ -57,10 +57,10 @@ Set `GODOT_BIN` when the executable is not named `godot4` or `godot`. Headless c
 
 ## Controls
 
-- **W / left stick up:** move forward; automatically enters Walk from Idle.
+- **W / left stick up:** move forward and naturally progress Walk → Trot → Gallop as speed builds.
 - **S / left stick down:** brake, then reverse after stopping.
 - **A/D / left stick:** steer left/right using Godot's visual yaw convention.
-- **Shift/Ctrl / shoulder buttons:** increase/decrease gait.
+- **Shift/Ctrl / shoulder buttons:** optional immediate gait increase/decrease; normal W acceleration upshifts automatically.
 - **Option (Alt) / left trigger:** hard brake.
 - **Space / bottom face button:** jump.
 - **R / Start:** reset to spawn.

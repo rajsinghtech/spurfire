@@ -122,6 +122,7 @@ pub enum TransitionReason {
     PlayerDown,
     /// Forward input from rest automatically enters Walk so the primary movement key always moves.
     ThrottleStart,
+    AutoUpshift,
     AutoDownshift,
     Reset,
 }
@@ -236,15 +237,15 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Self {
-            walk_speed: 2.0,
-            trot_speed: 5.0,
-            gallop_speed: 11.0,
+            walk_speed: 2.5,
+            trot_speed: 6.0,
+            gallop_speed: 13.0,
             reverse_speed: 1.5,
-            walk_acceleration: 3.0,
-            trot_acceleration: 4.0,
-            gallop_acceleration: 5.0,
+            walk_acceleration: 4.5,
+            trot_acceleration: 6.0,
+            gallop_acceleration: 7.5,
             coast_deceleration: 0.8,
-            soft_brake_deceleration: 3.5,
+            soft_brake_deceleration: 5.0,
             hard_brake_deceleration: 8.0,
             idle_yaw_rate_degrees: 90.0,
             walk_yaw_rate_degrees: 120.0,
@@ -437,6 +438,7 @@ pub struct HorseState {
     coyote_remaining: f64,
     jump_buffer_remaining: f64,
     low_speed_time: f64,
+    reverse_hold_time: f64,
     telemetry_elapsed: f64,
 }
 
@@ -529,6 +531,7 @@ impl HorseKernel {
                 coyote_remaining: tuning.coyote_time,
                 jump_buffer_remaining: 0.0,
                 low_speed_time: 0.0,
+                reverse_hold_time: 0.0,
                 telemetry_elapsed: 0.0,
             },
             spawn_position,
@@ -588,6 +591,7 @@ impl HorseKernel {
             coyote_remaining: self.tuning.coyote_time,
             jump_buffer_remaining: 0.0,
             low_speed_time: 0.0,
+            reverse_hold_time: 0.0,
             telemetry_elapsed: 0.0,
         };
         GaitTransition {
@@ -637,7 +641,9 @@ impl HorseKernel {
         if gait_transition.is_some() {
             self.state.low_speed_time = 0.0;
         } else {
-            gait_transition = self.apply_auto_downshift(input, current_speed, delta);
+            gait_transition = self
+                .apply_auto_upshift(input, current_speed)
+                .or_else(|| self.apply_auto_downshift(input, current_speed, delta));
         }
 
         self.state.telemetry_elapsed += delta;
@@ -798,13 +804,24 @@ impl HorseKernel {
         let gait_cap = self.tuning.target_speed(self.state.gait) * terrain_speed;
 
         let (target_longitudinal, rate) = if input.brake > 0.0 {
-            if longitudinal > 0.0 {
+            if longitudinal > 0.05 {
+                self.state.reverse_hold_time = 0.0;
                 (0.0, self.tuning.soft_brake_deceleration)
-            } else {
+            } else if longitudinal < -0.05 {
                 (
                     -self.tuning.reverse_speed * input.brake,
                     self.tuning.walk_acceleration,
                 )
+            } else {
+                self.state.reverse_hold_time += delta;
+                if self.state.reverse_hold_time >= 0.35 {
+                    (
+                        -self.tuning.reverse_speed * input.brake,
+                        self.tuning.walk_acceleration,
+                    )
+                } else {
+                    (0.0, self.tuning.soft_brake_deceleration)
+                }
             }
         } else if input.throttle > 0.0 {
             (
@@ -814,6 +831,9 @@ impl HorseKernel {
         } else {
             (0.0, self.tuning.coast_deceleration)
         };
+        if input.brake <= 0.0 {
+            self.state.reverse_hold_time = 0.0;
+        }
 
         longitudinal = move_towards(longitudinal, target_longitudinal, rate * delta);
         let lateral_damping = if self.state.gait == Gait::Gallop {
@@ -870,6 +890,32 @@ impl HorseKernel {
             acceleration *= 1.0 + bonus;
         }
         (speed, acceleration)
+    }
+
+    fn apply_auto_upshift(
+        &mut self,
+        input: InputFrame,
+        horizontal_speed: f64,
+    ) -> Option<GaitTransition> {
+        if input.throttle <= 0.0 || input.brake > 0.0 || input.hard_brake {
+            return None;
+        }
+        let threshold = match self.state.gait {
+            Gait::Walk => self.tuning.walk_speed * 0.85,
+            Gait::Trot => self.tuning.trot_speed * 0.85,
+            Gait::Idle | Gait::Gallop => return None,
+        };
+        if horizontal_speed + f64::EPSILON < threshold {
+            return None;
+        }
+        let old = self.state.gait;
+        let new = old.up();
+        self.state.gait = new;
+        Some(GaitTransition {
+            old,
+            new,
+            reason: TransitionReason::AutoUpshift,
+        })
     }
 
     fn apply_auto_downshift(
@@ -1015,7 +1061,7 @@ mod tests {
                 hz,
             );
         }
-        assert!((kernel.state().horizontal_speed() - 11.0).abs() < 1.0e-9);
+        assert!((kernel.state().horizontal_speed() - 13.0).abs() < 1.0e-9);
     }
 
     #[test]
@@ -1046,7 +1092,7 @@ mod tests {
             let (time, distance) = reached.expect("horse reaches acceptance speed");
             assert!(time <= 3.5, "{hz} Hz took {time:.3} s");
             assert!(distance <= 30.0, "{hz} Hz used {distance:.3} m");
-            assert!(horse.state().horizontal_speed() <= 11.0 + 1.0e-9);
+            assert!(horse.state().horizontal_speed() <= 13.0 + 1.0e-9);
             final_states.push(horse.state().clone());
         }
 
@@ -1101,6 +1147,88 @@ mod tests {
             }
             assert!(horse.state().yaw_radians < 0.0, "{hz} Hz Godot right yaw");
             assert!(horse.state().position.x > 0.0, "{hz} Hz rightward movement");
+        }
+    }
+
+    #[test]
+    fn held_forward_naturally_reaches_gallop() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            let mut transitions = Vec::new();
+            for _ in 0..(4 * hz) {
+                if let Some(transition) = step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                )
+                .gait_transition
+                {
+                    transitions.push(transition);
+                }
+            }
+            assert_eq!(horse.state().gait, Gait::Gallop, "{hz} Hz gait");
+            assert!(horse.state().horizontal_speed() >= 12.5, "{hz} Hz speed");
+            assert!(transitions.iter().any(|transition| {
+                transition.old == Gait::Walk
+                    && transition.new == Gait::Trot
+                    && transition.reason == TransitionReason::AutoUpshift
+            }));
+            assert!(transitions.iter().any(|transition| {
+                transition.old == Gait::Trot
+                    && transition.new == Gait::Gallop
+                    && transition.reason == TransitionReason::AutoUpshift
+            }));
+        }
+    }
+
+    #[test]
+    fn brake_stops_before_reverse_delay_engages() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            for _ in 0..hz {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+                if horse.state().position.z > 0.0 {
+                    break;
+                }
+            }
+            let delay_frames = (0.3 * f64::from(hz)) as usize;
+            let mut stopped = kernel();
+            for _ in 0..delay_frames {
+                step(
+                    &mut stopped,
+                    InputFrame {
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert_eq!(stopped.state().horizontal_speed(), 0.0, "{hz} Hz delay");
+            for _ in 0..((0.2 * f64::from(hz)) as usize + 1) {
+                step(
+                    &mut stopped,
+                    InputFrame {
+                        brake: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert!(stopped.state().velocity.z > 0.0, "{hz} Hz reverse");
         }
     }
 
@@ -1270,7 +1398,9 @@ mod tests {
                 step(
                     &mut walk,
                     InputFrame {
-                        throttle: 1.0,
+                        // Analog partial throttle deliberately stays in Walk while full W input
+                        // naturally progresses through the faster gaits.
+                        throttle: 0.7,
                         steer: 1.0,
                         ..InputFrame::default()
                     },
@@ -1278,6 +1408,7 @@ mod tests {
                     hz,
                 );
             }
+            assert_eq!(walk.state().gait, Gait::Walk);
             assert!(walk.telemetry().turn_radius_m < 3.0);
 
             let ground_rate = walk.state().yaw_rate_radians.abs();
@@ -1285,7 +1416,7 @@ mod tests {
                 step(
                     &mut walk,
                     InputFrame {
-                        throttle: 1.0,
+                        throttle: 0.7,
                         steer: 1.0,
                         ..InputFrame::default()
                     },

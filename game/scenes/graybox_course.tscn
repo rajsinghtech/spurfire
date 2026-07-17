@@ -1,10 +1,11 @@
-[gd_scene load_steps=15 format=3]
+[gd_scene load_steps=20 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
 [ext_resource type="Script" path="res://scripts/hud.gd" id="3_hud"]
 [ext_resource type="Script" path="res://scripts/speed_graph.gd" id="4_graph"]
 [ext_resource type="Script" path="res://scripts/kill_zone.gd" id="5_kill"]
+[ext_resource type="Script" path="res://scripts/horse_visual.gd" id="6_visual"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -38,6 +39,35 @@ roughness = 0.75
 [sub_resource type="BoxMesh" id="BoxMesh_saddle"]
 material = SubResource("Material_saddle")
 size = Vector3(0.9, 0.25, 1.0)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_neck"]
+material = SubResource("Material_horse")
+top_radius = 0.22
+bottom_radius = 0.34
+height = 1.25
+radial_segments = 12
+
+[sub_resource type="BoxMesh" id="BoxMesh_head"]
+material = SubResource("Material_horse")
+size = Vector3(0.62, 0.58, 0.95)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_leg"]
+material = SubResource("Material_horse")
+top_radius = 0.15
+bottom_radius = 0.1
+height = 1.15
+radial_segments = 10
+
+[sub_resource type="BoxMesh" id="BoxMesh_ear"]
+material = SubResource("Material_horse")
+size = Vector3(0.14, 0.42, 0.12)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_tail"]
+material = SubResource("Material_horse")
+top_radius = 0.11
+bottom_radius = 0.035
+height = 1.05
+radial_segments = 8
 
 [sub_resource type="SphereShape3D" id="SphereShape_camera"]
 radius = 0.35
@@ -85,6 +115,49 @@ mesh = SubResource("CapsuleMesh_horse")
 [node name="SaddleProxy" type="MeshInstance3D" parent="Horse"]
 position = Vector3(0, 1.72, 0.15)
 mesh = SubResource("BoxMesh_saddle")
+
+[node name="NeckProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.82, -0.92)
+rotation_degrees = Vector3(-36, 0, 0)
+mesh = SubResource("CylinderMesh_neck")
+
+[node name="HeadProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 2.35, -1.48)
+mesh = SubResource("BoxMesh_head")
+
+[node name="LeftEar" type="MeshInstance3D" parent="Horse"]
+position = Vector3(-0.19, 2.82, -1.58)
+rotation_degrees = Vector3(-8, 0, -8)
+mesh = SubResource("BoxMesh_ear")
+
+[node name="RightEar" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0.19, 2.82, -1.58)
+rotation_degrees = Vector3(-8, 0, 8)
+mesh = SubResource("BoxMesh_ear")
+
+[node name="FrontLeftLeg" type="MeshInstance3D" parent="Horse"]
+position = Vector3(-0.43, 0.56, -0.76)
+mesh = SubResource("CylinderMesh_leg")
+
+[node name="FrontRightLeg" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0.43, 0.56, -0.76)
+mesh = SubResource("CylinderMesh_leg")
+
+[node name="RearLeftLeg" type="MeshInstance3D" parent="Horse"]
+position = Vector3(-0.43, 0.56, 0.76)
+mesh = SubResource("CylinderMesh_leg")
+
+[node name="RearRightLeg" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0.43, 0.56, 0.76)
+mesh = SubResource("CylinderMesh_leg")
+
+[node name="TailProxy" type="MeshInstance3D" parent="Horse"]
+position = Vector3(0, 1.25, 1.45)
+rotation_degrees = Vector3(58, 0, 0)
+mesh = SubResource("CylinderMesh_tail")
+
+[node name="VisualAnimator" type="Node" parent="Horse"]
+script = ExtResource("6_visual")
 
 [node name="ForwardMarker" type="MeshInstance3D" parent="Horse"]
 position = Vector3(0, 1.35, -1.35)
@@ -164,4 +237,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "W forward (auto-walk) / S brake & reverse  •  A/D steer  •  Shift/Ctrl gait\nAlt hard brake  •  Space jump  •  R reset  •  Esc release mouse / Esc again quit"
+text = "Hold W: walk → trot → gallop  •  S: brake, pause, reverse  •  A/D steer\nShift/Ctrl quick gait  •  Space jump  •  R reset  •  Esc release / Esc again quit"

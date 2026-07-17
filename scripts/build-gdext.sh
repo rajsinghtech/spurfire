@@ -85,5 +85,11 @@ if [[ ! -f "$source_path" ]]; then
 fi
 
 mkdir -p "$destination_dir"
-cp -f "$source_path" "$destination_dir/$destination_library"
-printf 'Installed %s\n' "$destination_dir/$destination_library"
+destination_path="$destination_dir/$destination_library"
+cp -f "$source_path" "$destination_path"
+if [[ "$platform" == "macos" ]]; then
+  # Renaming an ad-hoc signed Mach-O can leave a signature that verifies on disk but is killed by
+  # library validation at dlopen time. Re-sign the final path Godot will load.
+  codesign --force --sign - "$destination_path"
+fi
+printf 'Installed %s\n' "$destination_path"
