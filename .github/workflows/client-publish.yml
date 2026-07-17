@@ -1,0 +1,176 @@
+name: Publish Existing Client Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+      run_id:
+        description: Client Release run containing the platform artifacts
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: client-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified client artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate source run, jobs, artifacts, and tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          expected_repository='rajsinghtech/spurfire'
+          expected_workflow='.github/workflows/client-release.yml'
+          test "$GITHUB_REPOSITORY" = "$expected_repository"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          notes="docs/release-notes-${RELEASE_TAG#v}.md"
+          git cat-file -e "$RELEASE_TAG:$notes"
+          git show "$RELEASE_TAG:$notes" > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+          workflow_id="$(
+            gh api "/repos/$expected_repository/actions/workflows/client-release.yml" \
+              --jq .id
+          )"
+          [[ "$workflow_id" =~ ^[0-9]+$ ]]
+
+          run_json="$(
+            gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID"
+          )"
+          jq -e \
+            --arg repository "$expected_repository" \
+            --arg workflow "$expected_workflow" \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$tag_sha" \
+            --argjson workflow_id "$workflow_id" \
+            '(.name == "Client Release") and
+             (.path == $workflow) and
+             (.workflow_id == $workflow_id) and
+             (.event == "push") and
+             (.status == "completed") and
+             (.head_branch == $tag) and
+             (.head_sha == $sha) and
+             (.repository.full_name == $repository) and
+             (.head_repository.full_name == $repository)' \
+            <<< "$run_json" > /dev/null
+
+          jobs_json="$(
+            gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100"
+          )"
+          jq -e '
+            ([.jobs[] | {name, status, conclusion}] | sort_by(.name)) ==
+            ([
+              {name: "Validate client release", status: "completed", conclusion: "success"},
+              {name: "Linux x86_64 client", status: "completed", conclusion: "success"},
+              {name: "Windows x86_64 client", status: "completed", conclusion: "success"},
+              {name: "macOS universal client", status: "completed", conclusion: "success"},
+              {name: "Publish GitHub Release", status: "completed", conclusion: "failure"}
+            ] | sort_by(.name))' <<< "$jobs_json" > /dev/null
+
+          artifacts_json="$(
+            gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"
+          )"
+          jq -e '
+            (.total_count == 3) and
+            (([.artifacts[].name] | sort) ==
+             (["client-linux", "client-macos", "client-windows"] | sort)) and
+            all(.artifacts[]; (.expired == false) and (.size_in_bytes > 0))' \
+            <<< "$artifacts_json" > /dev/null
+
+          if gh release view "$RELEASE_TAG" \
+            --repo "$expected_repository" > /dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: client-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify and publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          cd release
+          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected=(
+            Spurfire-linux-x86_64.tar.gz
+            Spurfire-macos-universal.zip
+            Spurfire-windows-x86_64.zip
+          )
+          test "${files[*]}" = "${expected[*]}"
+          for file in "${expected[@]}"; do
+            test -s "$file"
+          done
+          sha256sum "${expected[@]}" > SHA256SUMS
+          cd ..
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "Spurfire ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            release/Spurfire-linux-x86_64.tar.gz \
+            release/Spurfire-macos-universal.zip \
+            release/Spurfire-windows-x86_64.zip \
+            release/SHA256SUMS
+
+          release_json="$(
+            gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          )"
+          jq -e --arg tag "$RELEASE_TAG" '
+            (.tag_name == $tag) and
+            (.draft == true) and
+            (.prerelease == false) and
+            (([.assets[].name] | sort) ==
+             ([
+               "SHA256SUMS",
+               "Spurfire-linux-x86_64.tar.gz",
+               "Spurfire-macos-universal.zip",
+               "Spurfire-windows-x86_64.zip"
+             ] | sort)) and
+            all(.assets[]; .size > 0)' <<< "$release_json" > /dev/null
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+
+          gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" |
+            jq -e --arg tag "$RELEASE_TAG" '
+              (.tag_name == $tag) and
+              (.draft == false) and
+              (.prerelease == false)' > /dev/null
