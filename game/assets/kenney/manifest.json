@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "retrieved_utc": "2026-07-17",
+  "provenance_policy": "Official Kenney pages and official kenney.nl archive downloads only.",
+  "horse_model": {
+    "included": false,
+    "reason": "No verified official Kenney download in the supplied research contains a 3D horse model; Animal Pack Redux contains only 2D horse icons."
+  },
+  "packs": [
+    {
+      "id": "nature-kit",
+      "name": "Nature Kit",
+      "version": "2.1",
+      "official_page_url": "https://kenney.nl/assets/nature-kit",
+      "official_download_url": "https://kenney.nl/media/pages/assets/nature-kit/37ac38a37b-1677698939/kenney_nature-kit.zip",
+      "archive_filename": "kenney_nature-kit.zip",
+      "archive_size_bytes": 10537521,
+      "archive_sha256": "fa7974a0d342bfe63c38664ba9f8ec1a4aab8ea25f099bdc56870e33588c4d9d",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "included_file": "game/assets/kenney/nature-kit/License.txt"
+      },
+      "files": [
+        {
+          "source_path": "License.txt",
+          "repository_path": "game/assets/kenney/nature-kit/License.txt",
+          "size_bytes": 611,
+          "sha256": "cb96b75e3560ac78d7a53ce6f083f4cdb5c53faea6141b62d63458dcfe1e4b9d"
+        },
+        {
+          "source_path": "Models/GLTF format/cactus_short.glb",
+          "repository_path": "game/assets/kenney/nature-kit/cactus_short.glb",
+          "size_bytes": 8844,
+          "sha256": "81ac9fc4c66eacceaf4aebcb6df3468ea450a2f5081151bb11400282efbc51bd"
+        },
+        {
+          "source_path": "Models/GLTF format/cactus_tall.glb",
+          "repository_path": "game/assets/kenney/nature-kit/cactus_tall.glb",
+          "size_bytes": 9668,
+          "sha256": "d43a1aca5952e1f8a104d64a0edfec09c39f15102ca6bdc531460dd5a2c53d25"
+        },
+        {
+          "source_path": "Models/GLTF format/fence_gate.glb",
+          "repository_path": "game/assets/kenney/nature-kit/fence_gate.glb",
+          "size_bytes": 27652,
+          "sha256": "34d10d5620179b8a211a01eea837caa828c0782422f0b408e1a5838788888436"
+        },
+        {
+          "source_path": "Models/GLTF format/fence_simple.glb",
+          "repository_path": "game/assets/kenney/nature-kit/fence_simple.glb",
+          "size_bytes": 5712,
+          "sha256": "ecaf6c29532aa9fd305a8ef71df769d60748bd797f2eb1c63bdefc4edb8062a7"
+        },
+        {
+          "source_path": "Models/GLTF format/rock_largeA.glb",
+          "repository_path": "game/assets/kenney/nature-kit/rock_largeA.glb",
+          "size_bytes": 7552,
+          "sha256": "6dd15390fd96501dcd1454765a17ba61dbbd8d47705dfe5149c8dd92b353ce25"
+        },
+        {
+          "source_path": "Models/GLTF format/rock_smallA.glb",
+          "repository_path": "game/assets/kenney/nature-kit/rock_smallA.glb",
+          "size_bytes": 3044,
+          "sha256": "df9fff9d711e61370e8df0caa2514c89b8f8a8dc6c6fafaf4eb2ec79c5ae07c1"
+        },
+        {
+          "source_path": "Models/GLTF format/sign.glb",
+          "repository_path": "game/assets/kenney/nature-kit/sign.glb",
+          "size_bytes": 5040,
+          "sha256": "c658c21672ecd63c5d3e53f06f875d68e6509edb1ab7e3b75374df7c61e7dd0c"
+        },
+        {
+          "source_path": "Models/GLTF format/tree_default.glb",
+          "repository_path": "game/assets/kenney/nature-kit/tree_default.glb",
+          "size_bytes": 9428,
+          "sha256": "562d29638c902de3c7bee465d3a53bb77117efbc392ae04ed894faf6b5dc691d"
+        },
+        {
+          "source_path": "Models/GLTF format/tree_oak.glb",
+          "repository_path": "game/assets/kenney/nature-kit/tree_oak.glb",
+          "size_bytes": 14644,
+          "sha256": "d7fd8773674928c50c11b66d12c636d49bdcc15a8b1c7fbb98e6f63a3439a3f3"
+        }
+      ]
+    },
+    {
+      "id": "survival-kit",
+      "name": "Survival Kit",
+      "version": "2.0",
+      "official_page_url": "https://kenney.nl/assets/survival-kit",
+      "official_download_url": "https://kenney.nl/media/pages/assets/survival-kit/4065a8185b-1712149243/kenney_survival-kit.zip",
+      "archive_filename": "kenney_survival-kit.zip",
+      "archive_size_bytes": 1948174,
+      "archive_sha256": "c3586341b5932c87eb43d75d915434f47daed168b17ed36a03e8ca9977c7443e",
+      "license": {
+        "spdx": "CC0-1.0",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "included_file": "game/assets/kenney/survival-kit/License.txt"
+      },
+      "files": [
+        {
+          "source_path": "License.txt",
+          "repository_path": "game/assets/kenney/survival-kit/License.txt",
+          "size_bytes": 715,
+          "sha256": "62c8356876481204fa4d40dc59183dfed777adf987d7f2a1390fffe8a699f3ff"
+        },
+        {
+          "source_path": "Models/GLB format/Textures/colormap.png",
+          "repository_path": "game/assets/kenney/survival-kit/Textures/colormap.png",
+          "size_bytes": 7440,
+          "sha256": "6ca023be9f12e8c2358fcf94320c8a894b4c05a3dd0bad1f5c268312053caca1"
+        },
+        {
+          "source_path": "Models/GLB format/barrel-open.glb",
+          "repository_path": "game/assets/kenney/survival-kit/barrel-open.glb",
+          "size_bytes": 31772,
+          "sha256": "f24ab1c5ab3685fc758f7e7298bf4f255f039fc6dfc7463711fbe90c4c011a41"
+        },
+        {
+          "source_path": "Models/GLB format/barrel.glb",
+          "repository_path": "game/assets/kenney/survival-kit/barrel.glb",
+          "size_bytes": 34256,
+          "sha256": "3a0d12f6bdd1badd361f64ce0fbbf878a4ccfc2de8ff1ac4ed4c1aea2a9ee04a"
+        },
+        {
+          "source_path": "Models/GLB format/signpost.glb",
+          "repository_path": "game/assets/kenney/survival-kit/signpost.glb",
+          "size_bytes": 5924,
+          "sha256": "6d33757888c4ec9249610266ca8d60532b1138ae28fd37e93fa843ec4856fd25"
+        }
+      ]
+    }
+  ]
+}

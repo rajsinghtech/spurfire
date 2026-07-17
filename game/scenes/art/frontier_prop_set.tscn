@@ -1,0 +1,57 @@
+[gd_scene load_steps=13 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/cactus_short.glb" id="1_cactus_short"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/cactus_tall.glb" id="2_cactus_tall"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/rock_largeA.glb" id="3_rock_large"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/rock_smallA.glb" id="4_rock_small"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/tree_default.glb" id="5_tree_default"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/tree_oak.glb" id="6_tree_oak"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/fence_simple.glb" id="7_fence_simple"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/fence_gate.glb" id="8_fence_gate"]
+[ext_resource type="PackedScene" path="res://assets/kenney/nature-kit/sign.glb" id="9_sign"]
+[ext_resource type="PackedScene" path="res://assets/kenney/survival-kit/barrel.glb" id="10_barrel"]
+[ext_resource type="PackedScene" path="res://assets/kenney/survival-kit/barrel-open.glb" id="11_barrel_open"]
+[ext_resource type="PackedScene" path="res://assets/kenney/survival-kit/signpost.glb" id="12_signpost"]
+
+[node name="FrontierPropSet" type="Node3D"]
+
+[node name="Vegetation" type="Node3D" parent="."]
+
+[node name="CactusShort" parent="Vegetation" instance=ExtResource("1_cactus_short")]
+
+[node name="CactusTall" parent="Vegetation" instance=ExtResource("2_cactus_tall")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5, 0, 0)
+
+[node name="TreeDefault" parent="Vegetation" instance=ExtResource("5_tree_default")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.5, 0, 0)
+
+[node name="TreeOak" parent="Vegetation" instance=ExtResource("6_tree_oak")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9, 0, 0)
+
+[node name="StoneAndWood" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4)
+
+[node name="RockLarge" parent="StoneAndWood" instance=ExtResource("3_rock_large")]
+
+[node name="RockSmall" parent="StoneAndWood" instance=ExtResource("4_rock_small")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, 0)
+
+[node name="FenceSimple" parent="StoneAndWood" instance=ExtResource("7_fence_simple")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.5, 0, 0)
+
+[node name="FenceGate" parent="StoneAndWood" instance=ExtResource("8_fence_gate")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.5, 0, 0)
+
+[node name="Camp" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 8)
+
+[node name="NatureSign" parent="Camp" instance=ExtResource("9_sign")]
+
+[node name="Barrel" parent="Camp" instance=ExtResource("10_barrel")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5, 0, 0)
+
+[node name="BarrelOpen" parent="Camp" instance=ExtResource("11_barrel_open")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0)
+
+[node name="Signpost" parent="Camp" instance=ExtResource("12_signpost")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6.5, 0, 0)
