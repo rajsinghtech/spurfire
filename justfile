@@ -61,7 +61,7 @@ e2e:
 p2p-live:
     scripts/live-rustscale-p2p.sh
 
-# Open two real Godot clients on a disposable RustScale child tailnet
+# Open three real Godot clients with route/RTT telemetry on a disposable child tailnet
 p2p-demo:
     scripts/run-p2p-demo.sh
 

@@ -2,7 +2,10 @@
 
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
-use spurfire_net::replication::{reconcile, RiderState, SnapshotBuffer};
+use spurfire_net::replication::{
+    reconcile, RiderState, SnapshotBuffer, DEFAULT_INTERPOLATION_TICKS,
+    DEFAULT_MAX_EXTRAPOLATION_TICKS,
+};
 
 #[derive(GodotClass)]
 #[class(base = Node3D)]
@@ -47,9 +50,18 @@ impl NetworkRider {
             return false;
         }
         self.latest_snapshot_tick = i64::try_from(tick).unwrap_or(i64::MAX);
+        let target_tick = tick.saturating_sub(DEFAULT_INTERPOLATION_TICKS) as f64;
         if !self.clock_started {
-            self.render_tick = self.buffer.delayed_render_tick().unwrap_or(tick as f64);
+            self.render_tick = target_tick;
             self.clock_started = true;
+        } else {
+            let drift = target_tick - self.render_tick;
+            // Recover immediately after a control/path stall. Without this guard,
+            // a free-running presentation clock can remain seconds ahead and make
+            // fresh snapshots appear frozen while their ticks catch up.
+            if drift.abs() > 12.0 {
+                self.render_tick = target_tick;
+            }
         }
         true
     }
@@ -152,7 +164,16 @@ impl INode3D for NetworkRider {
         if !self.clock_started || !delta.is_finite() || delta <= 0.0 {
             return;
         }
-        self.render_tick += delta * self.tick_rate as f64;
+        let Some(latest_tick) = self.buffer.latest_tick() else {
+            return;
+        };
+        let target_tick = latest_tick.saturating_sub(DEFAULT_INTERPOLATION_TICKS) as f64;
+        let drift = target_tick - self.render_tick;
+        let playback_rate = (1.0 + drift * 0.08).clamp(0.75, 1.25);
+        self.render_tick += delta * self.tick_rate as f64 * playback_rate;
+        self.render_tick = self
+            .render_tick
+            .min(latest_tick.saturating_add(DEFAULT_MAX_EXTRAPOLATION_TICKS) as f64);
         let Some(sample) = self.buffer.sample(self.render_tick) else {
             return;
         };

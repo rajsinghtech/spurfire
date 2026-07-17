@@ -26,12 +26,14 @@ chmod 700 "$TMP"
 CREDS="$TMP/child.json"
 PID_A=""
 PID_B=""
+PID_C=""
 DELETED=0
 
 cleanup() {
   local token dns cid secret code
   [[ -z "$PID_A" ]] || kill "$PID_A" 2>/dev/null || true
   [[ -z "$PID_B" ]] || kill "$PID_B" 2>/dev/null || true
+  [[ -z "$PID_C" ]] || kill "$PID_C" 2>/dev/null || true
   if [[ -f "$CREDS" && "$DELETED" -eq 0 ]]; then
     dns=$(jq -r '.dnsName // empty' "$CREDS")
     cid=$(jq -r '.clientId // empty' "$CREDS")
@@ -90,19 +92,25 @@ mint_key() {
 }
 mint_key "$TMP/key-a"
 mint_key "$TMP/key-b"
+mint_key "$TMP/key-c"
 unset CHILD_TOKEN ORG_TOKEN
 
-printf '\nLaunching two Godot peers. Focus either window and ride; the other window should show the remote horse.\n'
-printf 'Close both windows or press Ctrl-C here to delete the disposable tailnet.\n\n'
+printf '\nLaunching three Godot peers. Focus any window and ride; both other windows should show that horse.\n'
+printf 'Hold TAB for route/RTT. Close all windows or press Ctrl-C here to delete the disposable tailnet.\n\n'
 SPURFIRE_P2P_DEMO=1 SPURFIRE_P2P_DEMO_NODE=a SPURFIRE_P2P_DEMO_DIR="$TMP" \
 SPURFIRE_P2P_DEMO_KEY_FILE="$TMP/key-a" \
-  "$GODOT_BIN" --path game --resolution 900x600 --position 30,60 &
+  "$GODOT_BIN" --path game --resolution 620x430 --position 20,50 &
 PID_A=$!
 SPURFIRE_P2P_DEMO=1 SPURFIRE_P2P_DEMO_NODE=b SPURFIRE_P2P_DEMO_DIR="$TMP" \
 SPURFIRE_P2P_DEMO_KEY_FILE="$TMP/key-b" \
-  "$GODOT_BIN" --path game --resolution 900x600 --position 970,60 &
+  "$GODOT_BIN" --path game --resolution 620x430 --position 660,50 &
 PID_B=$!
+SPURFIRE_P2P_DEMO=1 SPURFIRE_P2P_DEMO_NODE=c SPURFIRE_P2P_DEMO_DIR="$TMP" \
+SPURFIRE_P2P_DEMO_KEY_FILE="$TMP/key-c" \
+  "$GODOT_BIN" --path game --resolution 620x430 --position 340,510 &
+PID_C=$!
 
-wait "$PID_A" "$PID_B"
+wait "$PID_A" "$PID_B" "$PID_C"
 PID_A=""
 PID_B=""
+PID_C=""

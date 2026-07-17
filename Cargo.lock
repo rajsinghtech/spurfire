@@ -2836,7 +2836,6 @@ dependencies = [
 [[package]]
 name = "rustscale-netstack"
 version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
 dependencies = [
  "bytes",
  "rustscale-key",

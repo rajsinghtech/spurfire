@@ -67,7 +67,7 @@ Verify:
 6. The lower-left network panel says `NET OFFLINE` when no lobby join credential has been supplied. This is expected for local play.
 7. Escape releases the mouse; press Escape again to quit.
 
-## 5. Visible two-client P2P demo
+## 5. Visible three-client P2P demo
 
 Create the gitignored `.env` if needed:
 
@@ -83,19 +83,21 @@ Run:
 just p2p-demo
 ```
 
-This builds once, creates a disposable child tailnet, and opens two Godot windows named **Rider A** and **Rider B**. Wait until both HUDs say `NET CONNECTED`. Focus either window and ride with W/A/S/D; its remote horse is replicated into the other window through real RustScale application UDP. Close both windows—or press Ctrl-C in the launching terminal—to delete the child tailnet.
+This builds once, creates a disposable child tailnet, and opens three Godot windows named **Rider A**, **Rider B**, and **Rider C**. Wait until every HUD says `NET CONNECTED`. Focus any window and ride with W/A/S/D; its horse is replicated into both other windows through real RustScale application UDP. Hold **Tab** to show every rider's `DIRECT`, `DERP`, or `PEER RELAY` path, application RTT, live/stale state, and authority badge. Close all three windows—or press Ctrl-C in the launching terminal—to delete the child tailnet.
 
 Expected terminal markers:
 
 ```text
-SPURFIRE_GODOT_P2P_READY local=a ...
-SPURFIRE_GODOT_P2P_READY local=b ...
+SPURFIRE_GODOT_P2P_READY local=a peers=2
+SPURFIRE_GODOT_P2P_READY local=b peers=2
+SPURFIRE_GODOT_P2P_READY local=c peers=2
+SPURFIRE_GODOT_P2P_ROUTE local=a peer=b route=DIRECT
+SPURFIRE_GODOT_P2P_RTT local=a peer=b rtt_ms=<measured>
 SPURFIRE_GODOT_P2P_SNAPSHOT local=a ...
-SPURFIRE_GODOT_P2P_SNAPSHOT local=b ...
 cleanup: deleted P2P demo tailnet ...
 ```
 
-`just game-run` is intentionally a single local client and therefore displays `NET OFFLINE`; it is not the two-player launcher.
+`just game-run` is intentionally a single local client and therefore displays `NET OFFLINE`; it is not the three-player launcher.
 
 ## 6. Automated UDP and authority-loss test
 

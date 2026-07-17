@@ -70,7 +70,7 @@ Useful commands:
 - `just game-build [debug|release]` — build and install the platform-native GDExtension.
 - `just game-test` — headless import and M0 smoke tests with a bounded timeout.
 - `just game-editor` / `just game-run` — edit or run one local Godot client.
-- `just p2p-demo` — provision a disposable tailnet and open two visibly replicated Godot clients.
+- `just p2p-demo` — provision a disposable tailnet and open three replicated Godot clients with a Tab route/RTT roster.
 - `just p2p-live` — headless real-UDP and forced-authority-migration probe.
 - `just --list` — all recipes.
 
@@ -87,4 +87,4 @@ Useful commands:
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat and a native `PeerSession`. A disposable live probe has verified two embedded RustScale peers exchanging bounded Spurfire gameplay UDP directly and then deleting the child tailnet. Restart recovery, cross-platform packaging, full gameplay replication/interpolation, migration under real process loss, and RustScale's platform/telemetry gaps remain production blockers.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat and a native `PeerSession`. Disposable live probes have verified three Godot peers exchanging sustained gameplay UDP with per-peer direct/DERP/peer-relay classification and application RTT, then deleting the child tailnet. Restart recovery, cross-platform packaging, full gameplay replication/interpolation, migration under real process loss, and RustScale's platform/telemetry gaps remain production blockers.

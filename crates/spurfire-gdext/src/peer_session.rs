@@ -1,7 +1,7 @@
 //! Godot-facing background RustScale application-UDP node.
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
 };
@@ -20,12 +20,16 @@ enum WorkerCommand {
         packet: Vec<u8>,
         destination: SocketAddr,
     },
+    QueryRoute {
+        peer_ip: IpAddr,
+    },
     Stop,
 }
 
 enum WorkerEvent {
     Connected { ip: String, port: u16 },
     Packet { packet: Vec<u8>, source: SocketAddr },
+    Route { peer_ip: String, route: String },
     Failed(String),
     Stopped,
 }
@@ -80,25 +84,37 @@ fn run_worker(
             ip: peer.tailnet_ip().to_string(),
             port: peer.local_addr().port(),
         });
-        loop {
-            match commands.try_recv() {
-                Ok(WorkerCommand::Send {
-                    packet,
-                    destination,
-                }) => match decode(&packet) {
-                    Ok(envelope) => {
-                        if let Err(error) = peer.send(&envelope, destination).await {
+        'network: loop {
+            // Drain every queued gameplay frame before waiting for receive. The
+            // old one-command-per-25ms loop could create avoidable input latency
+            // whenever physics frames arrived in a burst.
+            loop {
+                match commands.try_recv() {
+                    Ok(WorkerCommand::Send {
+                        packet,
+                        destination,
+                    }) => match decode(&packet) {
+                        Ok(envelope) => {
+                            if let Err(error) = peer.send(&envelope, destination).await {
+                                let _ = events.send(WorkerEvent::Failed(error.to_string()));
+                            }
+                        }
+                        Err(error) => {
                             let _ = events.send(WorkerEvent::Failed(error.to_string()));
                         }
+                    },
+                    Ok(WorkerCommand::QueryRoute { peer_ip }) => {
+                        let route = peer.route_to(peer_ip).unwrap_or_else(|| "Unknown".into());
+                        let _ = events.send(WorkerEvent::Route {
+                            peer_ip: peer_ip.to_string(),
+                            route,
+                        });
                     }
-                    Err(error) => {
-                        let _ = events.send(WorkerEvent::Failed(error.to_string()));
-                    }
-                },
-                Ok(WorkerCommand::Stop) | Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => {}
+                    Ok(WorkerCommand::Stop) | Err(TryRecvError::Disconnected) => break 'network,
+                    Err(TryRecvError::Empty) => break,
+                }
             }
-            match peer.recv(Duration::from_millis(25)).await {
+            match peer.recv(Duration::from_millis(5)).await {
                 Ok((envelope, source)) => match encode(&envelope) {
                     Ok(packet) => {
                         let _ = events.send(WorkerEvent::Packet { packet, source });
@@ -149,6 +165,8 @@ impl PeerSession {
     #[signal]
     fn packet_received(packet: PackedByteArray, source_ip: GString, source_port: i64);
     #[signal]
+    fn route_updated(peer_ip: GString, route: GString);
+    #[signal]
     fn connection_failed(message: GString);
     #[signal]
     fn disconnected();
@@ -184,6 +202,15 @@ impl PeerSession {
     #[func]
     fn make_heartbeat(&mut self, tick: i64) -> PackedByteArray {
         self.make_packet(tick, PeerPayload::Heartbeat)
+    }
+
+    /// Build an application-channel RTT probe or response.
+    #[func]
+    fn make_probe(&mut self, tick: i64, nonce: i64, reply: bool) -> PackedByteArray {
+        let Ok(nonce) = u64::try_from(nonce) else {
+            return PackedByteArray::new();
+        };
+        self.make_packet(tick, PeerPayload::Probe { nonce, reply })
     }
 
     /// Build bounded fixed-tick rider input; milli inputs must be in [-1000, 1000].
@@ -284,6 +311,11 @@ impl PeerSession {
         );
         match envelope.payload {
             PeerPayload::Heartbeat => result.set("type", "heartbeat"),
+            PeerPayload::Probe { nonce, reply } => {
+                result.set("type", "probe");
+                result.set("nonce", i64::try_from(nonce).unwrap_or(i64::MAX));
+                result.set("reply", reply);
+            }
             PeerPayload::Hello { hostname } => {
                 result.set("type", "hello");
                 result.set("hostname", hostname);
@@ -407,6 +439,17 @@ impl PeerSession {
             .is_ok()
     }
 
+    /// Request RustScale's current path classification for one peer IP.
+    #[func]
+    fn query_route(&mut self, peer_ip: GString) -> bool {
+        let Ok(peer_ip) = peer_ip.to_string().parse::<IpAddr>() else {
+            return false;
+        };
+        self.command_tx
+            .as_ref()
+            .is_some_and(|sender| sender.send(WorkerCommand::QueryRoute { peer_ip }).is_ok())
+    }
+
     #[func]
     fn shutdown(&mut self) {
         if let Some(sender) = self.command_tx.take() {
@@ -447,6 +490,13 @@ impl PeerSession {
                         &signal_ip,
                         i64::from(source.port()),
                     );
+                }
+                Ok(WorkerEvent::Route { peer_ip, route }) => {
+                    let signal_ip = GString::from(&peer_ip);
+                    let signal_route = GString::from(&route);
+                    self.signals()
+                        .route_updated()
+                        .emit(&signal_ip, &signal_route);
                 }
                 Ok(WorkerEvent::Failed(message)) => {
                     self.connection_state = "error".into();

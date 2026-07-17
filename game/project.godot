@@ -101,6 +101,10 @@ camera_down={
 "deadzone": 0.15,
 "events": [Object(InputEventJoypadMotion,"axis":3,"axis_value":1.0)]
 }
+scoreboard={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194306)]
+}
 release_mouse={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":4194305)]

@@ -2,8 +2,8 @@
 
 use std::collections::VecDeque;
 
-pub const DEFAULT_INTERPOLATION_TICKS: u64 = 6;
-pub const DEFAULT_MAX_EXTRAPOLATION_TICKS: u64 = 6;
+pub const DEFAULT_INTERPOLATION_TICKS: u64 = 2;
+pub const DEFAULT_MAX_EXTRAPOLATION_TICKS: u64 = 15;
 pub const DEFAULT_SNAP_DISTANCE_M: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -177,12 +177,12 @@ mod tests {
     }
 
     #[test]
-    fn extrapolation_is_bounded_to_one_tenth_second() {
+    fn extrapolation_is_bounded_to_a_quarter_second() {
         let mut buffer = SnapshotBuffer::new(60, 8);
         assert!(buffer.push(state(20, 5.0, 12.0, 0.0)));
         let sample = buffer.sample(120.0).unwrap();
-        assert!((sample.state.position_m[0] - 6.2).abs() < 0.001);
-        assert_eq!(sample.state.tick, 26);
+        assert!((sample.state.position_m[0] - 8.0).abs() < 0.001);
+        assert_eq!(sample.state.tick, 35);
         assert!(sample.extrapolated);
     }
 

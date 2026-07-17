@@ -274,10 +274,11 @@ peer_session = NodePath("../PeerSession")
 local_horse = NodePath("../Horse")
 remote_rider = NodePath("../RemoteRider")
 
-[node name="NetworkLayer" type="CanvasLayer" parent="." node_paths=PackedStringArray("peer_session")]
+[node name="NetworkLayer" type="CanvasLayer" parent="." node_paths=PackedStringArray("peer_session", "replication")]
 layer = 4
 script = ExtResource("16_network_status")
 peer_session = NodePath("../PeerSession")
+replication = NodePath("../NetworkReplication")
 
 [node name="Panel" type="PanelContainer" parent="NetworkLayer"]
 offset_left = 20.0
@@ -296,7 +297,41 @@ theme_override_constants/margin_bottom = 7
 layout_mode = 2
 theme_override_colors/font_color = Color(0.38, 0.9, 1, 1)
 theme_override_font_sizes/font_size = 15
-text = "NET  OFFLINE"
+text = "NET  OFFLINE  [TAB]"
+
+[node name="RosterPanel" type="PanelContainer" parent="NetworkLayer"]
+offset_left = 170.0
+offset_top = 90.0
+offset_right = 730.0
+offset_bottom = 290.0
+
+[node name="Margin" type="MarginContainer" parent="NetworkLayer/RosterPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 20
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 20
+theme_override_constants/margin_bottom = 16
+
+[node name="VBox" type="VBoxContainer" parent="NetworkLayer/RosterPanel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="NetworkLayer/RosterPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.68, 0.2, 1)
+theme_override_font_sizes/font_size = 22
+text = "RIDERS // LIVE ROUTES"
+
+[node name="Rows" type="Label" parent="NetworkLayer/RosterPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.95, 1, 1)
+theme_override_font_sizes/font_size = 17
+text = "Waiting for peers…"
+
+[node name="Hint" type="Label" parent="NetworkLayer/RosterPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.58, 0.65, 0.7, 1)
+text = "Hold TAB to inspect route and application RTT"
 
 [node name="CombatLayer" type="CanvasLayer" parent="."]
 layer = 3
@@ -351,4 +386,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "W/S ride  •  A/D steer/sidestep  •  Mouse1 fire  •  Mouse2 aim  •  R reload\n4/5/6 rifles  •  T horse reset  •  1/2/3 horse archetype  •  H horse stats"
+text = "W/S ride  •  A/D steer/sidestep  •  Mouse1 fire  •  Mouse2 aim  •  R reload\n4/5/6 rifles  •  T reset  •  1/2/3 horse  •  H stats  •  Hold TAB peer routes"

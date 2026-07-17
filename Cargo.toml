@@ -23,3 +23,7 @@ zeroize = "1"
 # RustScale 8511e0b requires its receive-pipeline BoringTun fork.
 # This vendored copy is from that exact pinned revision.
 boringtun = { path = "vendor/boringtun" }
+
+[patch."https://github.com/rajsinghtech/rustscale"]
+# Pinned 8511e0b netstack plus the application-UDP send wakeup fix.
+rustscale-netstack = { path = "vendor/rustscale-netstack" }

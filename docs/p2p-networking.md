@@ -1,6 +1,6 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The integration is pinned to RustScale revision `8511e0b78074bf07b59d53cf1a2eb349cd0d2407`; do not update it without rerunning the live lifecycle probe.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The integration is pinned to RustScale revision `8511e0b78074bf07b59d53cf1a2eb349cd0d2407` plus the focused vendored netstack wakeup patch documented in `vendor/rustscale-netstack/PROVENANCE.md`; do not update either without rerunning the live lifecycle probe.
 
 ## Components
 
@@ -8,11 +8,13 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 - Envelopes carry heartbeats, rider input/snapshots, shot commands/results, authority announcements, and migration snapshots.
 - `SessionState` rejects replayed/out-of-order sequences, wrong-lobby traffic, and stale authority epochs. Silent authority loss elects the lowest connected `PlayerId` and advances the epoch.
 - `spurfire_net::rustscale::RustScalePeer` enrolls an ephemeral node with a one-use auth key, clears the key after `up()`, binds `Server::listen_packet`, and sends/receives through `UdpListener`.
-- `SnapshotBuffer` interpolates delayed authoritative states, follows the shortest yaw arc, caps extrapolation at six ticks (100 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
+- `SnapshotBuffer` interpolates authoritative states two ticks behind, follows the shortest yaw arc, caps velocity extrapolation at fifteen ticks (250 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
 - Godot's native `PeerSession` node owns RustScale on a background Tokio runtime and moves packets to the main thread through signals. OAuth credentials remain control-plane-only; this class accepts only a narrow join auth key.
 - Godot's `NetworkRider` presents buffered remote snapshots and exposes reconciliation results. `multiplayer_replication.gd` sends authority snapshots or rider inputs from the fixed physics loop and feeds accepted snapshots into the remote rider.
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
+
+RustScale revision `8511e0b` did not wake its smoltcp poll loop after `UdpListener::send_to` enqueued application data, allowing packets to batch behind a one-second idle fallback. Spurfire's pinned patch wakes after enqueue and includes a sub-500-ms idle-send regression test. This is tracked upstream as [rustscale#75](https://github.com/rajsinghtech/rustscale/issues/75). A managed 1,600-snapshot-per-peer soak measured steady maximum packet gaps around 41–54 ms; control-map reconnects caused brief 125–287 ms gaps but no rejection, disconnect, accumulated delay, or traffic loss.
 
 ## Live proof
 

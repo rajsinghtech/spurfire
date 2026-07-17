@@ -2,7 +2,7 @@ extends Node
 
 const REQUIRED_ACTIONS := [
 	&"move_forward", &"move_back", &"steer_left", &"steer_right",
-	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse"
+	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse", &"scoreboard"
 ]
 const REQUIRED_NODES := [
 	"Horse", "Horse/CollisionShape3D", "CameraRig/PitchPivot/SpringArm3D/Camera3D",
@@ -13,7 +13,7 @@ const REQUIRED_NODES := [
 	"Sun", "KillResetZone", "HorseSpawn", "Horse/HeadProxy", "Horse/FrontLeftLeg",
 	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
 	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "RemoteRider", "NetworkReplication",
-	"NetworkLayer/Panel/Margin/Label"
+	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows"
 ]
 
 func _ready() -> void:
@@ -21,6 +21,10 @@ func _ready() -> void:
 	for action in REQUIRED_ACTIONS:
 		if not InputMap.has_action(action):
 			failures.append("missing InputMap action: %s" % action)
+	var tab_event := InputEventKey.new()
+	tab_event.physical_keycode = KEY_TAB
+	if not InputMap.event_is_action(tab_event, &"scoreboard"):
+		failures.append("physical Tab is not mapped to the scoreboard action")
 	if not ClassDB.class_exists(&"NetworkRider"):
 		failures.append("native class NetworkRider is unavailable")
 	else:
@@ -46,11 +50,11 @@ func _ready() -> void:
 		if peer_session == null:
 			failures.append("PeerSession could not be instantiated")
 		else:
-			for method in ["configure_session", "make_heartbeat", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "connect_rustscale", "send_packet", "shutdown"]:
+			for method in ["configure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "connect_rustscale", "send_packet", "query_route", "shutdown"]:
 				if not peer_session.has_method(method):
 					failures.append("PeerSession lacks %s" % method)
-			if not peer_session.has_signal("packet_received"):
-				failures.append("PeerSession lacks packet_received signal")
+			if not peer_session.has_signal("packet_received") or not peer_session.has_signal("route_updated"):
+				failures.append("PeerSession lacks packet or route telemetry signals")
 			var configured := bool(peer_session.call(
 				"configure_session",
 				"00000000-0000-4000-8000-000000000001",
@@ -83,6 +87,13 @@ func _ready() -> void:
 			for path in REQUIRED_NODES:
 				if not course.has_node(path):
 					failures.append("missing required node: %s" % path)
+			Input.action_press(&"scoreboard")
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var roster_panel := course.get_node_or_null("NetworkLayer/RosterPanel") as Control
+			if roster_panel == null or not roster_panel.visible:
+				failures.append("TAB did not reveal the peer route/RTT roster")
+			Input.action_release(&"scoreboard")
 			var horse := course.get_node_or_null("Horse") as CharacterBody3D
 			if horse and not horse.has_method("reset_horse"):
 				failures.append("HorseController lacks reset_horse()")

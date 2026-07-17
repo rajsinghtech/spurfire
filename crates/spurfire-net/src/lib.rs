@@ -24,6 +24,10 @@ pub enum PeerPayload {
         hostname: String,
     },
     Heartbeat,
+    Probe {
+        nonce: u64,
+        reply: bool,
+    },
     RiderInput {
         throttle_milli: i16,
         steer_milli: i16,
