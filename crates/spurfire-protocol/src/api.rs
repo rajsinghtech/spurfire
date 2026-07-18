@@ -7,9 +7,10 @@ use thiserror::Error;
 
 use crate::{
     AuthorityElection, AuthorityScore, AuthoritySummary, ConnectivitySample, HorseSelection,
-    InputHash, JoinCredential, Lobby, LobbyId, LobbyState, Player, PlayerId, ProvisioningMode,
-    RouteSummary, UnixMillis, WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION,
-    DEFAULT_MAX_PLAYERS, MAX_PLAYERS, WIRE_VERSION,
+    InputHash, JoinCredential, Lobby, LobbyId, LobbyState, NodeKey, Player, PlayerId,
+    ProvisioningMode, RosterHash, RouteSummary, SessionPublicKey, SessionSignature, UnixMillis,
+    WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION, DEFAULT_MAX_PLAYERS, MAX_PLAYERS,
+    WIRE_VERSION,
 };
 
 /// Maximum Unicode scalar count accepted for a lobby or player display name.
@@ -125,6 +126,11 @@ pub struct LobbyResponse {
     pub network_generation: u64,
     /// Monotonic roster revision. Endpoint registrations are bound to it.
     pub roster_revision: u64,
+    /// Current application session generation.
+    pub session_generation: u64,
+    /// Current memory-only lobby manifest verification key. A changed key
+    /// requires clients to discard every previously pinned manifest.
+    pub manifest_public_key: SessionPublicKey,
     /// Current election input hash used by the authority heartbeat, when elected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_input_hash: Option<InputHash>,
@@ -147,6 +153,12 @@ pub struct LobbySessionPeer {
     pub tailnet_address: String,
     /// Application UDP port inside the selected lobby tailnet.
     pub application_port: u16,
+    /// Ephemeral application signing key. Required for secure real admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_public_key: Option<SessionPublicKey>,
+    /// Advisory WireGuard node-key claim, cross-checked by each peer's netmap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key: Option<NodeKey>,
     /// Service receipt time used for expiry/freshness.
     pub received_at: UnixMillis,
 }
@@ -158,6 +170,18 @@ pub struct LobbySessionProjection {
     pub network_generation: u64,
     /// Exact roster revision to which every row is bound.
     pub roster_revision: u64,
+    /// Exact application session generation.
+    pub session_generation: u64,
+    /// True only when every current roster member has a secure registration.
+    pub secure: bool,
+    /// Hash of the complete secure roster, absent for an incomplete/insecure projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster_hash: Option<RosterHash>,
+    /// Signature by the memory-only lobby manifest key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_signature: Option<SessionSignature>,
+    /// Public half used to verify `manifest_signature`.
+    pub manifest_public_key: SessionPublicKey,
     /// Fresh current-roster endpoints, sorted by player ID.
     pub peers: Vec<LobbySessionPeer>,
 }
@@ -175,6 +199,15 @@ pub struct RegisterSessionEndpointRequest {
     pub tailnet_address: String,
     /// Bounded application UDP port.
     pub application_port: u16,
+    /// Ephemeral application public key. Optional only for explicit dry-run/demo mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_public_key: Option<SessionPublicKey>,
+    /// Proof of possession over the capability-bound registration tuple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_proof: Option<SessionSignature>,
+    /// Advisory current WireGuard node-key claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key: Option<NodeKey>,
 }
 
 /// Successful endpoint registration and refreshed exact-lobby projection.
@@ -331,6 +364,10 @@ pub struct JoinLobbyResponse {
     pub participant_capability: OpaqueCapability,
     /// Public post-join lobby snapshot.
     pub lobby: Lobby,
+    /// Exact application session generation (zero before first start).
+    pub session_generation: u64,
+    /// Memory-only lobby manifest verification key.
+    pub manifest_public_key: SessionPublicKey,
     /// Dry-run metadata.
     pub metadata: ResponseMetadata,
 }
@@ -345,6 +382,8 @@ impl Serialize for JoinLobbyResponse {
             join_credential: crate::credential::JoinCredentialWire<'a>,
             participant_capability: &'a OpaqueCapability,
             lobby: &'a Lobby,
+            session_generation: u64,
+            manifest_public_key: SessionPublicKey,
             #[serde(flatten)]
             metadata: &'a ResponseMetadata,
         }
@@ -353,6 +392,8 @@ impl Serialize for JoinLobbyResponse {
             join_credential: self.join_credential.as_wire(),
             participant_capability: &self.participant_capability,
             lobby: &self.lobby,
+            session_generation: self.session_generation,
+            manifest_public_key: self.manifest_public_key,
             metadata: &self.metadata,
         }
         .serialize(serializer)
@@ -369,6 +410,8 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
             join_credential: JoinCredential,
             participant_capability: OpaqueCapability,
             lobby: Lobby,
+            session_generation: u64,
+            manifest_public_key: SessionPublicKey,
             #[serde(flatten)]
             metadata: ResponseMetadata,
         }
@@ -378,6 +421,8 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
             join_credential: wire.join_credential,
             participant_capability: wire.participant_capability,
             lobby: wire.lobby,
+            session_generation: wire.session_generation,
+            manifest_public_key: wire.manifest_public_key,
             metadata: wire.metadata,
         })
     }
@@ -767,6 +812,14 @@ pub enum ApiValidationError {
         /// Advertised version.
         version: WireVersion,
     },
+    /// Secure session admission requires wire 1.2 or newer from every member.
+    #[error("player {player_id} uses unsigned-session wire version {version}")]
+    SecureSessionWireVersionRequired {
+        /// Incompatible player.
+        player_id: PlayerId,
+        /// Advertised version.
+        version: WireVersion,
+    },
     /// At least one roster member uses a different election formula.
     #[error("player {player_id} uses incompatible authority formula {formula_version}")]
     MixedAuthorityFormula {
@@ -780,6 +833,20 @@ pub enum ApiValidationError {
 /// Validates the wire and formula start guards for every roster member.
 pub fn validate_start_roster(roster: &[Player]) -> Result<(), ApiValidationError> {
     validate_start_roster_against(roster, WIRE_VERSION, AUTHORITY_FORMULA_VERSION)
+}
+
+/// Refuses mixed signed/unsigned rosters for secure real admission.
+pub fn validate_secure_start_roster(roster: &[Player]) -> Result<(), ApiValidationError> {
+    validate_start_roster(roster)?;
+    for player in roster {
+        if player.wire_version.major() != 1 || player.wire_version.minor() < 2 {
+            return Err(ApiValidationError::SecureSessionWireVersionRequired {
+                player_id: player.player_id,
+                version: player.wire_version,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Variant of [`validate_start_roster`] for rolling upgrades and test vectors.
@@ -918,6 +985,8 @@ mod tests {
                 UnixMillis::new(300_000),
             ),
             lobby: lobby(),
+            session_generation: 0,
+            manifest_public_key: SessionPublicKey::from_bytes([3; 32]),
             metadata: ResponseMetadata::default(),
         };
         let debug = format!("{response:?}");

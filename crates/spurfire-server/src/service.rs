@@ -19,25 +19,29 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use spurfire_protocol::{
-    elect_authority, elect_authority_for_roster, validate_start_roster, AcceptedHeartbeatReference,
-    ApplicationQuality, AuthorityCandidate, AuthorityElection, AuthorityElectionError,
-    AuthorityHeartbeatRequest, AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary,
-    BackingMode, CapabilitiesResponse, ControlElectionReference, CreateInvitationRequest,
-    CreateInvitationResponse, CreateLobbyFirstResponse, CreateLobbyRequest, CreateLobbyResponse,
-    DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore, Freshness,
-    InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt, JoinLobbyReplayResponse,
-    JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest, LeaveLobbyResponse, Lobby,
-    LobbyCapabilityScope, LobbyId, LobbyNetworkView, LobbyResponse, LobbySessionPeer,
-    LobbySessionProjection, LobbyState, LobbyTtl, NetworkAuthority, NetworkBacking, NetworkCleanup,
-    NetworkCounts, NetworkIsolation, NetworkLifecycle, NetworkTruthLabel, OpaqueCapability,
-    ParticipantCleanupReason, Player, PlayerId, PlayerJoinState, ProvisioningMode,
-    RegisterSessionEndpointRequest, RegisterSessionEndpointResponse, ResponseMetadata,
-    RouteAggregate, StartLobbyRequest, StartLobbyResponse, SubmitMeasurementsRequest,
-    SubmitMeasurementsResponse, SubmitResultsRequest, SubmitResultsResponse, UnixMillis,
-    UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS,
-    LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
+    canonical_keyreg_digest, canonical_manifest_digest, elect_authority,
+    elect_authority_for_roster, validate_secure_start_roster, validate_start_roster,
+    AcceptedHeartbeatReference, ApplicationQuality, AuthorityCandidate, AuthorityElection,
+    AuthorityElectionError, AuthorityHeartbeatRequest, AuthorityHeartbeatResponse,
+    AuthorityResponse, AuthoritySummary, BackingMode, CapabilitiesResponse,
+    ControlElectionReference, CreateInvitationRequest, CreateInvitationResponse,
+    CreateLobbyFirstResponse, CreateLobbyRequest, CreateLobbyResponse, DestroyLobbyResponse, Fact,
+    FactAssurance, FactSource, FinalScore, Freshness, InspectedLobbyLifecycle, JoinCredential,
+    JoinCredentialReceipt, JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse,
+    LeaveLobbyRequest, LeaveLobbyResponse, Lobby, LobbyCapabilityScope, LobbyId, LobbyNetworkView,
+    LobbyResponse, LobbySessionPeer, LobbySessionProjection, LobbyState, LobbyTtl,
+    NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
+    NetworkLifecycle, NetworkTruthLabel, OpaqueCapability, ParticipantCleanupReason, Player,
+    PlayerId, PlayerJoinState, ProvisioningMode, RegisterSessionEndpointRequest,
+    RegisterSessionEndpointResponse, ResponseMetadata, RosterManifest, RosterManifestEntry,
+    RouteAggregate, SessionPublicKey, SessionSignature, StartLobbyRequest, StartLobbyResponse,
+    SubmitMeasurementsRequest, SubmitMeasurementsResponse, SubmitResultsRequest,
+    SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
+    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS,
+    PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -157,7 +161,17 @@ struct SessionEndpointRecord {
     sequence: u64,
     tailnet_address: String,
     application_port: u16,
+    session_public_key: Option<SessionPublicKey>,
+    node_key: Option<spurfire_protocol::NodeKey>,
     received_at: UnixMillis,
+}
+
+struct ManifestKey(Zeroizing<[u8; 32]>);
+
+impl fmt::Debug for ManifestKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManifestKey(<redacted>)")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +240,7 @@ pub struct AppState {
     observation_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     provider_observations: Arc<RwLock<BTreeMap<LobbyId, CachedProviderObservation>>>,
     session_endpoints: Arc<RwLock<BTreeMap<LobbyId, BTreeMap<PlayerId, SessionEndpointRecord>>>>,
+    manifest_keys: Arc<RwLock<BTreeMap<LobbyId, ManifestKey>>>,
     provider_limit: Arc<Semaphore>,
     abuse: Arc<Mutex<AbuseState>>,
     startup_reconciled: Arc<AtomicBool>,
@@ -249,6 +264,7 @@ impl AppState {
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             provider_observations: Arc::new(RwLock::new(BTreeMap::new())),
             session_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
+            manifest_keys: Arc::new(RwLock::new(BTreeMap::new())),
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
@@ -272,6 +288,17 @@ impl AppState {
     #[must_use]
     pub fn store(&self) -> Arc<dyn LobbyStore> {
         Arc::clone(&self.store)
+    }
+
+    async fn manifest_signing_key(&self, lobby_id: LobbyId) -> Result<SigningKey, ApiError> {
+        if let Some(key) = self.manifest_keys.read().await.get(&lobby_id) {
+            return Ok(SigningKey::from_bytes(&key.0));
+        }
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        getrandom::getrandom(seed.as_mut()).map_err(|_| internal_error(false))?;
+        let mut keys = self.manifest_keys.write().await;
+        let key = keys.entry(lobby_id).or_insert_with(|| ManifestKey(seed));
+        Ok(SigningKey::from_bytes(&key.0))
     }
 
     async fn lock_lobby(&self, lobby_id: LobbyId) -> OwnedMutexGuard<()> {
@@ -439,6 +466,21 @@ impl AppState {
             let Some(mut stored) = self.store.get(lobby_id).await else {
                 continue;
             };
+            // Manifest signing keys are intentionally memory-only. A process
+            // restart must therefore move every active signed session into a
+            // fresh replay domain before a new key can be pinned.
+            if stored.session_generation > 0
+                && matches!(
+                    stored.lobby.state,
+                    LobbyState::Starting | LobbyState::InMatch
+                )
+            {
+                stored.session_generation = stored.session_generation.saturating_add(1);
+                if self.store.replace(stored.clone()).await.is_err() {
+                    ready = false;
+                    continue;
+                }
+            }
             if stored.dry_run {
                 continue;
             }
@@ -580,6 +622,7 @@ impl fmt::Debug for AppState {
             .field("clock", &"<clock>")
             .field("provider_observations", &"<bounded-coarse-cache>")
             .field("session_endpoints", &"<memory-only-selected-lobby-cache>")
+            .field("manifest_keys", &"<memory-only-redacted-signing-keys>")
             .finish()
     }
 }
@@ -1061,11 +1104,13 @@ async fn get_lobby_inner(
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let stored = load_maintained_lobby(state, lobby_id, now, dry_hint).await?;
-    let session = session_projection(state, &stored, now).await;
+    let session = session_projection(state, &stored, now).await?;
     Ok(LobbyResponse {
         lobby: stored.snapshot(),
         network_generation: stored.network_generation,
         roster_revision: stored.roster_revision,
+        session_generation: stored.session_generation,
+        manifest_public_key: session.manifest_public_key,
         authority_input_hash: stored
             .last_election
             .as_ref()
@@ -1079,9 +1124,11 @@ async fn session_projection(
     state: &AppState,
     stored: &StoredLobby,
     now: UnixMillis,
-) -> LobbySessionProjection {
+) -> Result<LobbySessionProjection, ApiError> {
+    let signing_key = state.manifest_signing_key(stored.lobby.lobby_id).await?;
+    let manifest_public_key = SessionPublicKey::from_bytes(signing_key.verifying_key().to_bytes());
     let endpoints = state.session_endpoints.read().await;
-    let peers = endpoints
+    let peers: Vec<_> = endpoints
         .get(&stored.lobby.lobby_id)
         .into_iter()
         .flat_map(BTreeMap::values)
@@ -1101,14 +1148,55 @@ async fn session_projection(
             player_id: record.player_id,
             tailnet_address: record.tailnet_address.clone(),
             application_port: record.application_port,
+            session_public_key: record.session_public_key,
+            node_key: record.node_key,
             received_at: record.received_at,
         })
         .collect();
-    LobbySessionProjection {
+    let secure = !stored.lobby.roster.is_empty()
+        && peers.len() == stored.lobby.roster.len()
+        && peers.iter().all(|peer| peer.session_public_key.is_some());
+    let (roster_hash, manifest_signature) = if secure {
+        let manifest = RosterManifest {
+            lobby_id: stored.lobby.lobby_id,
+            network_generation: stored.network_generation,
+            session_generation: stored.session_generation,
+            roster_revision: stored.roster_revision,
+            entries: peers
+                .iter()
+                .map(|peer| RosterManifestEntry {
+                    player_id: peer.player_id,
+                    session_public_key: peer.session_public_key.expect("secure peers have keys"),
+                    tailnet_address: peer
+                        .tailnet_address
+                        .parse()
+                        .expect("registered addresses were validated"),
+                    application_port: peer.application_port,
+                    node_key: peer.node_key,
+                })
+                .collect(),
+        };
+        manifest.validate().map_err(|_| internal_error(false))?;
+        let hash = manifest.hash();
+        let signature = SessionSignature::from_bytes(
+            signing_key
+                .sign(&canonical_manifest_digest(manifest_public_key, &manifest))
+                .to_bytes(),
+        );
+        (Some(hash), Some(signature))
+    } else {
+        (None, None)
+    };
+    Ok(LobbySessionProjection {
         network_generation: stored.network_generation,
         roster_revision: stored.roster_revision,
+        session_generation: stored.session_generation,
+        secure,
+        roster_hash,
+        manifest_signature,
+        manifest_public_key,
         peers,
-    }
+    })
 }
 
 async fn get_lobby_network(
@@ -1542,12 +1630,17 @@ async fn join_lobby(
         .await
         .map_err(|error| store_api_error(&error, dry_run))?;
 
+    let manifest_signing_key = state.manifest_signing_key(lobby_id).await?;
     Ok(sensitive_json_response(
         StatusCode::CREATED,
         &JoinLobbyResponse {
             join_credential: credential,
             participant_capability: participant_capability_wire,
             lobby: stored.snapshot(),
+            session_generation: stored.session_generation,
+            manifest_public_key: SessionPublicKey::from_bytes(
+                manifest_signing_key.verifying_key().to_bytes(),
+            ),
             metadata: minted.metadata,
         },
     ))
@@ -1583,9 +1676,43 @@ async fn register_session_endpoint(
             LobbyState::Forming | LobbyState::Ready | LobbyState::Starting | LobbyState::InMatch
         )
         || !tailnet_address_is_valid(&request.tailnet_address)
+        || request.application_port == 0
     {
         return Err(lobby_not_found(false));
     }
+    let secure_identity = match (request.session_public_key, request.key_proof) {
+        (Some(public_key), Some(proof)) => {
+            let address = request
+                .tailnet_address
+                .parse()
+                .map_err(|_| lobby_not_found(false))?;
+            let digest = canonical_keyreg_digest(
+                lobby_id,
+                player_id,
+                request.network_generation,
+                request.roster_revision,
+                address,
+                request.application_port,
+                public_key,
+            );
+            public_key.verify_digest(&digest, proof).map_err(|_| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "session_key_proof_invalid",
+                    "session public-key proof is invalid",
+                )
+            })?;
+            Some(public_key)
+        }
+        (None, None) if stored.dry_run => None,
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "session_identity_required",
+                "secure session public key and proof are required",
+            ));
+        }
+    };
 
     {
         let mut cache = state.session_endpoints.write().await;
@@ -1600,6 +1727,19 @@ async fn register_session_endpoint(
                 "endpoint registration sequence must increase",
             ));
         }
+        if lobby_endpoints.values().any(|existing| {
+            existing.player_id != player_id
+                && (existing.tailnet_address == request.tailnet_address
+                    || request
+                        .node_key
+                        .is_some_and(|node| existing.node_key == Some(node)))
+        }) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "node_already_claimed",
+                "tailnet node identity is already bound to another player",
+            ));
+        }
         lobby_endpoints.insert(
             player_id,
             SessionEndpointRecord {
@@ -1609,6 +1749,8 @@ async fn register_session_endpoint(
                 sequence: request.sequence,
                 tailnet_address: request.tailnet_address,
                 application_port: request.application_port,
+                session_public_key: secure_identity,
+                node_key: request.node_key,
                 received_at: now,
             },
         );
@@ -1616,7 +1758,7 @@ async fn register_session_endpoint(
 
     let response = RegisterSessionEndpointResponse {
         lobby: stored.snapshot(),
-        session: session_projection(&state, &stored, now).await,
+        session: session_projection(&state, &stored, now).await?,
     };
     Ok(sensitive_json_response(StatusCode::OK, &response))
 }
@@ -2005,6 +2147,17 @@ async fn start_lobby(
     }
     validate_start_roster(&stored.lobby.roster)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
+    if !dry_run {
+        validate_secure_start_roster(&stored.lobby.roster)
+            .map_err(|error| ApiError::validation(&error, dry_run))?;
+        if !session_projection(&state, &stored, now).await?.secure {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "session_identity_required",
+                "every roster member must register a fresh signed session identity",
+            ));
+        }
+    }
     if !all_measurements_fresh(&stored, now) {
         transition(&mut stored.lobby, LobbyState::Forming, dry_run)?;
         stored.lobby.authority = None;
@@ -2032,6 +2185,14 @@ async fn start_lobby(
 
     stored.lobby.map_seed = Some(request.map_seed.unwrap_or_else(random_map_seed));
     stored.session_generation = stored.session_generation.saturating_add(1).max(1);
+    // Session keys are per-generation. Never project pre-start registrations
+    // into the new signed replay domain.
+    state
+        .session_endpoints
+        .write()
+        .await
+        .entry(lobby_id)
+        .and_modify(BTreeMap::clear);
     transition(&mut stored.lobby, LobbyState::Starting, dry_run)?;
     stored.started_at = Some(now);
     stored.last_authority_heartbeat_at = None;
@@ -2259,6 +2420,7 @@ async fn delete_lobby(
         }));
     }
     state.session_endpoints.write().await.remove(&lobby_id);
+    state.manifest_keys.write().await.remove(&lobby_id);
     if !matches!(
         stored.lobby.state,
         LobbyState::Closing | LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed

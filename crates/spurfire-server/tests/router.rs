@@ -9,11 +9,13 @@ use axum::{
     http::{Method, Request, StatusCode},
     Router,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use spurfire_protocol::{
-    NetworkLifecycle, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
-    DRY_RUN_AUTH_KEY,
+    canonical_keyreg_digest, canonical_manifest_digest, LobbyId, NetworkLifecycle, PlayerId,
+    ProvisioningMode, ResponseMetadata, RosterManifest, RosterManifestEntry, SessionPublicKey,
+    SessionSignature, TailnetDnsName, UnixMillis, DRY_RUN_AUTH_KEY,
 };
 use spurfire_server::{
     build_router, AppState, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider,
@@ -562,7 +564,8 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(created["planned_actions"], json!([]));
     let lobby_id = created["lobby_id"].as_str().unwrap();
     let network_capability = created["creator_capability"]["token"].as_str().unwrap();
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+    let initial_get = get(&app, lobby_id).await;
+    assert_eq!(initial_get.1["state"], "FORMING", "{initial_get:?}");
 
     make_ready(
         &app,
@@ -658,6 +661,47 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(results["state"], "CLOSING");
     assert_eq!(get(&app, lobby_id).await.1["state"], "DESTROYED");
     assert_eq!(provider.mutating_call_count(), 0);
+}
+
+#[tokio::test]
+async fn memory_only_manifest_key_restart_bumps_active_session_and_rebinds() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_000_000)));
+    let provider = Arc::new(DryRunProvider::new());
+    let (app, _, store) = dry_app(clock.clone(), provider.clone());
+    let (status, created) = create(&app, "restart-session", "dry_run", 2).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
+    make_ready(&app, lobby_id, &[(PLAYER_1, 10), (PLAYER_2, 20)]).await;
+    let (status, _) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/start"),
+        Some(json!({"creator_player_id": PLAYER_1, "map_seed": 7})),
+        &[
+            ("idempotency-key", "restart-start"),
+            ("x-spurfire-player-id", PLAYER_1),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let before = get_authorized(&app, lobby_id, capability).await.1;
+    assert_eq!(before["session_generation"], 1);
+    let old_key = before["manifest_public_key"].clone();
+
+    let config = Config {
+        force_dry_run: true,
+        provisioning_mode: ProvisioningMode::DryRun,
+        allow_legacy_client_assertions: true,
+        ..Config::default()
+    };
+    let restarted = AppState::new(config, store, provider).with_clock(clock);
+    assert!(restarted.reconcile_startup().await);
+    let restarted_app = build_router(restarted);
+    let after = get_authorized(&restarted_app, lobby_id, capability).await.1;
+    assert_eq!(after["session_generation"], 2);
+    assert_ne!(after["manifest_public_key"], old_key);
+    assert_eq!(after["session"]["peers"], json!([]));
 }
 
 #[tokio::test]
@@ -1740,7 +1784,7 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let join_body = json!({
         "player_id":PLAYER_2,
         "display_name":"Secure Rider",
-        "client_wire_version":"1.0",
+        "client_wire_version":"1.2",
         "authority_formula_version":"election_v1"
     });
     let (join_status, joined) = json_request(
@@ -1771,13 +1815,40 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     assert!(selected["roster_revision"].as_u64().unwrap() >= 2);
     assert_eq!(selected["session"]["peers"], json!([]));
 
+    let session_signing = SigningKey::from_bytes(&[42; 32]);
+    let session_public = SessionPublicKey::from_bytes(session_signing.verifying_key().to_bytes());
+    let proof_digest = canonical_keyreg_digest(
+        LobbyId::parse(lobby_id).unwrap(),
+        PlayerId::parse(PLAYER_2).unwrap(),
+        selected["network_generation"].as_u64().unwrap(),
+        selected["roster_revision"].as_u64().unwrap(),
+        "100.64.0.10".parse().unwrap(),
+        41643,
+        session_public,
+    );
+    let key_proof = SessionSignature::from_bytes(session_signing.sign(&proof_digest).to_bytes());
     let endpoint_body = json!({
         "network_generation": selected["network_generation"],
         "roster_revision": selected["roster_revision"],
         "sequence": 1,
         "tailnet_address": "100.64.0.10",
-        "application_port": 41643
+        "application_port": 41643,
+        "session_public_key": session_public,
+        "key_proof": key_proof,
+        "node_key": format!("nodekey:{}", "11".repeat(32))
     });
+    let mut bad_proof = endpoint_body.clone();
+    bad_proof["key_proof"] = serde_json::to_value(SessionSignature::from_bytes([0; 64])).unwrap();
+    let (bad_status, bad_body) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
+        Some(bad_proof),
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(bad_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(bad_body["code"], "session_key_proof_invalid");
     let (endpoint_status, endpoint) = json_request(
         &app,
         Method::POST,
@@ -1792,6 +1863,35 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
         endpoint["session"]["peers"][0]["tailnet_address"],
         "100.64.0.10"
     );
+    assert_eq!(endpoint["session"]["secure"], true);
+    let manifest_public: SessionPublicKey =
+        serde_json::from_value(endpoint["session"]["manifest_public_key"].clone()).unwrap();
+    let manifest_signature: SessionSignature =
+        serde_json::from_value(endpoint["session"]["manifest_signature"].clone()).unwrap();
+    let manifest = RosterManifest {
+        lobby_id: LobbyId::parse(lobby_id).unwrap(),
+        network_generation: endpoint["session"]["network_generation"].as_u64().unwrap(),
+        session_generation: endpoint["session"]["session_generation"].as_u64().unwrap(),
+        roster_revision: endpoint["session"]["roster_revision"].as_u64().unwrap(),
+        entries: vec![RosterManifestEntry {
+            player_id: PlayerId::parse(PLAYER_2).unwrap(),
+            session_public_key: session_public,
+            tailnet_address: "100.64.0.10".parse().unwrap(),
+            application_port: 41643,
+            node_key: serde_json::from_value(endpoint["session"]["peers"][0]["node_key"].clone())
+                .unwrap(),
+        }],
+    };
+    assert_eq!(
+        serde_json::to_value(manifest.hash()).unwrap(),
+        endpoint["session"]["roster_hash"]
+    );
+    manifest_public
+        .verify_digest(
+            &canonical_manifest_digest(manifest_public, &manifest),
+            manifest_signature,
+        )
+        .unwrap();
 
     let (endpoint_replay_status, endpoint_replay) = json_request(
         &app,

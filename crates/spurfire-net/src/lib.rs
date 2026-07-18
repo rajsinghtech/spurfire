@@ -1,11 +1,14 @@
 #![forbid(unsafe_code)]
 //! Bounded, transport-independent peer-session protocol for Spurfire.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::SocketAddr};
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use spurfire_protocol::{
-    LobbyId, PlayerId, RiderStance, ShotCommand, ShotResult, WireVersion, CURRENT_WIRE_VERSION,
+    canonical_envelope_digest, canonical_manifest_digest, LobbyId, NodeKey, PlayerId, RiderStance,
+    RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotResult, WireVersion, CURRENT_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -82,6 +85,9 @@ pub struct Envelope {
     pub authority_epoch: u64,
     pub simulation_tick: u64,
     pub payload: PeerPayload,
+    /// Wire 1.2 application identity. Absent only in explicit insecure demo/test mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionBinding>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -169,6 +175,13 @@ pub enum AcceptOutcome {
     DuplicateOrReplay,
     WrongLobby,
     StaleAuthorityEpoch,
+    UnknownSender,
+    UnsignedInSecureMode,
+    EndpointMismatch,
+    NodeKeyMismatch,
+    WrongGeneration,
+    RosterMismatch,
+    BadSignature,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +259,7 @@ impl SessionState {
             authority_epoch: self.authority_epoch,
             simulation_tick: tick,
             payload,
+            session: None,
         }
     }
 
@@ -256,11 +270,9 @@ impl SessionState {
         if envelope.authority_epoch < self.authority_epoch {
             return AcceptOutcome::StaleAuthorityEpoch;
         }
-        let peer = self.peers.entry(envelope.sender).or_insert(PeerState {
-            last_sequence: 0,
-            last_seen_ms: now_ms,
-            connected: true,
-        });
+        let Some(peer) = self.peers.get_mut(&envelope.sender) else {
+            return AcceptOutcome::UnknownSender;
+        };
         if envelope.sequence <= peer.last_sequence {
             return AcceptOutcome::DuplicateOrReplay;
         }
@@ -309,6 +321,285 @@ impl SessionState {
     }
 }
 
+/// A verified complete roster plus replay/epoch state. All identity and source
+/// checks occur before `SessionState` can mutate.
+#[derive(Clone, Debug)]
+pub struct SecureSession {
+    manifest: RosterManifest,
+    roster_hash: RosterHash,
+    state: SessionState,
+}
+
+impl SecureSession {
+    pub fn new(
+        manifest: RosterManifest,
+        manifest_public_key: SessionPublicKey,
+        manifest_signature: SessionSignature,
+        state: SessionState,
+    ) -> Result<Self, SessionIdentityError> {
+        manifest.validate()?;
+        manifest_public_key.verify_digest(
+            &canonical_manifest_digest(manifest_public_key, &manifest),
+            manifest_signature,
+        )?;
+        let roster_hash = manifest.hash();
+        Ok(Self {
+            manifest,
+            roster_hash,
+            state,
+        })
+    }
+
+    #[must_use]
+    pub const fn roster_hash(&self) -> RosterHash {
+        self.roster_hash
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    pub fn envelope(
+        &mut self,
+        tick: u64,
+        payload: PeerPayload,
+        signing_key: &SigningKey,
+    ) -> Result<Envelope, SessionIdentityError> {
+        let mut envelope = self.state.envelope(tick, payload);
+        self.sign(&mut envelope, signing_key)?;
+        Ok(envelope)
+    }
+
+    pub fn sign(
+        &self,
+        envelope: &mut Envelope,
+        signing_key: &SigningKey,
+    ) -> Result<(), SessionIdentityError> {
+        let Some(entry) = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.player_id == envelope.sender)
+        else {
+            return Err(SessionIdentityError::BadSignature);
+        };
+        if entry.session_public_key.as_bytes() != &signing_key.verifying_key().to_bytes() {
+            return Err(SessionIdentityError::BadSignature);
+        }
+        let digest = envelope_digest(
+            envelope,
+            self.manifest.network_generation,
+            self.manifest.session_generation,
+            self.roster_hash,
+        );
+        envelope.session = Some(SessionBinding {
+            network_generation: self.manifest.network_generation,
+            session_generation: self.manifest.session_generation,
+            roster_hash: self.roster_hash,
+            signature: SessionSignature::from_bytes(signing_key.sign(&digest).to_bytes()),
+        });
+        Ok(())
+    }
+
+    pub fn expire_and_migrate(&mut self, now_ms: u64) -> Option<(PlayerId, u64)> {
+        self.state.expire_and_migrate(now_ms)
+    }
+
+    pub fn accept_with_source(
+        &mut self,
+        envelope: &Envelope,
+        source: SocketAddr,
+        current_node_key: Option<NodeKey>,
+        now_ms: u64,
+    ) -> AcceptOutcome {
+        let Some(binding) = envelope.session else {
+            return AcceptOutcome::UnsignedInSecureMode;
+        };
+        let Some(entry) = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.player_id == envelope.sender)
+        else {
+            return AcceptOutcome::UnknownSender;
+        };
+        if entry.tailnet_address != source.ip() || entry.application_port != source.port() {
+            return AcceptOutcome::EndpointMismatch;
+        }
+        if let (Some(claimed), Some(current)) = (entry.node_key, current_node_key) {
+            if claimed != current {
+                return AcceptOutcome::NodeKeyMismatch;
+            }
+        }
+        if envelope.lobby_id != self.manifest.lobby_id {
+            return AcceptOutcome::WrongLobby;
+        }
+        if binding.network_generation != self.manifest.network_generation
+            || binding.session_generation != self.manifest.session_generation
+        {
+            return AcceptOutcome::WrongGeneration;
+        }
+        if binding.roster_hash != self.roster_hash {
+            return AcceptOutcome::RosterMismatch;
+        }
+        let digest = envelope_digest(
+            envelope,
+            binding.network_generation,
+            binding.session_generation,
+            binding.roster_hash,
+        );
+        if entry
+            .session_public_key
+            .verify_digest(&digest, binding.signature)
+            .is_err()
+        {
+            return AcceptOutcome::BadSignature;
+        }
+        self.state.accept(envelope, now_ms)
+    }
+}
+
+fn envelope_digest(
+    envelope: &Envelope,
+    network_generation: u64,
+    session_generation: u64,
+    roster_hash: RosterHash,
+) -> [u8; 32] {
+    canonical_envelope_digest(
+        envelope.wire_version,
+        envelope.lobby_id,
+        network_generation,
+        session_generation,
+        roster_hash,
+        envelope.sender,
+        envelope.authority_epoch,
+        envelope.sequence,
+        envelope.simulation_tick,
+        &canonical_payload_bytes(&envelope.payload),
+    )
+}
+
+/// Explicit fixed-layout payload bytes used only as signature input.
+#[must_use]
+pub fn canonical_payload_bytes(payload: &PeerPayload) -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&u32::try_from(value.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    fn option<T>(out: &mut Vec<u8>, value: &Option<T>, write: impl FnOnce(&mut Vec<u8>, &T)) {
+        out.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            write(out, value);
+        }
+    }
+    fn direction(out: &mut Vec<u8>, value: &spurfire_protocol::QuantizedDirection) {
+        out.extend_from_slice(&value.x.to_be_bytes());
+        out.extend_from_slice(&value.y.to_be_bytes());
+        out.extend_from_slice(&value.z.to_be_bytes());
+    }
+    let mut out = Vec::with_capacity(160);
+    match payload {
+        PeerPayload::Hello { hostname } => {
+            out.push(0);
+            string(&mut out, hostname);
+        }
+        PeerPayload::Heartbeat => out.push(1),
+        PeerPayload::Probe { nonce, reply } => {
+            out.push(2);
+            out.extend_from_slice(&nonce.to_be_bytes());
+            out.push(u8::from(*reply));
+        }
+        PeerPayload::RiderInput {
+            throttle_milli,
+            steer_milli,
+            buttons,
+        } => {
+            out.push(3);
+            out.extend_from_slice(&throttle_milli.to_be_bytes());
+            out.extend_from_slice(&steer_milli.to_be_bytes());
+            out.extend_from_slice(&buttons.to_be_bytes());
+        }
+        PeerPayload::RiderSnapshot {
+            position_mm,
+            velocity_mmps,
+            yaw_millidegrees,
+            stance,
+        } => {
+            out.push(4);
+            for value in position_mm.iter().chain(velocity_mmps) {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            out.extend_from_slice(&yaw_millidegrees.to_be_bytes());
+            out.push(stance.as_u8());
+        }
+        PeerPayload::ShotCommand { command } => {
+            out.push(5);
+            out.extend_from_slice(&command.tick.as_u64().to_be_bytes());
+            out.extend_from_slice(command.shooter_peer_id.as_bytes());
+            out.push(command.weapon_id.as_u8());
+            for value in [command.origin.x, command.origin.y, command.origin.z] {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            direction(&mut out, &command.direction);
+            out.extend_from_slice(&command.spread_seed.to_be_bytes());
+            option(&mut out, &command.claimed_target, |out, target| {
+                out.extend_from_slice(&target.target_id.0.to_be_bytes());
+                option(out, &target.hit_zone, |out, zone| {
+                    string(out, zone.as_str())
+                });
+                option(out, &target.damage, |out, value| {
+                    out.extend_from_slice(&value.to_be_bytes())
+                });
+                option(out, &target.distance_mm, |out, value| {
+                    out.extend_from_slice(&value.to_be_bytes())
+                });
+            });
+        }
+        PeerPayload::ShotResult { result } => {
+            out.push(6);
+            out.extend_from_slice(&result.tick.as_u64().to_be_bytes());
+            out.extend_from_slice(result.shooter_peer_id.as_bytes());
+            out.push(result.weapon_id.as_u8());
+            string(&mut out, result.outcome.as_str());
+            option(&mut out, &result.rejection_reason, |out, reason| {
+                string(out, reason.as_str())
+            });
+            option(&mut out, &result.resolved_direction, direction);
+            option(&mut out, &result.target_id, |out, id| {
+                out.extend_from_slice(&id.0.to_be_bytes())
+            });
+            option(&mut out, &result.hit_zone, |out, zone| {
+                string(out, zone.as_str())
+            });
+            out.extend_from_slice(&result.damage.to_be_bytes());
+            option(&mut out, &result.distance_mm, |out, value| {
+                out.extend_from_slice(&value.to_be_bytes())
+            });
+            out.push(u8::from(result.eliminated));
+        }
+        PeerPayload::Authority { authority, epoch } => {
+            out.push(7);
+            out.extend_from_slice(authority.as_bytes());
+            out.extend_from_slice(&epoch.to_be_bytes());
+        }
+        PeerPayload::MigrationSnapshot {
+            authority,
+            epoch,
+            tick,
+            state_hash,
+        } => {
+            out.push(8);
+            out.extend_from_slice(authority.as_bytes());
+            out.extend_from_slice(&epoch.to_be_bytes());
+            out.extend_from_slice(&tick.to_be_bytes());
+            string(&mut out, state_hash);
+        }
+        PeerPayload::Leave => out.push(9),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +625,124 @@ mod tests {
             decode(&vec![b'x'; MAX_DATAGRAM_BYTES + 1]),
             Err(CodecError::TooLarge)
         );
+    }
+
+    fn secure_fixture(local: PlayerId) -> (SecureSession, SigningKey, SocketAddr) {
+        let server = SigningKey::from_bytes(&[9; 32]);
+        let key1 = SigningKey::from_bytes(&[1; 32]);
+        let key2 = SigningKey::from_bytes(&[2; 32]);
+        let manifest = RosterManifest {
+            lobby_id: lobby(),
+            network_generation: 7,
+            session_generation: 8,
+            roster_revision: 9,
+            entries: vec![
+                spurfire_protocol::RosterManifestEntry {
+                    player_id: player(1),
+                    session_public_key: SessionPublicKey::from_bytes(
+                        key1.verifying_key().to_bytes(),
+                    ),
+                    tailnet_address: "100.64.0.1".parse().unwrap(),
+                    application_port: 41643,
+                    node_key: Some(NodeKey::from_bytes([1; 32])),
+                },
+                spurfire_protocol::RosterManifestEntry {
+                    player_id: player(2),
+                    session_public_key: SessionPublicKey::from_bytes(
+                        key2.verifying_key().to_bytes(),
+                    ),
+                    tailnet_address: "100.64.0.2".parse().unwrap(),
+                    application_port: 41643,
+                    node_key: Some(NodeKey::from_bytes([2; 32])),
+                },
+            ],
+        };
+        let public = SessionPublicKey::from_bytes(server.verifying_key().to_bytes());
+        let signature = SessionSignature::from_bytes(
+            server
+                .sign(&canonical_manifest_digest(public, &manifest))
+                .to_bytes(),
+        );
+        let mut state = SessionState::new(lobby(), local, player(1), 0);
+        state.add_peer(player(1), 0);
+        state.add_peer(player(2), 0);
+        let signing = if local == player(1) { key1 } else { key2 };
+        (
+            SecureSession::new(manifest, public, signature, state).unwrap(),
+            signing,
+            format!("100.64.0.{}:41643", if local == player(1) { 1 } else { 2 })
+                .parse()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn secure_gate_rejects_source_tamper_forgery_and_replay_before_mutation() {
+        let (mut sender, sender_key, source) = secure_fixture(player(2));
+        let (mut receiver, _, _) = secure_fixture(player(1));
+        let signed = sender
+            .envelope(1, PeerPayload::Heartbeat, &sender_key)
+            .unwrap();
+        let mut unsigned = signed.clone();
+        unsigned.session = None;
+        assert_eq!(
+            receiver.accept_with_source(&unsigned, source, None, 0),
+            AcceptOutcome::UnsignedInSecureMode
+        );
+
+        assert_eq!(
+            receiver.accept_with_source(&signed, "100.64.0.99:41643".parse().unwrap(), None, 1,),
+            AcceptOutcome::EndpointMismatch
+        );
+        let mut wrong_generation = signed.clone();
+        wrong_generation
+            .session
+            .as_mut()
+            .unwrap()
+            .session_generation += 1;
+        assert_eq!(
+            receiver.accept_with_source(&wrong_generation, source, None, 2),
+            AcceptOutcome::WrongGeneration
+        );
+        let mut wrong_roster = signed.clone();
+        wrong_roster.session.as_mut().unwrap().roster_hash = RosterHash::from_bytes([4; 32]);
+        assert_eq!(
+            receiver.accept_with_source(&wrong_roster, source, None, 3),
+            AcceptOutcome::RosterMismatch
+        );
+        let mut tampered = signed.clone();
+        tampered.simulation_tick += 1;
+        assert_eq!(
+            receiver.accept_with_source(&tampered, source, None, 4),
+            AcceptOutcome::BadSignature
+        );
+        let mut forged_sender = signed.clone();
+        forged_sender.sender = player(1);
+        assert_eq!(
+            receiver.accept_with_source(&forged_sender, source, None, 5),
+            AcceptOutcome::EndpointMismatch
+        );
+        assert_eq!(
+            receiver.accept_with_source(&signed, source, Some(NodeKey::from_bytes([3; 32])), 6),
+            AcceptOutcome::NodeKeyMismatch
+        );
+        assert_eq!(
+            receiver.accept_with_source(&signed, source, Some(NodeKey::from_bytes([2; 32])), 7),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            receiver.accept_with_source(&signed, source, Some(NodeKey::from_bytes([2; 32])), 8),
+            AcceptOutcome::DuplicateOrReplay
+        );
+    }
+
+    #[test]
+    fn unknown_sender_never_auto_inserts() {
+        let mut receiver = SessionState::new(lobby(), player(1), player(1), 0);
+        let mut outsider = SessionState::new(lobby(), player(3), player(1), 0);
+        let packet = outsider.envelope(1, PeerPayload::Heartbeat);
+        assert_eq!(receiver.accept(&packet, 1), AcceptOutcome::UnknownSender);
+        assert_eq!(receiver.accept(&packet, 2), AcceptOutcome::UnknownSender);
     }
 
     #[test]
@@ -371,6 +780,7 @@ mod tests {
             authority_epoch: 1,
             simulation_tick: 10,
             payload: PeerPayload::Heartbeat,
+            session: None,
         };
         assert_eq!(
             session.accept(&stale, 3_101),
@@ -387,6 +797,7 @@ mod tests {
             authority_epoch: 1,
             simulation_tick: 42,
             payload,
+            session: None,
         }
     }
 
@@ -553,13 +964,17 @@ mod tests {
             10,
             "top-level M2 events are not peer payloads"
         );
+        let (secure, signing, _) = secure_fixture(player(2));
         for payload in payloads {
-            let encoded = encode(&envelope(payload)).unwrap();
+            let mut signed = envelope(payload);
+            secure.sign(&mut signed, &signing).unwrap();
+            let encoded = encode(&signed).unwrap();
             assert!(
                 encoded.len() <= MAX_DATAGRAM_BYTES,
-                "{} bytes",
+                "signed payload is {} bytes",
                 encoded.len()
             );
+            assert!(encoded.len() <= 1_200);
             assert_eq!(decode(&encoded).unwrap().wire_version, CURRENT_WIRE_VERSION);
         }
     }

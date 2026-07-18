@@ -86,6 +86,11 @@ func apply_projection(response: Dictionary) -> bool:
 			"last_seen_ms": int(existing.get("last_seen_ms", 0)),
 		}
 	_peers = next_peers
+	if bool(projection.get("secure", false)):
+		if not peer_session.configure_secure_session(
+			lobby_id, JSON.stringify(projection), Time.get_ticks_msec()
+		):
+			return false
 	return true
 
 func _process(_delta: float) -> void:
@@ -191,19 +196,19 @@ func _send_to_all(packet: PackedByteArray) -> void:
 	for peer: Dictionary in _peers.values():
 		peer_session.send_packet(packet, str(peer.address), int(peer.port))
 
-func _on_packet_received(packet: PackedByteArray, source_ip: String, source_port: int) -> void:
-	# Decode only enough to select the exact control-plane endpoint. Do not let a
-	# packet mutate replay/session state until sender and source both match.
+func _on_packet_received(
+	packet: PackedByteArray, source_ip: String, source_port: int, source_node_key: String
+) -> void:
+	var outcome := int(peer_session.accept_packet_with_source(
+		packet, source_ip, source_port, source_node_key, Time.get_ticks_msec()
+	))
+	if outcome != 0:
+		return
 	var payload := peer_session.decode_packet(packet) as Dictionary
 	var sender := str(payload.get("sender", ""))
 	if not _peers.has(sender):
 		return
 	var peer := _peers[sender] as Dictionary
-	if str(peer.address) != source_ip or int(peer.port) != source_port:
-		return
-	var outcome := int(peer_session.accept_packet(packet, Time.get_ticks_msec()))
-	if outcome != 0:
-		return
 	peer.last_seen_ms = Time.get_ticks_msec()
 	match str(payload.get("type", "")):
 		"probe":

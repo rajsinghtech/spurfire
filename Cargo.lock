@@ -3488,7 +3488,10 @@ dependencies = [
 name = "spurfire-gdext"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
  "godot",
+ "serde_json",
  "spurfire-net",
  "spurfire-protocol",
  "tokio",
@@ -3499,6 +3502,7 @@ dependencies = [
 name = "spurfire-net"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "rustscale-netstack",
  "rustscale-tsnet",
  "serde",
@@ -3514,8 +3518,11 @@ dependencies = [
 name = "spurfire-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -3528,6 +3535,7 @@ dependencies = [
  "chacha20poly1305",
  "clap",
  "dotenvy",
+ "ed25519-dalek",
  "fs2",
  "getrandom 0.2.17",
  "http-body-util",

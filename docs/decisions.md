@@ -132,6 +132,27 @@ capability-gated topology metadata. Every lifecycle, enrollment, route, applicat
 authority, freshness, and cleanup fact carries source and assurance; participant reports remain
 untrusted reports and never affect gameplay or cleanup truth.
 
+## D12 — Session identity is WireGuard channel binding plus ephemeral Ed25519
+
+**Status:** accepted for Alpha session identity
+
+A RustScale-delivered UDP source address is authenticated by WireGuard cryptokey routing and is
+used only as channel binding. Tailscale node keys are Curve25519 transport keys and never sign
+Spurfire messages. Every client instead generates a fresh native-only Ed25519 key for each lobby
+session generation, proves possession through its participant-capability-bound endpoint
+registration, and signs canonical domain-separated wire 1.2 envelopes. The signature binds the
+lobby, network and session generations, complete signed roster hash, sender, authority epoch,
+sequence, simulation tick, and fixed-layout payload.
+
+The server signs the complete endpoint/key projection with a per-lobby memory-only key. Peers
+reject duplicate IP or claimed node keys, unknown senders, source endpoint mismatches, generation
+or roster mismatches, non-strict signatures, and replay before state mutation. Node-key rotation
+requires increasing-sequence re-registration; the application identity remains the session key
+plus tailnet IP. A server restart cannot silently replace its manifest key inside an old replay
+domain: active sessions bump generation and re-key/re-register. Unsigned compatibility is limited
+to explicit dry-run/demo/test mode. This does not verify a peer's own gameplay truth and does not
+resolve D5 ranked verification.
+
 ## D11 — One real lobby and fail-closed activation
 
 **Status:** accepted for alpha safety; hosted real activation not approved

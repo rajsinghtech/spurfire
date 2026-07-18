@@ -39,6 +39,7 @@ func _ready() -> void:
 		peer_session.route_updated.connect(_on_route_updated)
 	_demo_mode = OS.get_environment("SPURFIRE_P2P_DEMO") == "1"
 	if _demo_mode:
+		peer_session.set_insecure_demo_mode(true)
 		_start_demo.call_deferred()
 
 func _process(_delta: float) -> void:
@@ -173,7 +174,9 @@ func _send_to_all(packet: PackedByteArray) -> void:
 	elif not destination_ip.is_empty():
 		peer_session.send_packet(packet, destination_ip, destination_port)
 
-func _on_packet_received(packet: PackedByteArray, source_ip: String, source_port: int) -> void:
+func _on_packet_received(
+	packet: PackedByteArray, source_ip: String, source_port: int, _source_node_key: String
+) -> void:
 	var outcome := int(peer_session.accept_packet(packet, Time.get_ticks_msec()))
 	if outcome != 0:
 		if _demo_mode:

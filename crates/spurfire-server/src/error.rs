@@ -67,6 +67,11 @@ impl ApiError {
                 "wire_version_incompatible",
                 "roster contains incompatible wire major versions",
             ),
+            ApiValidationError::SecureSessionWireVersionRequired { .. } => (
+                StatusCode::CONFLICT,
+                "session_identity_required",
+                "every real-lobby roster member must support signed wire 1.2 sessions",
+            ),
             ApiValidationError::EmptyDisplayName
             | ApiValidationError::DisplayNameTooLong
             | ApiValidationError::InvalidMaxPlayers { .. } => (

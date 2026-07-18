@@ -7,12 +7,17 @@ use std::{
     thread,
 };
 
+use ed25519_dalek::{Signer, SigningKey};
 use godot::classes::{INode, Node};
 use godot::prelude::*;
 use spurfire_net::{
-    decode, encode, rustscale::RustScalePeer, AcceptOutcome, PeerPayload, SessionState,
+    decode, encode, rustscale::RustScalePeer, AcceptOutcome, PeerPayload, SecureSession,
+    SessionState,
 };
-use spurfire_protocol::{LobbyId, PlayerId, RiderStance};
+use spurfire_protocol::{
+    canonical_keyreg_digest, LobbyId, LobbySessionProjection, NodeKey, PlayerId, RiderStance,
+    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature,
+};
 use tokio::time::Duration;
 use zeroize::Zeroizing;
 
@@ -30,9 +35,19 @@ enum WorkerCommand {
 }
 
 enum WorkerEvent {
-    Connected { ip: String, port: u16 },
-    Packet { packet: Vec<u8>, source: SocketAddr },
-    Route { peer_ip: String, route: String },
+    Connected {
+        ip: String,
+        port: u16,
+    },
+    Packet {
+        packet: Vec<u8>,
+        source: SocketAddr,
+        node_key: Option<NodeKey>,
+    },
+    Route {
+        peer_ip: String,
+        route: String,
+    },
     Failed(String),
     Stopped,
 }
@@ -120,7 +135,12 @@ fn run_worker(
             match peer.recv(Duration::from_millis(5)).await {
                 Ok((envelope, source)) => match encode(&envelope) {
                     Ok(packet) => {
-                        let _ = events.send(WorkerEvent::Packet { packet, source });
+                        let node_key = peer.node_key_for(source.ip());
+                        let _ = events.send(WorkerEvent::Packet {
+                            packet,
+                            source,
+                            node_key,
+                        });
                     }
                     Err(error) => {
                         let _ = events.send(WorkerEvent::Failed(error.to_string()));
@@ -161,6 +181,11 @@ pub struct PeerSession {
     #[var(no_set)]
     authority_epoch: i64,
     session: Option<SessionState>,
+    secure_session: Option<SecureSession>,
+    session_key: Option<Zeroizing<[u8; 32]>>,
+    session_key_generation: u64,
+    pinned_manifest_key: Option<(u64, SessionPublicKey)>,
+    insecure_demo_mode: bool,
     allowed_players: BTreeSet<PlayerId>,
     command_tx: Option<Sender<WorkerCommand>>,
     event_rx: Option<Receiver<WorkerEvent>>,
@@ -171,7 +196,12 @@ impl PeerSession {
     #[signal]
     fn connected(tailnet_ip: GString, local_port: i64);
     #[signal]
-    fn packet_received(packet: PackedByteArray, source_ip: GString, source_port: i64);
+    fn packet_received(
+        packet: PackedByteArray,
+        source_ip: GString,
+        source_port: i64,
+        source_node_key: GString,
+    );
     #[signal]
     fn route_updated(peer_ip: GString, route: GString);
     #[signal]
@@ -180,6 +210,202 @@ impl PeerSession {
     fn disconnected();
     #[signal]
     fn session_identity_bound(local_player_id: GString, authority_epoch: i64);
+
+    /// Enable legacy unsigned packets only for an explicit local demo/test.
+    #[func]
+    fn set_insecure_demo_mode(&mut self, enabled: bool) {
+        self.insecure_demo_mode = enabled;
+        if !enabled {
+            self.secure_session = None;
+        }
+    }
+
+    /// Generate a native-only Ed25519 key for one exact session generation.
+    #[func]
+    fn generate_session_key(&mut self, session_generation: i64) -> bool {
+        let Ok(session_generation) = u64::try_from(session_generation) else {
+            return false;
+        };
+        if self.session_key_generation == session_generation && self.session_key.is_some() {
+            return true;
+        }
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        if getrandom::getrandom(&mut *seed).is_err() {
+            return false;
+        }
+        self.session_key = Some(seed);
+        self.session_key_generation = session_generation;
+        self.secure_session = None;
+        true
+    }
+
+    /// Return only the public half of the current ephemeral session key.
+    #[func]
+    fn session_public_key(&self) -> GString {
+        let Some(seed) = &self.session_key else {
+            return GString::new();
+        };
+        let public =
+            SessionPublicKey::from_bytes(SigningKey::from_bytes(seed).verifying_key().to_bytes());
+        let encoded = serde_json::to_string(&public).unwrap_or_default();
+        GString::from(encoded.trim_matches('"'))
+    }
+
+    /// Produce a capability-bound registration proof without exporting the key.
+    #[func]
+    fn key_proof(
+        &self,
+        lobby_id: GString,
+        player_id: GString,
+        network_generation: i64,
+        roster_revision: i64,
+        address: GString,
+        port: i64,
+    ) -> GString {
+        let (
+            Some(seed),
+            Ok(lobby_id),
+            Ok(player_id),
+            Ok(network_generation),
+            Ok(roster_revision),
+            Ok(address),
+            Ok(port),
+        ) = (
+            &self.session_key,
+            LobbyId::parse(&lobby_id.to_string()),
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(network_generation),
+            u64::try_from(roster_revision),
+            address.to_string().parse::<IpAddr>(),
+            u16::try_from(port),
+        )
+        else {
+            return GString::new();
+        };
+        let signing = SigningKey::from_bytes(seed);
+        let public = SessionPublicKey::from_bytes(signing.verifying_key().to_bytes());
+        let digest = canonical_keyreg_digest(
+            lobby_id,
+            player_id,
+            network_generation,
+            roster_revision,
+            address,
+            port,
+            public,
+        );
+        let proof = SessionSignature::from_bytes(signing.sign(&digest).to_bytes());
+        let encoded = serde_json::to_string(&proof).unwrap_or_default();
+        GString::from(encoded.trim_matches('"'))
+    }
+
+    /// Pin or rotate the server manifest key. A changed key is accepted only
+    /// with a strictly newer session generation or before any secure manifest.
+    #[func]
+    fn bind_manifest_key(&mut self, encoded_key: GString, session_generation: i64) -> bool {
+        let Ok(session_generation) = u64::try_from(session_generation) else {
+            return false;
+        };
+        let Ok(key) = serde_json::from_str::<SessionPublicKey>(&format!("\"{}\"", encoded_key))
+        else {
+            return false;
+        };
+        if let Some((generation, pinned)) = self.pinned_manifest_key {
+            if key != pinned && session_generation <= generation && self.secure_session.is_some() {
+                return false;
+            }
+        }
+        self.pinned_manifest_key = Some((session_generation, key));
+        true
+    }
+
+    /// Verify and install a complete server-signed projection.
+    #[func]
+    fn configure_secure_session(
+        &mut self,
+        lobby_id: GString,
+        projection_json: GString,
+        now_ms: i64,
+    ) -> bool {
+        let (
+            Ok(lobby_id),
+            Ok(projection),
+            Ok(now_ms),
+            Some(seed),
+            Some((pinned_generation, pinned_key)),
+        ) = (
+            LobbyId::parse(&lobby_id.to_string()),
+            serde_json::from_str::<LobbySessionProjection>(&projection_json.to_string()),
+            u64::try_from(now_ms),
+            &self.session_key,
+            self.pinned_manifest_key,
+        )
+        else {
+            return false;
+        };
+        if !projection.secure
+            || projection.session_generation != self.session_key_generation
+            || projection.session_generation != pinned_generation
+            || projection.manifest_public_key != pinned_key
+            || projection.roster_hash.is_none()
+        {
+            return false;
+        }
+        let Some(signature) = projection.manifest_signature else {
+            return false;
+        };
+        let mut entries = Vec::with_capacity(projection.peers.len());
+        for peer in projection.peers {
+            let (Some(session_public_key), Ok(tailnet_address)) =
+                (peer.session_public_key, peer.tailnet_address.parse())
+            else {
+                return false;
+            };
+            entries.push(RosterManifestEntry {
+                player_id: peer.player_id,
+                session_public_key,
+                tailnet_address,
+                application_port: peer.application_port,
+                node_key: peer.node_key,
+            });
+        }
+        let manifest = RosterManifest {
+            lobby_id,
+            network_generation: projection.network_generation,
+            session_generation: projection.session_generation,
+            roster_revision: projection.roster_revision,
+            entries,
+        };
+        if manifest.hash() != projection.roster_hash.expect("checked present")
+            || manifest.entries.len() != self.allowed_players.len()
+            || manifest
+                .entries
+                .iter()
+                .any(|entry| !self.allowed_players.contains(&entry.player_id))
+        {
+            return false;
+        }
+        let Some(local_player) = PlayerId::parse(&self.local_player_id.to_string()).ok() else {
+            return false;
+        };
+        let Some(authority) = PlayerId::parse(&self.authority_player_id.to_string()).ok() else {
+            return false;
+        };
+        let public = SigningKey::from_bytes(seed).verifying_key().to_bytes();
+        if !manifest.entries.iter().any(|entry| {
+            entry.player_id == local_player && entry.session_public_key.as_bytes() == &public
+        }) {
+            return false;
+        }
+        let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
+        for player in &self.allowed_players {
+            state.add_peer(*player, now_ms);
+        }
+        let Ok(secure) = SecureSession::new(manifest, pinned_key, signature, state) else {
+            return false;
+        };
+        self.secure_session = Some(secure);
+        true
+    }
 
     /// Configure validated application identity and deterministic authority state.
     #[func]
@@ -259,6 +485,7 @@ impl PeerSession {
             session.add_peer(*player, now_ms);
         }
         self.session = Some(session);
+        self.secure_session = None;
         self.allowed_players = allowed_players;
         self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
@@ -466,10 +693,12 @@ impl PeerSession {
         result
     }
 
-    /// Validate one received packet. 0=accepted, 1=replay, 2=wrong lobby,
-    /// 3=stale epoch, 4=sender outside the selected roster, -1=invalid.
+    /// Legacy packet acceptance, available only after explicit demo/test opt-in.
     #[func]
     fn accept_packet(&mut self, packet: PackedByteArray, now_ms: i64) -> i64 {
+        if !self.insecure_demo_mode || self.secure_session.is_some() {
+            return -1;
+        }
         let (Some(session), Ok(envelope), Ok(now_ms)) = (
             self.session.as_mut(),
             decode(&packet.to_vec()),
@@ -477,18 +706,49 @@ impl PeerSession {
         ) else {
             return -1;
         };
-        if !self.allowed_players.contains(&envelope.sender) {
-            return 4;
-        }
         let outcome = session.accept(&envelope, now_ms);
         self.authority_player_id = GString::from(&session.authority().to_string());
         self.authority_epoch = i64::try_from(session.authority_epoch()).unwrap_or(i64::MAX);
-        match outcome {
-            AcceptOutcome::Accepted => 0,
-            AcceptOutcome::DuplicateOrReplay => 1,
-            AcceptOutcome::WrongLobby => 2,
-            AcceptOutcome::StaleAuthorityEpoch => 3,
-        }
+        Self::outcome_code(outcome)
+    }
+
+    /// Single native secure receive gate. Source and current node identity are
+    /// verified before replay, epoch, or authority state can mutate.
+    #[func]
+    fn accept_packet_with_source(
+        &mut self,
+        packet: PackedByteArray,
+        source_ip: GString,
+        source_port: i64,
+        source_node_key: GString,
+        now_ms: i64,
+    ) -> i64 {
+        let (Some(session), Ok(envelope), Ok(source_ip), Ok(source_port), Ok(now_ms)) = (
+            self.secure_session.as_mut(),
+            decode(&packet.to_vec()),
+            source_ip.to_string().parse::<IpAddr>(),
+            u16::try_from(source_port),
+            u64::try_from(now_ms),
+        ) else {
+            return -1;
+        };
+        let node_key = if source_node_key.is_empty() {
+            None
+        } else {
+            match NodeKey::parse(&source_node_key.to_string()) {
+                Ok(key) => Some(key),
+                Err(_) => return -1,
+            }
+        };
+        let outcome = session.accept_with_source(
+            &envelope,
+            SocketAddr::new(source_ip, source_port),
+            node_key,
+            now_ms,
+        );
+        self.authority_player_id = GString::from(&session.state().authority().to_string());
+        self.authority_epoch = i64::try_from(session.state().authority_epoch()).unwrap_or(i64::MAX);
+        Self::outcome_code(outcome)
     }
 
     /// Start enrollment on a background Tokio runtime. The auth key is never logged.
@@ -563,6 +823,10 @@ impl PeerSession {
     fn clear_lobby_session(&mut self) {
         self.shutdown();
         self.session = None;
+        self.secure_session = None;
+        self.session_key = None;
+        self.session_key_generation = 0;
+        self.pinned_manifest_key = None;
         self.allowed_players.clear();
         self.local_player_id = GString::new();
         self.authority_player_id = GString::new();
@@ -572,13 +836,42 @@ impl PeerSession {
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
-        let (Some(session), Ok(tick)) = (self.session.as_mut(), u64::try_from(tick)) else {
+        let Ok(tick) = u64::try_from(tick) else {
             return PackedByteArray::new();
         };
-        encode(&session.envelope(tick, payload)).map_or_else(
-            |_| PackedByteArray::new(),
-            |bytes| PackedByteArray::from(bytes.as_slice()),
-        )
+        let envelope = if let (Some(secure), Some(seed)) =
+            (self.secure_session.as_mut(), self.session_key.as_ref())
+        {
+            let signing = SigningKey::from_bytes(seed);
+            secure.envelope(tick, payload, &signing).ok()
+        } else if self.insecure_demo_mode {
+            self.session
+                .as_mut()
+                .map(|session| session.envelope(tick, payload))
+        } else {
+            None
+        };
+        envelope
+            .and_then(|envelope| encode(&envelope).ok())
+            .map_or_else(PackedByteArray::new, |bytes| {
+                PackedByteArray::from(bytes.as_slice())
+            })
+    }
+
+    const fn outcome_code(outcome: AcceptOutcome) -> i64 {
+        match outcome {
+            AcceptOutcome::Accepted => 0,
+            AcceptOutcome::DuplicateOrReplay => 1,
+            AcceptOutcome::WrongLobby => 2,
+            AcceptOutcome::StaleAuthorityEpoch => 3,
+            AcceptOutcome::UnknownSender => 4,
+            AcceptOutcome::UnsignedInSecureMode => 5,
+            AcceptOutcome::EndpointMismatch => 6,
+            AcceptOutcome::NodeKeyMismatch => 7,
+            AcceptOutcome::WrongGeneration => 8,
+            AcceptOutcome::RosterMismatch => 9,
+            AcceptOutcome::BadSignature => 10,
+        }
     }
 
     fn poll_events(&mut self) {
@@ -594,14 +887,21 @@ impl PeerSession {
                     let signal_ip = GString::from(&ip);
                     self.signals().connected().emit(&signal_ip, i64::from(port));
                 }
-                Ok(WorkerEvent::Packet { packet, source }) => {
+                Ok(WorkerEvent::Packet {
+                    packet,
+                    source,
+                    node_key,
+                }) => {
                     let signal_packet = PackedByteArray::from(packet.as_slice());
                     let source_ip = source.ip().to_string();
                     let signal_ip = GString::from(&source_ip);
+                    let signal_node =
+                        GString::from(&node_key.map_or_else(String::new, |key| key.to_string()));
                     self.signals().packet_received().emit(
                         &signal_packet,
                         &signal_ip,
                         i64::from(source.port()),
+                        &signal_node,
                     );
                 }
                 Ok(WorkerEvent::Route { peer_ip, route }) => {
@@ -645,6 +945,11 @@ impl INode for PeerSession {
             authority_player_id: GString::new(),
             authority_epoch: 0,
             session: None,
+            secure_session: None,
+            session_key: None,
+            session_key_generation: 0,
+            pinned_manifest_key: None,
+            insecure_demo_mode: false,
             allowed_players: BTreeSet::new(),
             command_tx: None,
             event_rx: None,

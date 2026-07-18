@@ -17,7 +17,7 @@ signal request_failed(operation: String, safe_message: String)
 
 const MAX_RESPONSE_BYTES := 64 * 1024
 const REQUEST_TIMEOUT_SECONDS := 8.0
-const WIRE_VERSION := "1.1"
+const WIRE_VERSION := "1.2"
 const AUTHORITY_FORMULA := "election_v1"
 
 var _origin := ""
@@ -94,20 +94,32 @@ func poll_lobby(lobby_id: String) -> void:
 func poll_network(lobby_id: String) -> void:
 	_request("network", HTTPClient.METHOD_GET, "/v1/lobbies/%s/network" % lobby_id, {}, _read_capability())
 
-func register_endpoint(lobby_id: String, network_generation: int, roster_revision: int, address: String, port: int) -> void:
-	if _participant_capability.is_empty() or network_generation <= 0 or address.is_empty() or port <= 0 or port > 65535:
+func register_endpoint(
+	lobby_id: String, network_generation: int, roster_revision: int,
+	address: String, port: int, session_public_key: String, key_proof: String,
+	node_key: String = ""
+) -> void:
+	if (
+		_participant_capability.is_empty() or network_generation <= 0
+		or address.is_empty() or port <= 0 or port > 65535
+		or session_public_key.is_empty() or key_proof.is_empty()
+	):
 		return
+	var body := {
+		"network_generation": network_generation,
+		"roster_revision": roster_revision,
+		"sequence": Time.get_ticks_msec(),
+		"tailnet_address": address,
+		"application_port": port,
+		"session_public_key": session_public_key,
+		"key_proof": key_proof,
+	}
+	if not node_key.is_empty():
+		body["node_key"] = node_key
 	_request(
 		"endpoint", HTTPClient.METHOD_POST,
 		"/v1/lobbies/%s/session/endpoint" % lobby_id,
-		{
-			"network_generation": network_generation,
-			"roster_revision": roster_revision,
-			"sequence": Time.get_ticks_msec(),
-			"tailnet_address": address,
-			"application_port": port,
-		},
-		_participant_capability, true
+		body, _participant_capability, true
 	)
 
 func submit_measurements(lobby_id: String, report: Dictionary) -> void:

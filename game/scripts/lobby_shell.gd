@@ -35,6 +35,8 @@ var _lobby: Dictionary = {}
 var _network_view: Dictionary = {}
 var _network_generation := 0
 var _roster_revision := 0
+var _session_generation := 0
+var _manifest_public_key := ""
 var _course: Node = null
 var _bridge: SpurfireLobbyPeerBridge = null
 var _creator_join_pending := false
@@ -184,6 +186,16 @@ func _on_joined(response: Dictionary, enrollment_key: String) -> void:
 		return
 	_lobby = lobby_value as Dictionary
 	_lobby_id = str(_lobby.get("lobby_id", _lobby_id))
+	_session_generation = int(response.get("session_generation", 0))
+	_manifest_public_key = str(response.get("manifest_public_key", ""))
+	if (
+		_manifest_public_key.is_empty()
+		or not peer_session.bind_manifest_key(_manifest_public_key, _session_generation)
+		or not peer_session.generate_session_key(_session_generation)
+	):
+		enrollment_key = ""
+		_on_request_failed("join", SpurfireLobbyContract.SAFE_LOBBY_ERROR)
+		return
 	if not _prepare_network_course(response):
 		enrollment_key = ""
 		waiting_status.text = "Joined the roster, but peer setup failed. Leaving safely…"
@@ -243,7 +255,13 @@ func _try_register_endpoint(address: String = "", port: int = 0, force: bool = f
 		address = str(peer_session.get("tailnet_ip"))
 	if port <= 0:
 		port = int(peer_session.get("local_port"))
-	api.register_endpoint(_lobby_id, _network_generation, _roster_revision, address, port)
+	var public_key := str(peer_session.session_public_key())
+	var proof := str(peer_session.key_proof(
+		_lobby_id, _player_id, _network_generation, _roster_revision, address, port
+	))
+	api.register_endpoint(
+		_lobby_id, _network_generation, _roster_revision, address, port, public_key, proof
+	)
 
 func _on_endpoint_registered(response: Dictionary) -> void:
 	_endpoint_registered = true
@@ -272,6 +290,18 @@ func _on_lobby_updated(response: Dictionary) -> void:
 		_lobby = lobby_value as Dictionary
 	_network_generation = int(response.get("network_generation", _network_generation))
 	_authority_input_hash = str(response.get("authority_input_hash", _authority_input_hash))
+	var next_session_generation := int(response.get("session_generation", _session_generation))
+	var next_manifest_key := str(response.get("manifest_public_key", _manifest_public_key))
+	if next_session_generation != _session_generation or next_manifest_key != _manifest_public_key:
+		if (
+			not peer_session.bind_manifest_key(next_manifest_key, next_session_generation)
+			or not peer_session.generate_session_key(next_session_generation)
+		):
+			_on_peer_failed("session identity rebind failed")
+			return
+		_session_generation = next_session_generation
+		_manifest_public_key = next_manifest_key
+		_endpoint_registered = false
 	var next_roster_revision := int(response.get("roster_revision", _lobby.get("roster_revision", 0)))
 	if next_roster_revision != _roster_revision:
 		_roster_revision = next_roster_revision

@@ -223,11 +223,12 @@ func _check_peer_session(failures: Array[String]) -> void:
 	if peer_session == null:
 		failures.append("PeerSession could not be instantiated")
 		return
-	for method in ["configure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "connect_rustscale", "send_packet", "query_route", "shutdown"]:
+	for method in ["configure_session", "generate_session_key", "session_public_key", "key_proof", "configure_secure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "accept_packet_with_source", "connect_rustscale", "send_packet", "query_route", "shutdown"]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks %s" % method)
 	if not peer_session.has_signal("packet_received") or not peer_session.has_signal("route_updated"):
 		failures.append("PeerSession lacks packet or route telemetry signals")
+	peer_session.call("set_insecure_demo_mode", true)
 	var configured := bool(peer_session.call(
 		"configure_session",
 		"00000000-0000-4000-8000-000000000001",

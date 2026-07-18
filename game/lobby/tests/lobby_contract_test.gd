@@ -73,6 +73,8 @@ func _check_peer_roster_binding(failures: Array[String]) -> void:
 		return
 	add_child(receiver)
 	add_child(outsider)
+	receiver.set_insecure_demo_mode(true)
+	outsider.set_insecure_demo_mode(true)
 	var roster := PackedStringArray([PLAYER_A, PLAYER_B])
 	if not receiver.configure_roster_session(LOBBY_ID, PLAYER_A, PLAYER_A, roster, 1):
 		failures.append("exact roster session configuration failed")

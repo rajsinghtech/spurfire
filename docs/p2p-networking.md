@@ -44,8 +44,9 @@ On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRA
 - Never pass organization or child OAuth credentials to Godot.
 - Never print auth keys. The live script writes them only to its private temporary directory and deletes that directory on every exit path.
 - Datagram size is checked before JSON parsing and before send.
-- The current prototype checks the envelope player against the exact roster and the datagram source against the capability-projected tailnet IP/port. That is not cryptographic application identity; an admitted/compromised member remains able to forge another rider until signed generation/session/roster binding lands.
-- Sequence rejection limits replay within one in-memory peer session only. Real product readiness is forced closed while cryptographic binding and coherent authority simulation remain incomplete.
+- Wire 1.2 binds each gameplay datagram to the exact lobby, network generation, session generation, signed complete-roster hash, sender, authority epoch, sequence, tick, and canonical fixed-layout payload with a native-only ephemeral Ed25519 key. RustScale's cryptokey routing authenticates the tailnet source IP; the native receive gate checks that IP/port against the signed manifest before signature, replay, epoch, or authority state can mutate. A current netmap node-key claim is an advisory WireGuard cross-check, never an application signing key.
+- The capability-bound endpoint route verifies key possession, rejects duplicate IP/node claims, and returns a server-signed complete projection. Server restart cannot reuse its memory-only manifest key silently: active sessions bump generation and must re-key/re-register. Unknown senders never auto-insert. Unsigned packets remain available only after explicit local demo/test opt-in.
+- This defeats cross-player forgery and cross-lobby/generation/session replay. It does not make a peer's own gameplay claims truthful, defeat control-plane/Tailscale compromise, prevent dropping/DoS, or solve ranked verification. Real product readiness remains forced closed on the coherent authority and native secret-handoff gates.
 
 ## Remaining production work
 
@@ -61,10 +62,9 @@ Design for the first four items is settled in `docs/decisions.md` D6/D7 and
 - Add lag compensation (D7): authority-side rewind over ~250 ms position + stance history,
   capped at 150 ms; stance must be in snapshots from M2 onward.
 - The Alpha shell now drives `PeerSession` from invitation join and consumes a
-  capability-protected, memory-only endpoint projection bound to the exact roster/network
-  generation/revision. Replace the remaining GDScript HTTP secret boundary with native
-  zeroizing handoff and extend the projection with signed session-generation/public-key binding.
-- Add authenticated session-level signatures bound to lobby, network generation, session generation, roster hash, sender public key, and endpoint; this is mandatory before real readiness can open.
+  capability-protected, server-signed, memory-only endpoint/key projection bound to the exact
+  roster, network/session generation, and revision. Replace the remaining GDScript HTTP secret
+  boundary with native zeroizing HTTPS handoff before real activation.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
 - Exercise forced DERP, route transitions, roaming, packet loss, and 16-peer churn.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.

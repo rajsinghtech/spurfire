@@ -9,6 +9,8 @@ use thiserror::Error;
 use tokio::time::{timeout, Duration};
 use zeroize::Zeroizing;
 
+use spurfire_protocol::NodeKey;
+
 use crate::{decode, encode, CodecError, Envelope};
 
 #[derive(Debug, Error)]
@@ -103,6 +105,18 @@ impl RustScalePeer {
             .into_iter()
             .find(|peer| peer.ips.contains(&peer_ip))
             .map(|peer| format!("{:?}", peer.path_class))
+    }
+
+    /// Maps a WireGuard-authenticated source IP to the current netmap node key.
+    /// Rotation changes this value and therefore requires a fresh registration.
+    #[must_use]
+    pub fn node_key_for(&self, peer_ip: IpAddr) -> Option<NodeKey> {
+        self.server
+            .status()
+            .peers
+            .into_iter()
+            .find(|peer| peer.ips.contains(&peer_ip))
+            .and_then(|peer| NodeKey::parse(&peer.node_key.to_string()).ok())
     }
 
     pub async fn send(
