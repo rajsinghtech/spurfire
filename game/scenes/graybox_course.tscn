@@ -227,7 +227,7 @@ position = Vector3(0, 1.35, -1.35)
 scale = Vector3(0.3, 0.3, 0.3)
 mesh = SubResource("CapsuleMesh_horse")
 
-[node name="Rider" type="SaddleDiveController" parent="." node_paths=PackedStringArray("horse_path", "saddle_path", "collision_shape_path", "weapon_controller_path")]
+[node name="Rider" type="SaddleDiveController" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.92, 25)
 horse_path = NodePath("../Horse")
 saddle_path = NodePath("../Horse/SaddleProxy")

@@ -281,18 +281,12 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	await _reset_course_with_input()
 	await _wait_until_grounded(horse, 90)
 	horse.velocity = Vector3(0, 0, -7.999)
-	Input.action_press(&"combat_interact")
-	await get_tree().physics_frame
-	Input.action_release(&"combat_interact")
-	await get_tree().physics_frame
+	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_ON_FOOT or int(rider.get("dive_id")) != -1:
 		failures.append("7999 mm/s E did not ordinary-dismount without DiveId")
 	if not bool(horse.get("is_retrievable")):
 		failures.append("ordinary dismount horse was not immediately retrievable")
-	Input.action_press(&"combat_interact")
-	await get_tree().physics_frame
-	Input.action_release(&"combat_interact")
-	await get_tree().physics_frame
+	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_MOUNTED:
 		failures.append("stationary E remount did not attach to existing horse")
 
@@ -316,9 +310,7 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	# horse object running out under collision feedback.
 	var horse_identity := horse.get_instance_id()
 	horse.velocity = Vector3(0, 0, -8.0)
-	Input.action_press(&"combat_interact")
-	await get_tree().physics_frame
-	Input.action_release(&"combat_interact")
+	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_DIVE or int(rider.get("dive_id")) <= 0:
 		failures.append("8000 mm/s E did not start Saddle Dive")
 		return
@@ -467,16 +459,13 @@ func _exercise_bridge_caps(failures: Array[String]) -> void:
 		await get_tree().process_frame
 
 func _reset_course_with_input() -> void:
-	Input.action_press(&"reset_horse")
-	await get_tree().physics_frame
-	Input.action_release(&"reset_horse")
-	await get_tree().physics_frame
+	await _pulse_action(&"reset_horse")
 
 func _pulse_action(action: StringName) -> void:
 	Input.action_press(action)
-	await get_tree().physics_frame
+	await _wait_physics_frames(2)
 	Input.action_release(action)
-	await get_tree().physics_frame
+	await _wait_physics_frames(2)
 
 func _wait_until_grounded(body: CharacterBody3D, maximum_frames: int) -> void:
 	for _frame in maximum_frames:
