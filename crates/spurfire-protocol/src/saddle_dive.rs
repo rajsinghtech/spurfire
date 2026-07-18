@@ -1550,10 +1550,7 @@ impl SaddleDiveKernel {
         tick: SimulationTick,
         effects: &mut SaddleDiveEffects,
     ) {
-        loop {
-            let Some(landing) = self.landing else {
-                break;
-            };
+        while let Some(landing) = self.landing {
             match self.state {
                 SaddleDiveState::LandingProne => {
                     let prone_ticks =
