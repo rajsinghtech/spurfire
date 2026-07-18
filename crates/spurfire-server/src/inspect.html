@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Spurfire lobby network inspector</title>
+  <style>
+    :root{color-scheme:dark;background:#11100d;color:#f4ead6;font:16px/1.45 system-ui,sans-serif}body{max-width:74rem;margin:auto;padding:2rem}h1{color:#ffc45c}form{display:grid;grid-template-columns:1fr 1fr auto;gap:.75rem;background:#201d17;padding:1rem;border:1px solid #554936;border-radius:.5rem}label{display:grid;gap:.3rem}input,button{font:inherit;padding:.65rem;border-radius:.3rem;border:1px solid #76664c;background:#11100d;color:inherit}button{background:#8d3e25;border-color:#b95c39;font-weight:700;cursor:pointer}.notice{border-left:.25rem solid #ffc45c;padding:.75rem 1rem;background:#201d17}.error{color:#ffac94}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.75rem;margin-top:1rem}.card{background:#201d17;border:1px solid #554936;border-radius:.5rem;padding:1rem}.card h2{font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:#d6b57b;margin:0 0 .5rem}.value{font-size:1.15rem;font-weight:700;overflow-wrap:anywhere}.meta{font-size:.82rem;color:#b9aa91}code{color:#ffd795}@media(max-width:50rem){form{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <h1>Selected lobby network</h1>
+  <p class="notice">Inspect one exact lobby. The lobby ID is only an identifier; the separate capability authorizes this read. The capability stays in this page's memory and is never put in a URL or browser storage.</p>
+  <form id="selection" autocomplete="off">
+    <label>Lobby ID<input id="lobby" required inputmode="text" autocomplete="off" spellcheck="false" placeholder="00000000-0000-4000-8000-000000000000"></label>
+    <label>Lobby capability<input id="capability" required type="password" autocomplete="off" spellcheck="false" placeholder="Paste capability"></label>
+    <button type="submit">Inspect</button>
+  </form>
+  <p id="status" role="status"></p>
+  <section id="view" class="grid" aria-live="polite"></section>
+<script>
+(() => {
+  'use strict';
+  let selectedCapability = '';
+  const form = document.getElementById('selection');
+  const status = document.getElementById('status');
+  const view = document.getElementById('view');
+  const text = (value) => value === null || value === undefined ? 'Unknown' : String(value);
+  const fact = (value) => value && typeof value === 'object' && 'value' in value ? value : null;
+  const card = (title, value, detail) => {
+    const article = document.createElement('article'); article.className = 'card';
+    const heading = document.createElement('h2'); heading.textContent = title;
+    const primary = document.createElement('div'); primary.className = 'value'; primary.textContent = text(value);
+    const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = detail || '';
+    article.append(heading, primary, meta); return article;
+  };
+  const factCard = (title, envelope) => {
+    const item = fact(envelope);
+    return card(title, item ? item.value : null, item ? `${item.source} · ${item.assurance} · ${item.freshness}${item.unknown_reason ? ` · ${item.unknown_reason}` : ''}` : 'unknown');
+  };
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); view.replaceChildren(); status.className = ''; status.textContent = 'Loading cached network state…';
+    const lobby = document.getElementById('lobby').value.trim();
+    const input = document.getElementById('capability'); selectedCapability = input.value; input.value = '';
+    try {
+      const response = await fetch(`/v1/lobbies/${encodeURIComponent(lobby)}/network`, {
+        method: 'GET', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+        headers: {'Authorization': `Spurfire-Capability ${selectedCapability}`, 'Accept': 'application/json'}
+      });
+      selectedCapability = '';
+      const body = await response.json();
+      if (!response.ok) throw new Error(body && body.code === 'lobby_not_found' ? 'Lobby not found or capability not accepted.' : 'Inspection failed.');
+      status.textContent = body.truth_label;
+      const authority = fact(body.authority.control_election);
+      const winner = authority && authority.value ? authority.value.winner_player_id : null;
+      view.append(
+        card('Network lifecycle', body.backing.network_lifecycle, `${body.backing.backing_mode} · ${body.backing.isolation} · generation ${body.backing.network_generation}`),
+        factCard('Tailnet DNS name / FQDN', body.backing.tailnet_dns_name),
+        factCard('Roster', body.counts.roster_count),
+        factCard('Provider-enrolled devices', body.counts.provider_enrolled_device_count),
+        factCard('Fresh reporters', body.counts.fresh_reporter_count),
+        factCard('Directional observations', body.counts.fresh_directional_observation_count),
+        factCard('Direct routes', body.routes.direct_count),
+        factCard('Peer Relay routes', body.routes.peer_relay_count),
+        factCard('DERP Relay routes', body.routes.derp_relay_count),
+        factCard('Application RTT median (ms)', body.application_quality.application_rtt_ms_median),
+        card('Control election winner', winner, authority ? `${authority.source} · ${authority.assurance} · ${authority.freshness}` : 'unknown'),
+        card('Cleanup', body.cleanup.participant_safe_reason, body.cleanup.network_lifecycle)
+      );
+    } catch (error) {
+      selectedCapability = ''; status.className = 'error'; status.textContent = error instanceof Error ? error.message : 'Inspection failed.';
+    }
+  });
+})();
+</script>
+</body>
+</html>

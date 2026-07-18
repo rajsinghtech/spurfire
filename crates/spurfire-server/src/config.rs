@@ -23,6 +23,11 @@ pub struct Config {
     pub provisioning_mode: ProvisioningMode,
     /// Explicit service-wide simulation switch.
     pub force_dry_run: bool,
+    /// Independent fail-closed gate for every real provider mutation.
+    ///
+    /// Credentials and a real provisioning mode are insufficient without this
+    /// switch. It defaults off and Ottawa must keep it off.
+    pub real_mutations_enabled: bool,
     /// Shared tailnet selector passed to Tailscale (`-` means the token's tailnet).
     pub shared_tailnet: String,
     /// Durable non-secret state path used in real mode.
@@ -39,6 +44,7 @@ impl Default for Config {
             max_players: MAX_PLAYERS,
             provisioning_mode: ProvisioningMode::SharedTailnet,
             force_dry_run: false,
+            real_mutations_enabled: false,
             shared_tailnet: DEFAULT_SHARED_TAILNET.to_owned(),
             state_path: PathBuf::from(DEFAULT_STATE_PATH),
         }
@@ -54,6 +60,7 @@ impl fmt::Debug for Config {
             .field("max_players", &self.max_players)
             .field("provisioning_mode", &self.provisioning_mode)
             .field("force_dry_run", &self.force_dry_run)
+            .field("real_mutations_enabled", &self.real_mutations_enabled)
             .field("shared_tailnet", &"<configured>")
             .field("state_path", &self.state_path)
             .finish()
@@ -66,7 +73,8 @@ impl Config {
     /// Supported variables are `SPURFIRE_BIND_ADDR`,
     /// `SPURFIRE_DRY_RUN_TTL_SECS`, `SPURFIRE_MAX_PLAYERS`,
     /// `SPURFIRE_PROVISIONING_MODE`, `SPURFIRE_SHARED_TAILNET`,
-    /// `SPURFIRE_STATE_PATH`, and `SPURFIRE_DRY_RUN`.
+    /// `SPURFIRE_STATE_PATH`, `SPURFIRE_DRY_RUN`, and
+    /// `SPURFIRE_REAL_MUTATIONS_ENABLED`.
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
@@ -107,18 +115,22 @@ impl Config {
             config.state_path = PathBuf::from(value);
         }
         if let Some(value) = env_value("SPURFIRE_DRY_RUN")? {
-            config.force_dry_run = match value.as_str() {
-                "1" => true,
-                "0" => false,
-                _ => return Err(ConfigError::InvalidDryRun),
-            };
+            config.force_dry_run = parse_binary_switch(&value, ConfigError::InvalidDryRun)?;
+        }
+        if let Some(value) = env_value("SPURFIRE_REAL_MUTATIONS_ENABLED")? {
+            config.real_mutations_enabled =
+                parse_binary_switch(&value, ConfigError::InvalidRealMutationsSwitch)?;
         }
 
+        if config.force_dry_run && config.real_mutations_enabled {
+            return Err(ConfigError::ConflictingMutationSwitches);
+        }
         if config.provisioning_mode == ProvisioningMode::DryRun && !config.force_dry_run {
             return Err(ConfigError::DryRunRequiresOptIn);
         }
         if config.force_dry_run {
             config.provisioning_mode = ProvisioningMode::DryRun;
+            config.real_mutations_enabled = false;
         }
         Ok(config)
     }
@@ -135,6 +147,14 @@ fn env_value(name: &'static str) -> Result<Option<String>, ConfigError> {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::NonUnicode(name)),
+    }
+}
+
+fn parse_binary_switch(value: &str, error: ConfigError) -> Result<bool, ConfigError> {
+    match value {
+        "1" => Ok(true),
+        "0" => Ok(false),
+        _ => Err(error),
     }
 }
 
@@ -171,6 +191,12 @@ pub enum ConfigError {
     /// Dry-run switch was neither zero nor one.
     #[error("SPURFIRE_DRY_RUN must be 0 or 1")]
     InvalidDryRun,
+    /// Real-mutation switch was neither zero nor one.
+    #[error("SPURFIRE_REAL_MUTATIONS_ENABLED must be 0 or 1")]
+    InvalidRealMutationsSwitch,
+    /// Simulation and real mutation cannot both be requested.
+    #[error("SPURFIRE_DRY_RUN=1 conflicts with SPURFIRE_REAL_MUTATIONS_ENABLED=1")]
+    ConflictingMutationSwitches,
     /// Shared tailnet selector was empty.
     #[error("SPURFIRE_SHARED_TAILNET must not be empty")]
     InvalidSharedTailnet,

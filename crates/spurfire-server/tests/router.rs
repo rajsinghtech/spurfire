@@ -11,11 +11,16 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use spurfire_protocol::{ProvisioningMode, ResponseMetadata, UnixMillis, DRY_RUN_AUTH_KEY};
+use spurfire_protocol::{
+    NetworkLifecycle, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
+    DRY_RUN_AUTH_KEY,
+};
 use spurfire_server::{
     build_router, AppState, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider,
-    InMemoryStore, ManualClock, MintCredentialRequest, MintedCredential, NetworkProvider,
-    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderError, SecretString,
+    InMemoryStore, JsonFileStore, ManualClock, MintCredentialRequest, MintedCredential,
+    NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
+    ProviderCapabilities, ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity,
+    SecretString, TailnetPresenceRequest,
 };
 use tower::ServiceExt;
 
@@ -32,6 +37,13 @@ struct RecordingProvider {
     fail_mint_scopes: AtomicBool,
     missing_child_secret: AtomicBool,
     pending_cleanup_calls: AtomicU64,
+    observations: AtomicU64,
+    observed_device_count: AtomicU64,
+    fail_observations: AtomicBool,
+    presence_polls: AtomicU64,
+    tailnet_present: AtomicBool,
+    fail_identity_cleanup: AtomicBool,
+    fail_secret_erasure: AtomicBool,
     cleanup_requests: Mutex<Vec<CleanupLobbyRequest>>,
 }
 
@@ -45,6 +57,13 @@ impl RecordingProvider {
             fail_mint_scopes: AtomicBool::new(false),
             missing_child_secret: AtomicBool::new(false),
             pending_cleanup_calls: AtomicU64::new(0),
+            observations: AtomicU64::new(0),
+            observed_device_count: AtomicU64::new(2),
+            fail_observations: AtomicBool::new(false),
+            presence_polls: AtomicU64::new(0),
+            tailnet_present: AtomicBool::new(false),
+            fail_identity_cleanup: AtomicBool::new(false),
+            fail_secret_erasure: AtomicBool::new(false),
             cleanup_requests: Mutex::new(Vec::new()),
         }
     }
@@ -95,6 +114,22 @@ impl RecordingProvider {
     fn cleanup_requests(&self) -> Vec<CleanupLobbyRequest> {
         self.cleanup_requests.lock().unwrap().clone()
     }
+
+    fn observation_count(&self) -> u64 {
+        self.observations.load(Ordering::SeqCst)
+    }
+
+    fn fail_observations(&self) {
+        self.fail_observations.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_identity_cleanup(&self) {
+        self.fail_identity_cleanup.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_secret_erasure(&self) {
+        self.fail_secret_erasure.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -107,6 +142,7 @@ impl NetworkProvider for RecordingProvider {
         &self,
         _lobby_id: spurfire_protocol::LobbyId,
         mode: ProvisioningMode,
+        _network_lifecycle: NetworkLifecycle,
         dry_run: bool,
     ) -> Option<ProviderError> {
         (!dry_run
@@ -122,14 +158,20 @@ impl NetworkProvider for RecordingProvider {
         if request.mode == ProvisioningMode::TailnetPerLobby && !request.dry_run {
             self.mutations.fetch_add(1, Ordering::SeqCst);
         }
+        let tailnet = if request.dry_run {
+            "dry-run.invalid"
+        } else if request.mode == ProvisioningMode::TailnetPerLobby {
+            "child-test.ts.net"
+        } else {
+            "shared-test.ts.net"
+        };
         Ok(PreparedNetwork {
-            tailnet: if request.dry_run {
-                "dry-run.invalid".to_owned()
-            } else if request.mode == ProvisioningMode::TailnetPerLobby {
-                "child-test.ts.net".to_owned()
-            } else {
-                "-".to_owned()
-            },
+            tailnet: tailnet.to_owned(),
+            identity: (!request.dry_run).then(|| ProviderNetworkIdentity {
+                provider_tailnet_id: (request.mode == ProvisioningMode::TailnetPerLobby)
+                    .then(|| "TtRouterCNTRL".to_owned()),
+                tailnet_dns_name: TailnetDnsName::parse(tailnet).unwrap(),
+            }),
             dry_run: request.dry_run,
             metadata: ResponseMetadata {
                 dry_run: request.dry_run,
@@ -171,6 +213,9 @@ impl NetworkProvider for RecordingProvider {
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError> {
         self.cleanups.fetch_add(1, Ordering::SeqCst);
+        if self.fail_identity_cleanup.load(Ordering::SeqCst) {
+            return Err(ProviderError::IdentityMismatch);
+        }
         if request.mode == ProvisioningMode::TailnetPerLobby
             && self.missing_child_secret.load(Ordering::SeqCst)
         {
@@ -193,6 +238,11 @@ impl NetworkProvider for RecordingProvider {
             });
         }
         Ok(CleanupOutcome {
+            delete_acknowledged: request.mode == ProvisioningMode::TailnetPerLobby
+                && request.include_devices,
+            child_secret_erased: request.mode == ProvisioningMode::TailnetPerLobby
+                && request.include_devices
+                && !self.fail_secret_erasure.load(Ordering::SeqCst),
             revoked_credential_ids: request
                 .credentials
                 .iter()
@@ -205,6 +255,30 @@ impl NetworkProvider for RecordingProvider {
             },
             ..CleanupOutcome::default()
         })
+    }
+
+    async fn observe_network(
+        &self,
+        _request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
+        if self.fail_observations.load(Ordering::SeqCst) {
+            return Err(ProviderError::InsufficientScopes {
+                operation: "device_inventory",
+            });
+        }
+        Ok(ProviderDeviceObservation {
+            enrolled_device_count: u32::try_from(self.observed_device_count.load(Ordering::SeqCst))
+                .unwrap(),
+        })
+    }
+
+    async fn tailnet_present(
+        &self,
+        _request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        self.presence_polls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.tailnet_present.load(Ordering::SeqCst))
     }
 }
 
@@ -227,7 +301,12 @@ fn live_app(
     provider: Arc<RecordingProvider>,
 ) -> (Router, AppState, Arc<InMemoryStore>) {
     let store = Arc::new(InMemoryStore::new());
-    let state = AppState::new(Config::default(), store.clone(), provider).with_clock(clock);
+    let config = Config {
+        real_mutations_enabled: true,
+        shared_tailnet: "shared-test.ts.net".to_owned(),
+        ..Config::default()
+    };
+    let state = AppState::new(config, store.clone(), provider).with_clock(clock);
     (build_router(state.clone()), state, store)
 }
 
@@ -339,6 +418,18 @@ async fn measurement(
     .await
 }
 
+async fn network(app: &Router, lobby_id: &str, capability: &str) -> (StatusCode, Value) {
+    let authorization = format!("Spurfire-Capability {capability}");
+    json_request(
+        app,
+        Method::GET,
+        &format!("/v1/lobbies/{lobby_id}/network"),
+        None,
+        &[("authorization", authorization.as_str())],
+    )
+    .await
+}
+
 async fn get(app: &Router, lobby_id: &str) -> (StatusCode, Value) {
     json_request(
         app,
@@ -346,6 +437,18 @@ async fn get(app: &Router, lobby_id: &str) -> (StatusCode, Value) {
         &format!("/v1/lobbies/{lobby_id}"),
         None,
         &[],
+    )
+    .await
+}
+
+async fn get_authorized(app: &Router, lobby_id: &str, capability: &str) -> (StatusCode, Value) {
+    let authorization = format!("Spurfire-Capability {capability}");
+    json_request(
+        app,
+        Method::GET,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("authorization", authorization.as_str())],
     )
     .await
 }
@@ -393,6 +496,37 @@ async fn landing_page_links_public_downloads_and_sets_browser_headers() {
 }
 
 #[tokio::test]
+async fn inspector_shell_is_no_store_exact_selection_and_has_no_embedded_secret() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(0)));
+    let (app, _, _) = dry_app(clock, Arc::new(DryRunProvider::new()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/inspect")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert!(response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("default-src 'none'"));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("Selected lobby network"));
+    assert!(html.contains("Spurfire-Capability"));
+    assert!(!html.contains("localStorage"));
+    assert!(!html.contains("sessionStorage"));
+    assert!(!html.contains("synthetic-auth-key"));
+    assert!(!html.contains("oauth"));
+    assert!(!html.contains("packet capture"));
+}
+
+#[tokio::test]
 async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     let clock = Arc::new(ManualClock::new(UnixMillis::new(1_000_000)));
     let provider = Arc::new(DryRunProvider::new());
@@ -409,6 +543,7 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(created["dry_run"], true);
     assert_eq!(created["planned_actions"], json!([]));
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let network_capability = created["creator_capability"].as_str().unwrap();
     assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
 
     make_ready(
@@ -461,6 +596,21 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(heartbeat["state"], "IN_MATCH");
+    let (_, network_view) = network(&app, lobby_id, network_capability).await;
+    assert_eq!(
+        network_view["authority"]["last_accepted_heartbeat"]["value"]["player_id"],
+        PLAYER_1
+    );
+    assert_eq!(
+        network_view["authority"]["last_accepted_heartbeat"]["assurance"],
+        "authoritative"
+    );
+    assert!(
+        network_view["authority"]["last_accepted_heartbeat"]["value"]["epoch"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 
     let (status, results) = json_request(
         &app,
@@ -487,6 +637,407 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(results["state"], "CLOSING");
     assert_eq!(get(&app, lobby_id).await.1["state"], "DESTROYED");
     assert_eq!(provider.mutating_call_count(), 0);
+}
+
+#[tokio::test]
+async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_real() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_000_000)));
+    let provider = Arc::new(DryRunProvider::new());
+    let (app, _, _) = dry_app(clock, provider.clone());
+    let (status, created) = create(&app, "create-network-dry", "tailnet_per_lobby", 2).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+    assert_eq!(capability.len(), 64);
+    assert!(capability
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')));
+    let (_, anonymous_lobby) = get(&app, lobby_id).await;
+    assert_eq!(anonymous_lobby["provisioning_mode"], "dry_run");
+    assert_eq!(anonymous_lobby["roster_count"], 0);
+    for omitted in [
+        "display_name",
+        "state_reason",
+        "roster",
+        "map_seed",
+        "authority",
+    ] {
+        assert!(anonymous_lobby.get(omitted).is_none(), "exposed {omitted}");
+    }
+
+    let unauthorized_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/lobbies/{lobby_id}/network"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        unauthorized_response.headers()["cache-control"],
+        "private, no-store"
+    );
+    assert_eq!(unauthorized_response.headers()["vary"], "Authorization");
+    assert_eq!(
+        unauthorized_response.headers()["referrer-policy"],
+        "no-referrer"
+    );
+    let missing_status = unauthorized_response.status();
+    let missing: Value = serde_json::from_slice(
+        &unauthorized_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    let (wrong_status, wrong) = network(
+        &app,
+        lobby_id,
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(wrong_status, StatusCode::NOT_FOUND);
+    assert_eq!(missing, wrong);
+    assert_eq!(missing["code"], "lobby_not_found");
+
+    let (status, view) = network(&app, lobby_id, capability).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(view["truth_label"], "SIMULATED — NO TAILNET EXISTS");
+    assert_eq!(view["backing"]["backing_mode"], "dry_run");
+    assert_eq!(view["backing"]["simulates_mode"], "tailnet_per_lobby");
+    assert_eq!(view["backing"]["network_lifecycle"], "SIMULATED");
+    assert!(view["backing"]["tailnet_dns_name"]["value"].is_null());
+    assert_eq!(view["backing"]["control_service_member"]["value"], false);
+    assert_eq!(provider.mutating_call_count(), 0);
+    let wire = view.to_string();
+    assert!(!wire.contains(capability));
+    for forbidden in [
+        "dry-run.invalid",
+        "provisioning.invalid",
+        "provider_tailnet_id",
+        "auth_key",
+        "oauth",
+        "device_id",
+    ] {
+        assert!(!wire.contains(forbidden), "leaked {forbidden}");
+    }
+
+    let (replay_status, replay) = create(&app, "create-network-dry", "tailnet_per_lobby", 2).await;
+    assert_eq!(replay_status, StatusCode::OK);
+    assert!(replay.get("creator_capability").is_none());
+}
+
+#[tokio::test]
+async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_100_000)));
+    let dedicated_provider = Arc::new(RecordingProvider::available());
+    let (dedicated_app, _, _) = live_app(clock.clone(), dedicated_provider);
+    let (_, dedicated) = create(
+        &dedicated_app,
+        "create-network-dedicated",
+        "tailnet_per_lobby",
+        2,
+    )
+    .await;
+    let dedicated_id = dedicated["lobby_id"].as_str().unwrap();
+    let dedicated_capability = dedicated["creator_capability"].as_str().unwrap();
+    let (_, view) = network(&dedicated_app, dedicated_id, dedicated_capability).await;
+    assert_eq!(view["truth_label"], "REAL — DEDICATED TAILNET");
+    assert_eq!(view["backing"]["isolation"], "dedicated");
+    assert_eq!(view["backing"]["network_lifecycle"], "ACTIVE");
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["value"],
+        "child-test.ts.net"
+    );
+    assert!(view.get("provider_tailnet_id").is_none());
+    assert!(view.to_string().find("TtRouterCNTRL").is_none());
+
+    let shared_provider = Arc::new(RecordingProvider::available());
+    let (shared_app, _, _) = live_app(clock, shared_provider);
+    let (_, shared) = create(&shared_app, "create-network-shared", "shared_tailnet", 2).await;
+    let shared_id = shared["lobby_id"].as_str().unwrap();
+    let shared_capability = shared["creator_capability"].as_str().unwrap();
+    let (_, view) = network(&shared_app, shared_id, shared_capability).await;
+    assert_eq!(view["truth_label"], "REAL — SHARED COMPATIBILITY");
+    assert_eq!(view["backing"]["isolation"], "shared");
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["value"],
+        "shared-test.ts.net"
+    );
+}
+
+#[tokio::test]
+async fn legacy_measurements_supply_fresh_routes_but_never_application_rtt() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_200_000)));
+    let (app, _, _) = dry_app(clock.clone(), Arc::new(DryRunProvider::new()));
+    let (_, created) = create(&app, "create-network-routes", "dry_run", 2).await;
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+    make_ready(&app, lobby_id, &[(PLAYER_1, 11), (PLAYER_2, 31)]).await;
+
+    let (_, fresh) = network(&app, lobby_id, capability).await;
+    assert_eq!(fresh["counts"]["fresh_reporter_count"]["value"], 2);
+    assert_eq!(
+        fresh["counts"]["fresh_directional_observation_count"]["value"],
+        2
+    );
+    assert_eq!(fresh["routes"]["expected_direction_count"]["value"], 2);
+    assert_eq!(fresh["routes"]["direct_count"]["value"], 2);
+    assert_eq!(fresh["routes"]["unknown_count"]["value"], 0);
+    assert_eq!(fresh["routes"]["direct_ratio_milli"]["value"], 1000);
+    assert!(fresh["application_quality"]["application_rtt_ms_median"]["value"].is_null());
+    assert_eq!(
+        fresh["application_quality"]["application_rtt_ms_median"]["unknown_reason"],
+        "unsupported"
+    );
+    assert_eq!(
+        fresh["authority"]["control_election"]["value"]["winner_player_id"],
+        PLAYER_1
+    );
+    assert!(fresh["authority"]["last_accepted_heartbeat"]["value"].is_null());
+
+    clock.advance(15_000);
+    let (_, stale) = network(&app, lobby_id, capability).await;
+    assert_eq!(stale["counts"]["fresh_reporter_count"]["value"], 0);
+    assert_eq!(stale["routes"]["direct_count"]["value"], 0);
+    assert_eq!(stale["routes"]["unknown_count"]["value"], 2);
+    assert_eq!(stale["authority"]["control_election"]["freshness"], "fresh");
+}
+
+#[tokio::test]
+async fn provider_observations_are_cached_bounded_and_fail_stale_not_zero() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_300_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, state, _) = live_app(clock.clone(), provider.clone());
+    let (_, created) = create(&app, "create-network-observation", "tailnet_per_lobby", 3).await;
+    let lobby_id_text = created["lobby_id"].as_str().unwrap();
+    let lobby_id = spurfire_protocol::LobbyId::parse(lobby_id_text).unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+
+    let (_, unknown) = network(&app, lobby_id_text, capability).await;
+    assert!(unknown["counts"]["provider_enrolled_device_count"]["value"].is_null());
+    assert_eq!(
+        unknown["counts"]["provider_enrolled_device_count"]["unknown_reason"],
+        "never_observed"
+    );
+    assert_eq!(provider.observation_count(), 0);
+
+    state.refresh_network_observation(lobby_id).await.unwrap();
+    assert_eq!(provider.observation_count(), 1);
+    let (_, fresh) = network(&app, lobby_id_text, capability).await;
+    assert_eq!(
+        fresh["counts"]["provider_enrolled_device_count"]["value"],
+        2
+    );
+    assert_eq!(
+        fresh["counts"]["provider_enrolled_device_count"]["freshness"],
+        "fresh"
+    );
+    assert!(fresh["counts"]["provider_online_device_count"]["value"].is_null());
+    assert_eq!(
+        fresh["counts"]["provider_online_device_count"]["unknown_reason"],
+        "unsupported"
+    );
+    assert_eq!(
+        provider.observation_count(),
+        1,
+        "GET performed provider I/O"
+    );
+
+    clock.advance(30_000);
+    let (_, stale) = network(&app, lobby_id_text, capability).await;
+    assert_eq!(
+        stale["counts"]["provider_enrolled_device_count"]["value"],
+        2
+    );
+    assert_eq!(
+        stale["counts"]["provider_enrolled_device_count"]["freshness"],
+        "stale"
+    );
+
+    provider.fail_observations();
+    assert!(state.refresh_network_observation(lobby_id).await.is_err());
+    let (_, failed) = network(&app, lobby_id_text, capability).await;
+    assert_eq!(
+        failed["counts"]["provider_enrolled_device_count"]["value"],
+        2
+    );
+    assert_eq!(
+        failed["counts"]["provider_enrolled_device_count"]["freshness"],
+        "stale"
+    );
+    assert_eq!(provider.observation_count(), 2);
+}
+
+#[tokio::test]
+async fn real_mutations_default_off_and_singleton_lease_is_atomic() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_400_000)));
+    let disabled_provider = Arc::new(RecordingProvider::available());
+    let disabled_store = Arc::new(InMemoryStore::new());
+    let disabled_state = AppState::new(
+        Config::default(),
+        disabled_store.clone(),
+        disabled_provider.clone(),
+    )
+    .with_clock(clock.clone());
+    let disabled_app = build_router(disabled_state);
+    let (status, error) = create(
+        &disabled_app,
+        "create-real-disabled",
+        "tailnet_per_lobby",
+        2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["code"], "real_mutations_disabled");
+    assert_eq!(disabled_provider.mutation_count(), 0);
+    assert!(disabled_store.is_empty().await);
+
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, _, store) = live_app(clock, provider.clone());
+    let (first, second) = tokio::join!(
+        create(&app, "concurrent-real-a", "tailnet_per_lobby", 2),
+        create(&app, "concurrent-real-b", "tailnet_per_lobby", 2)
+    );
+    let statuses = [first.0, second.0];
+    assert!(statuses.contains(&StatusCode::CREATED));
+    assert!(statuses.contains(&StatusCode::CONFLICT));
+    let conflict = if first.0 == StatusCode::CONFLICT {
+        first.1
+    } else {
+        second.1
+    };
+    assert_eq!(conflict["code"], "real_lobby_capacity_reached");
+    assert_eq!(provider.mutation_count(), 1);
+    assert!(store.real_lobby_lease_held().await);
+}
+
+#[tokio::test]
+async fn dedicated_cleanup_needs_two_exact_absence_polls_before_lease_release() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_500_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, state, store) = live_app(clock.clone(), provider);
+    let (_, created) = create(&app, "create-cleanup-proof", "tailnet_per_lobby", 2).await;
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+    let (status, deleted) = json_request(
+        &app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("x-spurfire-player-id", PLAYER_1)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["state"], "DESTROYED");
+    assert_eq!(deleted["cleanup_pending"], true);
+    assert!(store.real_lobby_lease_held().await);
+    let (_, verifying) = network(&app, lobby_id, capability).await;
+    assert_eq!(
+        verifying["backing"]["network_lifecycle"],
+        "VERIFYING_ABSENCE"
+    );
+    assert!(verifying["cleanup"]["absence_confirmed_at"]["value"].is_null());
+
+    state.cleanup_expired_now().await;
+    assert!(store.real_lobby_lease_held().await);
+    clock.advance(4_999);
+    state.cleanup_expired_now().await;
+    assert!(store.real_lobby_lease_held().await);
+    clock.advance(1);
+    state.cleanup_expired_now().await;
+    assert!(!store.real_lobby_lease_held().await);
+
+    let (_, absent) = network(&app, lobby_id, capability).await;
+    assert_eq!(absent["backing"]["network_lifecycle"], "DEDICATED_ABSENT");
+    assert!(absent["backing"]["tailnet_dns_name"]["value"].is_null());
+    assert!(absent["cleanup"]["absence_confirmed_at"]["value"].is_number());
+}
+
+#[tokio::test]
+async fn identity_or_vault_cleanup_failure_retains_real_lease() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_600_000)));
+    let identity_provider = Arc::new(RecordingProvider::available());
+    identity_provider.fail_identity_cleanup();
+    let (identity_app, _, identity_store) = live_app(clock.clone(), identity_provider);
+    let (_, created) = create(
+        &identity_app,
+        "create-identity-failure",
+        "tailnet_per_lobby",
+        2,
+    )
+    .await;
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+    json_request(
+        &identity_app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("x-spurfire-player-id", PLAYER_1)],
+    )
+    .await;
+    let (_, view) = network(&identity_app, lobby_id, capability).await;
+    assert_eq!(view["backing"]["network_lifecycle"], "MANUAL_REMEDIATION");
+    assert!(identity_store.real_lobby_lease_held().await);
+
+    let vault_provider = Arc::new(RecordingProvider::available());
+    vault_provider.fail_secret_erasure();
+    let (vault_app, _, vault_store) = live_app(clock, vault_provider);
+    let (_, created) = create(&vault_app, "create-vault-failure", "tailnet_per_lobby", 2).await;
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+    json_request(
+        &vault_app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("x-spurfire-player-id", PLAYER_1)],
+    )
+    .await;
+    let (_, view) = network(&vault_app, lobby_id, capability).await;
+    assert_eq!(view["backing"]["network_lifecycle"], "CLEANUP_PENDING");
+    assert!(vault_store.real_lobby_lease_held().await);
+}
+
+#[tokio::test]
+async fn durable_capability_is_hash_only_and_survives_reopen() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_700_000)));
+    let path = std::env::temp_dir().join(format!(
+        "spurfire-network-capability-{}.json",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_file(&path).await;
+    let store = Arc::new(JsonFileStore::open(&path).await.unwrap());
+    let config = Config {
+        force_dry_run: true,
+        provisioning_mode: ProvisioningMode::DryRun,
+        ..Config::default()
+    };
+    let state = AppState::new(config.clone(), store, Arc::new(DryRunProvider::new()))
+        .with_clock(clock.clone());
+    let app = build_router(state);
+    let (_, created) = create(&app, "durable-capability", "dry_run", 2).await;
+    let lobby_id = created["lobby_id"].as_str().unwrap().to_owned();
+    let capability = created["creator_capability"].as_str().unwrap().to_owned();
+    let durable = tokio::fs::read_to_string(&path).await.unwrap();
+    assert!(!durable.contains(&capability));
+    assert!(!durable.contains("creator_capability\":\""));
+
+    let reopened = Arc::new(JsonFileStore::open(&path).await.unwrap());
+    let app = build_router(
+        AppState::new(config, reopened, Arc::new(DryRunProvider::new())).with_clock(clock),
+    );
+    assert_eq!(
+        network(&app, &lobby_id, &capability).await.0,
+        StatusCode::OK
+    );
+    let _ = tokio::fs::remove_file(&path).await;
 }
 
 #[tokio::test]
@@ -563,9 +1114,11 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock.clone(), blocked);
     let (_, created) = create(&app, "create-blocked", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
     assert_eq!(capabilities["modes"]["shared_tailnet"], "blocked_scopes");
-    let (_, lobby) = get(&app, lobby_id).await;
+    assert_eq!(get(&app, lobby_id).await.0, StatusCode::NOT_FOUND);
+    let (_, lobby) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(lobby["state"], "FAILED");
     assert_eq!(lobby["state_reason"], "provisioning_blocked_auth_keys_403");
 
@@ -573,12 +1126,16 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock, failing.clone());
     let (_, created) = create(&app, "create-mint-fail", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (status, error) = join(&app, lobby_id, PLAYER_1, "mint-fail").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error["state_reason"], "provisioning_blocked_auth_keys_403");
     assert!(!error.to_string().contains("synthetic-auth-key"));
     assert_eq!(failing.mint_count(), 1);
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FAILED");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FAILED"
+    );
 }
 
 #[tokio::test]
@@ -590,6 +1147,7 @@ async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
     let (status, created) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::CREATED);
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (status, replay) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["lobby_id"], created["lobby_id"]);
@@ -598,10 +1156,13 @@ async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
     let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
     assert_eq!(capabilities["modes"]["tailnet_per_lobby"], "available");
     assert_eq!(capabilities["can_manage_organization_tailnets"], true);
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FORMING"
+    );
 
     provider.lose_child_secrets();
-    let (_, failed) = get(&app, lobby_id).await;
+    let (_, failed) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(failed["state"], "FAILED");
     assert_eq!(
         failed["state_reason"],
@@ -618,6 +1179,7 @@ async fn creator_authorization_and_request_dry_run_cannot_mutate_live_lobby() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-authz", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
 
     let (status, error) = json_request(
         &app,
@@ -644,7 +1206,10 @@ async fn creator_authorization_and_request_dry_run_cannot_mutate_live_lobby() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error["code"], "dry_run_mode_mismatch");
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FORMING"
+    );
     assert_eq!(provider.cleanup_count(), 0);
 
     let (status, deleted) = json_request(
@@ -706,6 +1271,7 @@ async fn leave_revokes_key_and_removes_roster_entry() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-leave", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     join(&app, lobby_id, PLAYER_2, "leave-join").await;
 
     let (status, left) = json_request(
@@ -718,7 +1284,10 @@ async fn leave_revokes_key_and_removes_roster_entry() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(left["left"], true);
-    assert_eq!(get(&app, lobby_id).await.1["roster"], json!([]));
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["roster"],
+        json!([])
+    );
     let requests = provider.cleanup_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].credentials.len(), 1);
@@ -732,6 +1301,7 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
     let (app, state, _) = dry_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-time", "dry_run", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     make_ready(&app, lobby_id, &[(PLAYER_1, 10), (PLAYER_2, 20)]).await;
     assert_eq!(get(&app, lobby_id).await.1["state"], "READY");
     clock.advance(59_999);
@@ -766,7 +1336,7 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
     clock.advance(119_999);
     assert_eq!(get(&app, lobby_id).await.1["state"], "STARTING");
     clock.advance(1);
-    let (_, failed) = get(&app, lobby_id).await;
+    let (_, failed) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(failed["state"], "FAILED");
     assert_eq!(failed["state_reason"], "start_timeout");
     assert!(!state.cleanup_expired_now().await.is_empty() || failed["state"] == "FAILED");
@@ -779,9 +1349,13 @@ async fn idle_ttl_expires_and_mixed_formula_or_major_wire_cannot_start() {
     let (app, state, _) = live_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-expiry", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     clock.advance(10 * 60 * 1_000);
     assert!(!state.cleanup_expired_now().await.is_empty());
-    assert_eq!(get(&app, lobby_id).await.1["state"], "EXPIRED");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "EXPIRED"
+    );
 
     let clock = Arc::new(ManualClock::new(UnixMillis::new(300_000)));
     let provider = Arc::new(RecordingProvider::available());
@@ -930,6 +1504,24 @@ async fn service_capacity_validation_precedes_provider_mutation() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error["code"], "max_players_exceeds_service_limit");
     assert_eq!(provider.mutation_count(), 0);
+}
+
+#[test]
+fn server_manifest_cannot_gain_tailnet_membership_or_gameplay_runtime_dependencies() {
+    let manifest = include_str!("../Cargo.toml").to_ascii_lowercase();
+    for forbidden in [
+        "spurfire-net",
+        "rustscale",
+        "tailscale-tsnet",
+        "boringtun",
+        "gameplay-listener",
+        "observer-node",
+    ] {
+        assert!(
+            !manifest.contains(forbidden),
+            "server dependency boundary contains {forbidden}"
+        );
+    }
 }
 
 #[test]
