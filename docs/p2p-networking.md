@@ -41,6 +41,9 @@ On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRA
 
 ## Security boundaries
 
+Canonical formats, key custody, validation ordering, and rotation rules for signed sessions
+are specified in `docs/session-identity-architecture.md` (decision D12).
+
 - Never pass organization or child OAuth credentials to Godot.
 - Never print auth keys. The live script writes them only to its private temporary directory and deletes that directory on every exit path.
 - Datagram size is checked before JSON parsing and before send.

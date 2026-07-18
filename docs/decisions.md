@@ -132,6 +132,24 @@ capability-gated topology metadata. Every lifecycle, enrollment, route, applicat
 authority, freshness, and cleanup fact carries source and assurance; participant reports remain
 untrusted reports and never affect gameplay or cleanup truth.
 
+## D11 — One real lobby and fail-closed activation
+
+**Status:** accepted for alpha safety; hosted real activation not approved
+
+One singleton lease covers every real lobby in either dedicated or shared compatibility mode.
+Public real mode, when separately approved, accepts only server-selected `tailnet_per_lobby`.
+Ambiguous create, restart, polling, cleanup, identity, or vault state holds the lease and closes
+new real mutations. Release requires definitive pre-resource create rejection, exact dedicated
+absence plus encrypted-secret erasure, or complete shared-resource cleanup.
+
+Public real activation additionally requires capability migration on every lobby route, an
+independent default-off real-mutation kill switch, a dynamic encrypted child-OAuth vault,
+mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
+gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
+alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
+separate GitOps review. The hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`,
+`existingSecret=""`, and `persistence.enabled=false` until that review.
+
 ## D12 — Session identity is WireGuard channel binding plus ephemeral Ed25519
 
 **Status:** accepted for Alpha session identity
@@ -151,25 +169,8 @@ requires increasing-sequence re-registration; the application identity remains t
 plus tailnet IP. A server restart cannot silently replace its manifest key inside an old replay
 domain: active sessions bump generation and re-key/re-register. Unsigned compatibility is limited
 to explicit dry-run/demo/test mode. This does not verify a peer's own gameplay truth and does not
-resolve D5 ranked verification.
-
-## D11 — One real lobby and fail-closed activation
-
-**Status:** accepted for alpha safety; hosted real activation not approved
-
-One singleton lease covers every real lobby in either dedicated or shared compatibility mode.
-Public real mode, when separately approved, accepts only server-selected `tailnet_per_lobby`.
-Ambiguous create, restart, polling, cleanup, identity, or vault state holds the lease and closes
-new real mutations. Release requires definitive pre-resource create rejection, exact dedicated
-absence plus encrypted-secret erasure, or complete shared-resource cleanup.
-
-Public real activation additionally requires capability migration on every lobby route, an
-independent default-off real-mutation kill switch, a dynamic encrypted child-OAuth vault,
-mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
-gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
-alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
-separate GitOps review. The hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`,
-`existingSecret=""`, and `persistence.enabled=false` until that review.
+resolve D5 ranked verification. Canonical formats, validation ordering, and rotation rules are
+specified in `docs/session-identity-architecture.md`.
 
 ## Settled design questions (formerly open, 2026-07-17)
 
