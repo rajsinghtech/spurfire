@@ -27,7 +27,7 @@ cargo run -p spurfire-server
 
 Do not use that command for a public deployment. Safe-groundwork revisions recognize `SPURFIRE_REAL_MUTATIONS_ENABLED`, default it to `0`, and reject real create/mint/delete without it independently of credentials and provisioning mode. Older revisions without that switch are unsuitable for any exposed real configuration. The shipped chart keeps the switch at `0` and deliberately rejects `true`; no current deployment is authorized to enable it.
 
-Current real startup performs bounded, read-only capability probes. Organization-tailnet listing is probed independently from shared-tailnet key/device/ACL scopes. Organization create/token, child-scoped one-use key issuance, and deletion have been live-proven in disposable lifecycles, while shared-tailnet scopes remain blocked for the historical client. Public use remains dry-run until the complete activation checklist passes.
+Current real startup performs bounded, read-only capability probes. Organization-tailnet listing is probed independently from shared-tailnet key/device/ACL scopes. Organization create/token/deletion has been live-proven in disposable lifecycles; child-scoped one-use key issuance is implemented and mock-tested but still needs live end-to-end verification. Shared-tailnet scopes remain blocked for the historical client. Public use remains dry-run until the complete activation checklist passes.
 
 ## Common headers
 
@@ -164,7 +164,7 @@ The redacted probes in [tailscale-api.md](tailscale-api.md) remain authoritative
 - `GET/POST /organizations/-/tailnets`, child token exchange, and child-scoped tailnet deletion are verified;
 - the older top-level `/tailnet` and `/tailnets` collection 404s were wrong-route evidence, not an API-unavailability verdict;
 - shared auth-key create/list, device list, and ACL reads returned 403 for the historical organization OAuth client, independently of organization-tailnet access;
-- child-scoped one-use auth-key issuance is implemented and live-proven by the later managed disposable P2P lifecycle; the dated probe document still distinguishes what its own earlier guarded run mutated;
+- child-scoped one-use auth-key issuance is implemented and mock-tested but was not live-mutated in this workflow and still needs live end-to-end verification;
 - read-only capability probes are conservative scope evidence, not production isolation proof;
 - safe per-player device deletion in shared mode still needs a trustworthy credential/device association. Leave revokes the key; terminal shared cleanup uses the lobby tag.
 

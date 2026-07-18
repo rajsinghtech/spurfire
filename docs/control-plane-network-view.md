@@ -10,7 +10,8 @@ This document is the source of truth for dedicated lobby-network ownership, the 
 
 | Area | Status |
 |---|---|
-| Organization tailnet list/create, typed stable ID and `dnsName`, child OAuth exchange, child-scoped one-use auth-key issuance, and child-scoped deletion | Implemented and live-proven in bounded disposable probes |
+| Organization tailnet list/create, typed stable ID and `dnsName`, child OAuth exchange, and child-scoped deletion | Implemented and live-proven in bounded disposable probes |
+| Child-scoped one-use auth-key issuance | Implemented and mock-tested; live end-to-end verification remains required |
 | Dedicated `tailnet_per_lobby` isolation | Selected real-lobby path |
 | `shared_tailnet` | Separate compatibility path; never represented as dedicated isolation |
 | Child OAuth custody | Process-local and zeroized today; restart fails closed and may require manual remediation |
@@ -444,6 +445,6 @@ These are activation requirements, not claims that the current public service im
 - [architecture.md](architecture.md) — control/data-plane boundary and dependency direction.
 - [lobby-service.md](lobby-service.md) — current HTTP surface and protected target routes.
 - [decisions.md](decisions.md) — D2 and D8–D11.
-- [tailscale-api.md](tailscale-api.md) — dated provider API probe evidence; newer managed P2P runs also live-proved child key issuance.
+- [tailscale-api.md](tailscale-api.md) — dated provider API probe evidence; child key issuance remains mock-tested and needs live end-to-end verification.
 - [p2p-networking.md](p2p-networking.md) — peer data plane and RustScale route classes.
 - [testing.md](testing.md) — execution environment and validation entry points.

@@ -772,6 +772,17 @@ async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
         view["backing"]["tailnet_dns_name"]["value"],
         "child-test.ts.net"
     );
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["source"],
+        "control_store"
+    );
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["assurance"],
+        "authoritative"
+    );
+    assert_eq!(view["backing"]["tailnet_dns_name"]["freshness"], "current");
+    assert!(view["backing"]["tailnet_dns_name"]["as_of"].is_number());
+    assert!(view["backing"]["tailnet_dns_name"]["received_at"].is_number());
     assert!(view.get("provider_tailnet_id").is_none());
     assert!(!view.to_string().contains("TtRouterCNTRL"));
 
@@ -786,6 +797,45 @@ async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
     assert_eq!(
         view["backing"]["tailnet_dns_name"]["value"],
         "shared-test.ts.net"
+    );
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["source"],
+        "control_store"
+    );
+    assert_eq!(
+        view["backing"]["tailnet_dns_name"]["assurance"],
+        "authoritative"
+    );
+    assert_eq!(view["backing"]["tailnet_dns_name"]["freshness"], "current");
+}
+
+#[tokio::test]
+async fn provider_failure_before_first_success_preserves_precise_unknown_reason() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_250_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, state, _) = live_app(clock, provider.clone());
+    let (_, created) = create(
+        &app,
+        "create-network-first-observation-fails",
+        "tailnet_per_lobby",
+        2,
+    )
+    .await;
+    let lobby_id_text = created["lobby_id"].as_str().unwrap();
+    let lobby_id = spurfire_protocol::LobbyId::parse(lobby_id_text).unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
+
+    provider.fail_observations();
+    assert!(state.refresh_network_observation(lobby_id).await.is_err());
+    let (_, view) = network(&app, lobby_id_text, capability).await;
+    assert!(view["counts"]["provider_enrolled_device_count"]["value"].is_null());
+    assert_eq!(
+        view["counts"]["provider_enrolled_device_count"]["unknown_reason"],
+        "permission_denied"
+    );
+    assert_eq!(
+        view["counts"]["provider_enrolled_device_count"]["source"],
+        "provider_api"
     );
 }
 

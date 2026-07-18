@@ -113,9 +113,14 @@ impl CachedProviderObservation {
         }
     }
 
-    fn failed(previous: Option<Self>, failure: CachedObservationFailure, at: UnixMillis) -> Self {
+    fn failed(
+        network_generation: u64,
+        previous: Option<Self>,
+        failure: CachedObservationFailure,
+        at: UnixMillis,
+    ) -> Self {
         Self {
-            network_generation: previous.map_or(0, |value| value.network_generation),
+            network_generation,
             enrolled_device_count: match previous {
                 Some(previous) => previous.enrolled_device_count,
                 None => None,
@@ -317,12 +322,18 @@ impl AppState {
             }
             Ok(Err(error)) => {
                 let failure = observation_failure(&error);
-                self.cache_provider_failure(lobby_id, failure, now).await;
+                self.cache_provider_failure(lobby_id, network_generation, failure, now)
+                    .await;
                 Err(error)
             }
             Err(_) => {
-                self.cache_provider_failure(lobby_id, CachedObservationFailure::Timeout, now)
-                    .await;
+                self.cache_provider_failure(
+                    lobby_id,
+                    network_generation,
+                    CachedObservationFailure::Timeout,
+                    now,
+                )
+                .await;
                 Err(ProviderError::Unavailable {
                     operation: "network_observation_timeout",
                 })
@@ -353,6 +364,7 @@ impl AppState {
     async fn cache_provider_failure(
         &self,
         lobby_id: LobbyId,
+        network_generation: u64,
         failure: CachedObservationFailure,
         now: UnixMillis,
     ) {
@@ -364,7 +376,7 @@ impl AppState {
             .copied();
         self.cache_provider_observation(
             lobby_id,
-            CachedProviderObservation::failed(previous, failure, now),
+            CachedProviderObservation::failed(network_generation, previous, failure, now),
         )
         .await;
     }

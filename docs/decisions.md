@@ -25,10 +25,10 @@ server with a provider-owned in-memory child-secret vault and fail-closed restar
 implemented, but historical probes received 403 for auth-key, device-list, and ACL operations.
 Capability reporting keeps organization-tailnet access independent from these shared scopes.
 
-Child-scoped one-use key issuance is now implemented and live-proven by the managed disposable
-P2P lifecycle. This decision remains provisional because the process-local vault must still be
-replaced by a dynamic encrypted secret manager with reconciliation, rotation, audit, and cleanup
-recovery; see `docs/control-plane-network-view.md`. Production custody intent: **setec** (secrets
+Child-scoped one-use key issuance is implemented and mock-tested but still requires live
+end-to-end verification. This decision remains provisional because that verification is incomplete
+and the process-local vault must still be replaced by a dynamic encrypted secret manager with
+reconciliation, rotation, audit, and cleanup recovery; see `docs/control-plane-network-view.md`. Production custody intent: **setec** (secrets
 service) backing the child-OAuth vault, with mutation-closed startup reconciliation against exact
 upstream stable IDs.
 
