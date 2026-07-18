@@ -18,11 +18,11 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigError};
 pub use error::ApiError;
 pub use provider::{
-    CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest,
-    MintedCredential, MutationGatedProvider, NetworkProvider, ObserveNetworkRequest,
-    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
-    ProviderError, ProviderNetworkIdentity, SecretString, TailnetPresenceRequest,
-    TailscaleProvider,
+    ChildPolicyStatus, CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider,
+    MintCredentialRequest, MintedCredential, MutationGatedProvider, NetworkProvider,
+    ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities,
+    ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity, SecretString,
+    TailnetPresenceRequest, TailscaleProvider,
 };
 pub use service::{build_router, router, AppState};
 pub use store::{

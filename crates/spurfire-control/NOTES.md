@@ -21,6 +21,12 @@ DELETE /tailnet/{dnsName}
 
 A successful guarded probe created exactly one child, deleted it with the child token, and confirmed its stable ID was absent from the organization listing. No further live mutation was performed during implementation.
 
+## Child policy gate
+
+`ChildTailnetPolicy::restrictive_riders` generates the sole accepted dedicated-lobby policy: one `tag:spurfire-lobby-<uuid>` source may reach only the same tag on `udp:41643`. Empty ACL, SSH, node-attribute, route/exit-node auto-approval, and test sections are explicit. `ChildTailscaleClient` writes and reads `/tailnet/{typed-dns-name}/acl` on the configured origin with redirects disabled, normalizes set-like policy fields, and returns only a SHA-256 semantic digest after an exact match. Unknown/additional semantics, mismatch, 403, transport, decode, and timeout conditions must fail closed before key mint and enter exact cleanup.
+
+This contract is mock/fault-tested only. No live child policy write/readback was performed for this change, so provider acceptance and enforcement remain activation gates.
+
 ## Historical wrong-route evidence
 
 `POST /tailnet` and `POST /tailnets` returned 404. Those guessed top-level collection paths are still wrong, but they no longer imply that organization tailnet creation is unavailable. Do not reintroduce an `UnavailableApi404` capability verdict.
@@ -31,4 +37,4 @@ Historical calls to `/tailnet/-/keys`, `/tailnet/-/devices`, and `/tailnet/-/acl
 
 ## Secret lifecycle invariant
 
-Child OAuth ID, secret, and token use explicit redacted wrappers and zeroized allocations where practical. They may enter only a child-scoped client held by the server provider's in-memory vault. They must not enter public DTOs, durable records, logs, error bodies, or generic retained JSON. After restart, the server fails closed and reports `child_secret_unavailable_manual_remediation`; production needs encrypted secret custody and reconciliation.
+Child OAuth ID, secret, and token use explicit redacted wrappers and zeroized allocations where practical. They may enter only the server's encrypted exact-tuple child vault and process-local child-scoped client cache. They must not enter public DTOs, non-secret lobby records, logs, error bodies, policy evidence, or generic retained JSON. Durable lobby state may retain only the policy semantic digest/coarse status and exact non-secret cleanup identity. Missing or mismatched custody fails closed; production still needs workload identity/setec, external audit/backup/rotation, and exercised reconciliation.

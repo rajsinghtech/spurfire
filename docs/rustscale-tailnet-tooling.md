@@ -31,4 +31,4 @@ Do not use the sibling scripts to bypass Spurfire's confirmation, prefix, redact
 
 ## Production distinction
 
-Reference tooling and one successful guarded probe prove API shape, not production readiness. Spurfire's current server stores child OAuth material only in memory and cannot recover it after restart. Cross-tailnet token support in the reference tools may inform future reconciliation, but production still requires an approved encrypted secret manager, least-privilege scope review, audit logging without secrets, and live failure-path validation.
+Reference tooling and one successful guarded probe prove API shape, not production readiness. Spurfire's integrated prototype uses an encrypted exact-tuple file vault with restart recovery and CAS erasure plus a process-local child-client cache. That is prototype custody, not an approved production secret manager: workload identity/setec, external audit/backup/rotation, least-privilege scope review, and separately authorized live restrictive-policy/key/cleanup failure-path validation remain required.
