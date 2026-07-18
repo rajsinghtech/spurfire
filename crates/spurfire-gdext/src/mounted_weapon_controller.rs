@@ -296,16 +296,31 @@ impl MountedWeaponController {
         let Ok(tick_value) = u64::try_from(tick) else {
             return false;
         };
+        let tick = SimulationTick::new(tick_value);
+        // Course reset may explicitly censor an airborne dive. Close its fire
+        // context before restoring equipment; normal range-checked remounts
+        // arrive with the same context already closed by landing.
+        if let Some(context) = self.kernel.dive_fire_context() {
+            if !context.closed_to_new_shots
+                && self
+                    .kernel
+                    .finish_saddle_dive(context.dive_id, tick)
+                    .is_err()
+            {
+                return false;
+            }
+        }
         self.riding.stance = RiderStance::Mounted;
         self.riding.dive_id = None;
         self.assign_stance(RiderStance::Mounted, None);
-        if !self.advance_kernel_to(SimulationTick::new(tick_value)) {
+        if !self.advance_kernel_to(tick) {
             return false;
         }
         let weapon = self.kernel.equipped_weapon();
-        self.kernel.equip_weapon(weapon);
+        let already_unholstered = !self.kernel.is_holstered();
+        let equipped = self.kernel.equip_weapon(weapon);
         self.update_runtime_properties();
-        true
+        already_unholstered || equipped
     }
 
     /// Equip 0=Dustwalker, 1=Longspur, or 2=Rattler from the prototype loadout.

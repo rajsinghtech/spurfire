@@ -505,7 +505,7 @@ func _exercise_landing_boundaries(
 		horse.velocity = Vector3(0, 0, -9.0)
 		var damage_events_before := landing_damage_events.size()
 		var death_events_before := death_ticks.size()
-		await _pulse_action(&"combat_interact")
+		await _press_action_one_tick(&"combat_interact")
 		var dive_id := int(rider.get("dive_id"))
 		if int(rider.get("stance_id")) != STANCE_DIVE or dive_id <= 0:
 			failures.append("landing fixture %.0f did not start a real dive" % float(fixture.x))
@@ -572,7 +572,7 @@ func _exercise_bridge_caps(
 			failures.append("could not equip weapon %d for integrated cap smoke" % weapon_id)
 			continue
 		horse.velocity = Vector3(0, 0, -9.0)
-		await _pulse_action(&"combat_interact")
+		await _press_action_one_tick(&"combat_interact")
 		if int(rider.get("stance_id")) != STANCE_DIVE:
 			failures.append("weapon %d cap smoke did not enter a real dive" % weapon_id)
 			continue
@@ -630,6 +630,11 @@ func _wait_controller_tick(controller: Node, target_tick: int, maximum_frames: i
 
 func _reset_course_with_input() -> void:
 	await _pulse_action(&"reset_horse")
+
+func _press_action_one_tick(action: StringName) -> void:
+	Input.action_press(action)
+	await get_tree().physics_frame
+	Input.action_release(action)
 
 func _pulse_action(action: StringName) -> void:
 	Input.action_press(action)
