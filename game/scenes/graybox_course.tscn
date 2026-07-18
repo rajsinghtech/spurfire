@@ -251,7 +251,7 @@ mesh = SubResource("CapsuleMesh_rider")
 position = Vector3(0, 1.82, 0)
 mesh = SubResource("SphereMesh_rider_head")
 
-[node name="WeaponController" type="MountedWeaponController" parent="Rider" node_paths=PackedStringArray("rider_path")]
+[node name="WeaponController" type="MountedWeaponController" parent="Rider"]
 position = Vector3(0.52, 1.12, -0.18)
 rider_path = NodePath("..")
 
@@ -314,7 +314,7 @@ layer = 5
 visible = false
 horse_path = NodePath("../../Horse")
 
-[node name="PeerSession" type="PeerSession" parent="." node_paths=PackedStringArray("gameplay_rider_path")]
+[node name="PeerSession" type="PeerSession" parent="."]
 gameplay_rider_path = NodePath("../Rider")
 
 [node name="RemoteRider" type="NetworkRider" parent="."]

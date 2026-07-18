@@ -75,11 +75,15 @@ func _physics_process(_delta: float) -> void:
 
 func _install_combat_context() -> bool:
 	var stats := horse.call("get_archetype_stats") as Dictionary
+	var stance_id := int(rider.get("stance_id"))
+	# Combat DiveId exists iff fire is currently in SaddleDiveAirborne. The
+	# movement kernel keeps its DiveId through recovery for telemetry/remount.
+	var combat_dive_id := int(rider.get("dive_id")) if stance_id == 3 else -1
 	return bool(weapon_controller.call(
 		"set_rider_context",
 		simulation_tick,
-		int(rider.get("stance_id")),
-		int(rider.get("dive_id")),
+		stance_id,
+		combat_dive_id,
 		int(horse.get("current_gait")),
 		float(horse.get("speed_mps")),
 		float(stats.get("gallop_mps", 13.0)),
