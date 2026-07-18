@@ -49,6 +49,7 @@ jobs:
           set -euo pipefail
 
           server_version="$(scripts/check-release-metadata.sh)"
+          chart_version="$server_version"
 
           short_sha="${GITHUB_SHA:0:12}"
           created="$(git show -s --format=%cI "$GITHUB_SHA")"
