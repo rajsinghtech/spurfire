@@ -1,6 +1,8 @@
-name: Client Release
+name: Client Preflight
 
 on:
+  pull_request:
+  workflow_dispatch:
   push:
     tags: ['v*']
 
@@ -8,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: client-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: client-preflight-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   GODOT_VERSION: 4.7.1
@@ -18,7 +20,7 @@ env:
 
 jobs:
   metadata:
-    name: Validate client release
+    name: Validate client preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -28,19 +30,32 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
       - id: meta
+        name: Validate aligned release metadata
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "client releases require a vX.Y.Z tag" >&2
-            exit 1
-          }
-          version="${tag#v}"
-          server_version="$(awk '/^version = / { gsub(/[\" ]/, "", $3); print $3; exit }' crates/spurfire-server/Cargo.toml)"
-          test "$version" = "$server_version"
-          test -s "docs/release-notes-${version}.md"
+          version="$(scripts/check-release-metadata.sh)"
+
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+            tag_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+            [[ "$tag" =~ $tag_regex ]] || {
+              echo "client preflight requires a vX.Y.Z or vX.Y.Z-prerelease tag" >&2
+              exit 1
+            }
+            test "${tag#v}" = "$version" || {
+              echo "tag $tag does not match aligned release version $version" >&2
+              exit 1
+            }
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+              echo "tagged commit is not an ancestor of origin/main" >&2
+              exit 1
+            }
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   linux:
@@ -58,6 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: client-linux
+
       - name: Install Godot and export templates
         shell: bash
         run: |
@@ -66,29 +82,35 @@ jobs:
           sudo apt-get install --yes libasound2t64 libfontconfig1 libgl1 libxi6 libxcursor1 libxinerama1 libxrandr2 unzip
           editor="Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
           templates="Godot_v${GODOT_RELEASE}_export_templates.tpz"
-          curl -fL --retry 3 -O "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${editor}"
-          curl -fL --retry 3 -O "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${templates}"
-          echo "4ccdab7a48eeccbe8819a2fc1f6262f8d72065d98601bcb3743fcbd7ebd39f373758a788ee3293a05ec5b2c48538266c437404312e372225cd2df273945a2de9  ${editor}" | sha512sum -c -
-          echo "${GODOT_TEMPLATE_SHA512}  ${templates}" | sha512sum -c -
+          base_url="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$editor" "$base_url/$editor"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$templates" "$base_url/$templates"
+          echo "4ccdab7a48eeccbe8819a2fc1f6262f8d72065d98601bcb3743fcbd7ebd39f373758a788ee3293a05ec5b2c48538266c437404312e372225cd2df273945a2de9  ${editor}" | sha512sum --check
+          echo "${GODOT_TEMPLATE_SHA512}  ${templates}" | sha512sum --check
           unzip -q "$editor"
           sudo install -m 0755 "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot4
           unzip -q "$templates" -d /tmp/godot-templates
           mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
           cp -R /tmp/godot-templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
-      - name: Build and export
+
+      - name: Test, build, and export
         shell: bash
         run: |
           set -euo pipefail
           scripts/build-gdext.sh debug
+          scripts/test-godot.sh
           scripts/build-gdext.sh release
           mkdir -p dist/linux
           godot4 --headless --path game --export-release Linux
           test -x dist/linux/Spurfire.x86_64
           tar -C dist/linux -czf dist/Spurfire-linux-x86_64.tar.gz .
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-linux
           path: dist/Spurfire-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
   windows:
     name: Windows x86_64 client
@@ -105,14 +127,16 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: client-windows
+
       - name: Install Godot and export templates
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $editor = "Godot_v$env:GODOT_RELEASE`_win64.exe.zip"
           $templates = "Godot_v$env:GODOT_RELEASE`_export_templates.tpz"
-          Invoke-WebRequest "https://github.com/godotengine/godot/releases/download/$env:GODOT_RELEASE/$editor" -OutFile $editor
-          Invoke-WebRequest "https://github.com/godotengine/godot/releases/download/$env:GODOT_RELEASE/$templates" -OutFile $templates
+          $baseUrl = "https://github.com/godotengine/godot/releases/download/$env:GODOT_RELEASE"
+          Invoke-WebRequest "$baseUrl/$editor" -OutFile $editor
+          Invoke-WebRequest "$baseUrl/$templates" -OutFile $templates
           if ((Get-FileHash $editor -Algorithm SHA512).Hash.ToLower() -ne 'a6b02c527c18ba9936e63562032701432b2dc57d98d6483ceaccb00fe14af16af5773ae8a55e7b4d614edf121c4d9e420d870f804edb1dac16362298a01ce6c4') { throw 'Godot editor checksum mismatch' }
           if ((Get-FileHash $templates -Algorithm SHA512).Hash.ToLower() -ne $env:GODOT_TEMPLATE_SHA512) { throw 'Godot templates checksum mismatch' }
           Expand-Archive $editor -DestinationPath godot-editor
@@ -121,6 +145,7 @@ jobs:
           $destination = Join-Path $env:APPDATA "Godot/export_templates/$env:GODOT_VERSION.stable"
           New-Item -ItemType Directory -Force $destination | Out-Null
           Copy-Item 'godot-templates/templates/*' $destination -Recurse -Force
+
       - name: Build and export
         shell: bash
         run: |
@@ -130,13 +155,17 @@ jobs:
           mkdir -p dist/windows
           ./godot4.exe --headless --path game --export-release Windows
           test -f dist/windows/Spurfire.exe
+
       - name: Package
         shell: pwsh
         run: Compress-Archive -Path dist/windows/* -DestinationPath dist/Spurfire-windows-x86_64.zip
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-windows
           path: dist/Spurfire-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
 
   macos:
     name: macOS universal client
@@ -154,14 +183,16 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: client-macos-universal
+
       - name: Install Godot and export templates
         shell: bash
         run: |
           set -euo pipefail
           editor="Godot_v${GODOT_RELEASE}_macos.universal.zip"
           templates="Godot_v${GODOT_RELEASE}_export_templates.tpz"
-          curl -fL --retry 3 -O "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${editor}"
-          curl -fL --retry 3 -O "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${templates}"
+          base_url="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$editor" "$base_url/$editor"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$templates" "$base_url/$templates"
           echo "a5c6443e193829de9a3237b57ef5e01c23839888900e241543da0dd4bac1050125e19469f0cca9a9958ac346070d98cab8e5d6aee16b181c6d06cda86bd07224  ${editor}" | shasum -a 512 -c -
           echo "${GODOT_TEMPLATE_SHA512}  ${templates}" | shasum -a 512 -c -
           unzip -q "$editor"
@@ -170,6 +201,7 @@ jobs:
           destination="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
           mkdir -p "$destination"
           cp -R /tmp/godot-templates/templates/. "$destination/"
+
       - name: Build universal GDExtension and export
         shell: bash
         run: |
@@ -187,42 +219,10 @@ jobs:
           mkdir -p dist
           ./Godot.app/Contents/MacOS/Godot --headless --path game --export-release macOS
           test -s dist/Spurfire-macos-universal.zip
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-macos
           path: dist/Spurfire-macos-universal.zip
-
-  release:
-    name: Publish GitHub Release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [metadata, linux, windows, macos]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: client-*
-          path: dist
-          merge-multiple: true
-      - name: Publish checksummed clients
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum Spurfire-* > SHA256SUMS
-          cd ..
-          notes="docs/release-notes-${VERSION}.md"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; refusing to replace assets" >&2
-            exit 1
-          fi
-          gh release create "$GITHUB_REF_NAME" dist/Spurfire-* dist/SHA256SUMS \
-            --verify-tag --title "Spurfire ${VERSION}" --notes-file "$notes"
+          if-no-files-found: error
+          retention-days: 7
