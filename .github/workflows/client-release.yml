@@ -6,6 +6,15 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      candidate_mode:
+        description: Candidate trust mode (trusted mode is protected and fails closed until signing is configured)
+        required: true
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - trusted-release
 
 permissions:
   contents: read
@@ -45,9 +54,14 @@ jobs:
             source_sha="$(scripts/check-release-tag-binding.sh "$version" "$GITHUB_SHA")"
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            source_sha="$(jq -er '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
           else
             source_sha="$GITHUB_SHA"
           fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$source_sha"
+          test "$(git rev-parse FETCH_HEAD)" = "$source_sha"
           bash -n scripts/check-alpha-smoke-log.sh scripts/run-alpha-two-client.sh
           python3 -m py_compile \
             scripts/aggregate-playtest.py \
@@ -67,6 +81,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -126,7 +146,17 @@ jobs:
           fi
           cd dist
           sha256sum Spurfire-linux-x86_64.tar.gz > Spurfire-linux-x86_64.tar.gz.sha256
-          printf '%s\n' '{"platform":"linux-x86_64","launch_smoke_passed":true,"archive_signature":"unsigned","release_blocker":false}' > linux-trust.json
+          archive_sha256="$(sha256sum Spurfire-linux-x86_64.tar.gz | cut -d ' ' -f 1)"
+          jq -n --arg source_sha "${{ needs.metadata.outputs.source_sha }}" \
+            --arg archive_sha256 "$archive_sha256" '{
+              schema_version: 1,
+              platform: "linux-x86_64",
+              source_sha: $source_sha,
+              archive: "Spurfire-linux-x86_64.tar.gz",
+              archive_sha256: $archive_sha256,
+              launch_smoke_passed: true,
+              signature: "unsigned_archive"
+            }' > linux-trust.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -147,6 +177,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: if ((git rev-parse HEAD) -ne $env:SOURCE_SHA) { throw 'checkout is not the qualified source SHA' }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -194,8 +230,17 @@ jobs:
           Compress-Archive -Path dist/windows/* -DestinationPath dist/Spurfire-windows-x86_64.zip
           $hash = (Get-FileHash dist/Spurfire-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  Spurfire-windows-x86_64.zip" | Set-Content -NoNewline dist/Spurfire-windows-x86_64.zip.sha256
-          '{"platform":"windows-x86_64","launch_smoke_passed":true,"authenticode_signed":false,"release_blocker":true,"reason":"Windows Authenticode signing is absent"}' | Set-Content -NoNewline dist/windows-trust.json
-          Write-Output '::warning::Windows candidate is unsigned; Authenticode is a release blocker.'
+          [ordered]@{
+            schema_version = 1
+            platform = 'windows-x86_64'
+            source_sha = '${{ needs.metadata.outputs.source_sha }}'
+            archive = 'Spurfire-windows-x86_64.zip'
+            archive_sha256 = $hash
+            launch_smoke_passed = $true
+            signature = 'unsigned'
+            authenticode_signed = $false
+          } | ConvertTo-Json -Compress | Set-Content -NoNewline dist/windows-trust.json
+          Write-Output '::warning::Windows candidate is unsigned; protected trusted-release mode will fail closed.'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -216,6 +261,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -285,8 +336,20 @@ jobs:
           fi
           cd dist
           shasum -a 256 Spurfire-macos-universal.zip > Spurfire-macos-universal.zip.sha256
-          printf '%s\n' '{"platform":"macos-universal","launch_smoke_passed":true,"signature":"ad_hoc","developer_id_signed":false,"notarized":false,"release_blocker":true,"reason":"Apple Developer ID signing and notarization are absent"}' > macos-trust.json
-          echo '::warning::macOS candidate is ad-hoc signed and not notarized; both are release blockers.'
+          archive_sha256="$(shasum -a 256 Spurfire-macos-universal.zip | cut -d ' ' -f 1)"
+          jq -n --arg source_sha "${{ needs.metadata.outputs.source_sha }}" \
+            --arg archive_sha256 "$archive_sha256" '{
+              schema_version: 1,
+              platform: "macos-universal",
+              source_sha: $source_sha,
+              archive: "Spurfire-macos-universal.zip",
+              archive_sha256: $archive_sha256,
+              launch_smoke_passed: true,
+              signature: "ad_hoc",
+              developer_id_signed: false,
+              notarized: false
+            }' > macos-trust.json
+          echo '::warning::macOS candidate is ad-hoc signed and not notarized; protected trusted-release mode will fail closed.'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -312,6 +375,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -336,9 +405,12 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME"
 
-      - name: Attest candidate archive provenance
+      - name: Attest candidate archive provenance at the qualified source SHA
         if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v3
+        env:
+          # Tag events may point at metadata-only T; provenance must describe checked-out S.
+          GITHUB_SHA: ${{ needs.metadata.outputs.source_sha }}
         with:
           subject-path: candidate/Spurfire-*
 
@@ -349,8 +421,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          source_sha='${{ needs.metadata.outputs.source_sha }}'
+          test "$(git rev-parse HEAD)" = "$source_sha"
           for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-macos-universal.zip candidate/Spurfire-windows-x86_64.zip; do
-            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$source_sha"
           done
           rm -rf candidate-metadata
           python3 scripts/make-alpha-candidate-metadata.py \
@@ -369,7 +443,10 @@ jobs:
           cp candidate-metadata/SHA256SUMS candidate/
           cp candidate-metadata/candidate-manifest.json candidate/
           cp candidate-metadata/candidate.spdx.json candidate/
-          jq -e '
+          jq -e --arg source_sha '${{ needs.metadata.outputs.source_sha }}' '
+            .schema_version == 2 and
+            .candidate_mode == "preflight" and
+            .source_sha == $source_sha and
             .candidate_only == true and
             .release_eligible == false and
             .distribution_trust.macos.developer_id_signed == false and
@@ -377,10 +454,102 @@ jobs:
             .distribution_trust.windows.authenticode_signed == false and
             .publication == "forbidden"
           ' candidate/candidate-manifest.json >/dev/null
+          jq -e --arg source_sha '${{ needs.metadata.outputs.source_sha }}' '
+            (.documentNamespace | contains("/candidate/" + $source_sha + "/")) and
+            all(.packages[]; .versionInfo == $source_sha)
+          ' candidate/candidate.spdx.json >/dev/null
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: alpha-candidate-${{ needs.metadata.outputs.source_sha }}
           path: candidate
+          if-no-files-found: error
+          retention-days: 14
+
+  trusted-candidate:
+    name: Validate protected trusted release candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'
+    needs: [metadata, candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: alpha-release
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: alpha-candidate-${{ needs.metadata.outputs.source_sha }}
+          path: trusted-candidate
+
+      - name: Verify signed platform records and protected eligibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          APPROVED_APPLE_TEAM_ID: ${{ vars.SPURFIRE_APPLE_TEAM_ID }}
+          APPROVED_WINDOWS_CERTIFICATE_SHA256: ${{ vars.SPURFIRE_WINDOWS_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          [[ "$APPROVED_APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
+          [[ "$APPROVED_WINDOWS_CERTIFICATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          for archive in trusted-candidate/Spurfire-linux-x86_64.tar.gz trusted-candidate/Spurfire-macos-universal.zip trusted-candidate/Spurfire-windows-x86_64.zip; do
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$SOURCE_SHA"
+          done
+          rm -f trusted-candidate/SHA256SUMS \
+            trusted-candidate/candidate-manifest.json \
+            trusted-candidate/candidate.spdx.json
+          python3 scripts/make-alpha-candidate-metadata.py \
+            --input-dir trusted-candidate \
+            --output-dir trusted-metadata \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --event "$GITHUB_EVENT_NAME" \
+            --candidate-mode trusted-release \
+            --approved-apple-team-id "$APPROVED_APPLE_TEAM_ID" \
+            --approved-windows-certificate-sha256 "$APPROVED_WINDOWS_CERTIFICATE_SHA256" \
+            --provenance-verified
+          cp trusted-metadata/SHA256SUMS trusted-candidate/
+          cp trusted-metadata/candidate-manifest.json trusted-candidate/
+          cp trusted-metadata/candidate.spdx.json trusted-candidate/
+          jq -e --arg source_sha "$SOURCE_SHA" --argjson run_id "$GITHUB_RUN_ID" '
+            .schema_version == 2 and
+            .candidate_mode == "trusted-release" and
+            .candidate_only == false and
+            .release_eligible == true and
+            .source_sha == $source_sha and
+            .workflow.run_id == $run_id and
+            .workflow.event == "workflow_dispatch" and
+            .provenance_verified == true and
+            .distribution_trust.macos.developer_id_signed == true and
+            .distribution_trust.macos.notarized == true and
+            .distribution_trust.windows.authenticode_signed == true and
+            .blockers == [] and
+            .publication == "protected_manual_only"
+          ' trusted-candidate/candidate-manifest.json >/dev/null
+          jq -e --arg source_sha "$SOURCE_SHA" '
+            .documentNamespace | contains("/candidate/" + $source_sha + "/")
+          ' trusted-candidate/candidate.spdx.json >/dev/null
+          jq -e --arg source_sha "$SOURCE_SHA" '
+            all(.packages[]; .versionInfo == $source_sha)
+          ' trusted-candidate/candidate.spdx.json >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: alpha-trusted-candidate-${{ needs.metadata.outputs.source_sha }}
+          path: trusted-candidate
           if-no-files-found: error
           retention-days: 14

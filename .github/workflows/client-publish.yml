@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       run_id:
-        description: Successful tag-triggered Client Preflight run containing the platform artifacts
+        description: Successful protected trusted-release Client Preflight dispatch at qualified source S
         required: true
         type: string
       evidence_sha256:
@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       actions: read
+      attestations: read
       contents: write
     environment: alpha-release
     steps:
@@ -38,7 +39,8 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.tag }}
 
-      - name: Validate source run, jobs, artifacts, and tag
+      - id: validate
+        name: Validate source run, jobs, artifacts, and tag
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,7 +86,7 @@ jobs:
             '(.name == "Client Preflight") and
              (.path == $workflow) and
              (.workflow_id == $workflow_id) and
-             (.event == "push") and
+             (.event == "workflow_dispatch") and
              (.status == "completed") and
              (.conclusion == "success") and
              (.head_sha == $sha) and
@@ -102,7 +104,8 @@ jobs:
               {name: "Linux x86_64 client", status: "completed", conclusion: "success"},
               {name: "Windows x86_64 client", status: "completed", conclusion: "success"},
               {name: "macOS universal client", status: "completed", conclusion: "success"},
-              {name: "Assemble checksummed nonpublishing candidate", status: "completed", conclusion: "success"}
+              {name: "Assemble checksummed nonpublishing candidate", status: "completed", conclusion: "success"},
+              {name: "Validate protected trusted release candidate", status: "completed", conclusion: "success"}
             ] | sort_by(.name))' <<< "$jobs_json" > /dev/null
 
           ci_runs_json="$(
@@ -123,7 +126,7 @@ jobs:
                     (.head_repository.full_name == $repository)
                   )] |
                 if length >= 1 then sort_by(.run_attempt) | last | .id
-                else error("no successful tag CI run") end' \
+                else error("no successful exact-source CI run") end' \
               <<< "$ci_runs_json"
           )"
           [[ "$ci_run_id" =~ ^[0-9]+$ ]]
@@ -148,10 +151,12 @@ jobs:
           artifacts_json="$(
             gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"
           )"
-          jq -e --arg candidate "alpha-candidate-$source_sha" '
-            (.total_count == 4) and
+          jq -e \
+            --arg candidate "alpha-candidate-$source_sha" \
+            --arg trusted "alpha-trusted-candidate-$source_sha" '
+            (.total_count == 5) and
             (([.artifacts[].name] | sort) ==
-             (["client-linux", "client-macos", "client-windows", $candidate] | sort)) and
+             (["client-linux", "client-macos", "client-windows", $candidate, $trusted] | sort)) and
             all(.artifacts[]; (.expired == false) and (.size_in_bytes > 0))' \
             <<< "$artifacts_json" > /dev/null
 
@@ -168,6 +173,9 @@ jobs:
             exit 1
           fi
 
+          echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           github-token: ${{ github.token }}
@@ -180,7 +188,7 @@ jobs:
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.run_id }}
-          pattern: alpha-candidate-*
+          pattern: alpha-trusted-candidate-*
           path: candidate-metadata
           merge-multiple: true
 
@@ -189,8 +197,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          VALIDATED_TAG_SHA: ${{ steps.validate.outputs.tag_sha }}
+          VALIDATED_SOURCE_SHA: ${{ steps.validate.outputs.source_sha }}
         run: |
           set -euo pipefail
+
+          [[ "$VALIDATED_TAG_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VALIDATED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          version="${RELEASE_TAG#v}"
+          evidence="docs/release-evidence/${version}.json"
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$VALIDATED_TAG_SHA"
+          test "$(scripts/check-release-tag-binding.sh "$version" "$VALIDATED_TAG_SHA")" = "$VALIDATED_SOURCE_SHA"
+          scripts/check-alpha-evidence.py "$evidence" \
+            --version "$version" \
+            --source-sha "$VALIDATED_SOURCE_SHA" \
+            --expected-sha256 "$EVIDENCE_SHA256" >/dev/null
 
           expected=(
             Spurfire-linux-x86_64.tar.gz
@@ -203,7 +228,15 @@ jobs:
           done
           (cd release && sha256sum "${expected[@]}") > release/SHA256SUMS
           cmp -s release/SHA256SUMS candidate-metadata/SHA256SUMS
-          jq -e '
+          jq -e \
+            --arg source_sha "$VALIDATED_SOURCE_SHA" \
+            --argjson run_id "$SOURCE_RUN_ID" '
+            .schema_version == 2 and
+            .candidate_mode == "trusted-release" and
+            .candidate_only == false and
+            .source_sha == $source_sha and
+            .workflow.run_id == $run_id and
+            .workflow.event == "workflow_dispatch" and
             .release_eligible == true and
             .provenance_verified == true and
             .distribution_trust.macos.developer_id_signed == true and
@@ -214,9 +247,14 @@ jobs:
             echo 'candidate remains explicitly nonpublishing because platform trust or provenance is incomplete' >&2
             exit 1
           }
+          jq -e --arg source_sha "$VALIDATED_SOURCE_SHA" '
+            (.documentNamespace | contains("/candidate/" + $source_sha + "/")) and
+            all(.packages[]; .versionInfo == $source_sha)
+          ' candidate-metadata/candidate.spdx.json >/dev/null
           cp candidate-metadata/candidate.spdx.json release/Spurfire-client.spdx.json
           for file in "${expected[@]}"; do
-            gh attestation verify "release/$file" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "release/$file" --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$VALIDATED_SOURCE_SHA"
           done
 
           releases_json="$(
@@ -231,7 +269,8 @@ jobs:
             exit 1
           }
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$tag_sha"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$VALIDATED_TAG_SHA"
+          test "$(scripts/check-release-tag-binding.sh "$version" "$VALIDATED_TAG_SHA")" = "$VALIDATED_SOURCE_SHA"
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
