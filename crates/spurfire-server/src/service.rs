@@ -53,9 +53,10 @@ use crate::{
     crypto::{base64url_decode, base64url_encode, sha256},
     error::ApiError,
     provider::{
-        CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
-        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest,
-        ProviderError, ProviderNetworkIdentity, TailnetPresenceRequest,
+        dedicated_policy_digest, dedicated_rider_tag, CleanupLobbyRequest, CleanupOutcome,
+        CredentialCleanup, MintCredentialRequest, MutationGatedProvider, NetworkProvider,
+        ObserveNetworkRequest, PrepareLobbyRequest, ProviderError, ProviderNetworkIdentity,
+        TailnetPresenceRequest,
     },
     store::{
         apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
@@ -491,6 +492,12 @@ impl AppState {
                     stored.network_lifecycle,
                     NetworkLifecycle::Reserved | NetworkLifecycle::CreateRejected
                 );
+            let expected_policy_digest = dedicated_policy_digest(stored.lobby.lobby_id).ok();
+            let policy_evidence_missing = stored.lobby.provisioning_mode
+                == ProvisioningMode::TailnetPerLobby
+                && stored.network_lifecycle == NetworkLifecycle::Active
+                && (stored.child_policy_status.as_deref() != Some("verified")
+                    || stored.child_policy_digest.as_deref() != expected_policy_digest.as_deref());
             let access_error = self
                 .provider
                 .lobby_access_error(
@@ -523,14 +530,19 @@ impl AppState {
                         },
                     )
                 });
-            if identity_missing || access_error.is_some() {
+            if identity_missing || policy_evidence_missing || access_error.is_some() {
                 stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
                 stored.cleanup_pending = true;
                 stored.lobby.state_reason = Some(
                     access_error
-                        .map_or("provider_identity_missing_manual_remediation", |error| {
-                            error.state_reason()
-                        })
+                        .map_or(
+                            if policy_evidence_missing {
+                                "child_policy_evidence_missing_manual_remediation"
+                            } else {
+                                "provider_identity_missing_manual_remediation"
+                            },
+                            |error| error.state_reason(),
+                        )
                         .to_owned(),
                 );
                 let _ = self.store.replace(stored).await;
@@ -984,6 +996,13 @@ async fn create_lobby(
                             network_generation: advanced.network_generation,
                             captured_at: now,
                         });
+                        if effective_mode == ProvisioningMode::TailnetPerLobby {
+                            let evidence = prepared
+                                .child_policy_evidence
+                                .ok_or_else(|| internal_error(effective_dry_run))?;
+                            advanced.child_policy_digest = Some(evidence.semantic_digest);
+                            advanced.child_policy_status = Some("verified".to_owned());
+                        }
                         advanced.network_lifecycle = NetworkLifecycle::Active;
                     }
                     if prepared.dry_run
@@ -1010,6 +1029,44 @@ async fn create_lobby(
                 }
                 Err(error) => {
                     transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
+                    if let ProviderError::ChildPolicyGate {
+                        identity,
+                        expected_digest,
+                        status,
+                        delete_acknowledged,
+                    } = &error
+                    {
+                        advanced.tailnet = identity.tailnet_dns_name.as_str().to_owned();
+                        advanced.network_identity = Some(StoredNetworkIdentity {
+                            provider_tailnet_id: identity.provider_tailnet_id.clone(),
+                            tailnet_dns_name: identity.tailnet_dns_name.clone(),
+                            network_generation: advanced.network_generation,
+                            captured_at: now,
+                        });
+                        advanced.child_policy_digest = Some(expected_digest.clone());
+                        advanced.child_policy_status = Some(status.as_str().to_owned());
+                        advanced.cleanup_requested_at = Some(now);
+                        if *delete_acknowledged {
+                            advanced.delete_acknowledged_at = Some(now);
+                            advanced.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
+                        } else {
+                            advanced.network_lifecycle = NetworkLifecycle::CleanupPending;
+                        }
+                        advanced.cleanup_pending = true;
+                        advanced.lobby.state_reason = Some(error.state_reason().to_owned());
+                        advanced.terminal_at = Some(now);
+                        let response = create_response(&advanced, metadata_for(effective_dry_run));
+                        state.store.replace(advanced).await.map_err(|store_error| {
+                            store_api_error(&store_error, effective_dry_run)
+                        })?;
+                        return Ok(sensitive_json_response(
+                            StatusCode::CREATED,
+                            &CreateLobbyFirstResponse {
+                                response,
+                                creator_capability: creator_capability_wire,
+                            },
+                        ));
+                    }
                     let ambiguous_child_create = effective_mode
                         == ProvisioningMode::TailnetPerLobby
                         && matches!(error, ProviderError::Unavailable { .. });
@@ -1507,6 +1564,21 @@ async fn join_lobby(
                 transition(&mut stored.lobby, LobbyState::Failed, dry_run)?;
             }
             stored.lobby.state_reason = Some(reason.clone());
+            if let ProviderError::ChildPolicyGate {
+                expected_digest,
+                status,
+                delete_acknowledged,
+                ..
+            } = &error
+            {
+                stored.child_policy_digest = Some(expected_digest.clone());
+                stored.child_policy_status = Some(status.as_str().to_owned());
+                stored.cleanup_requested_at = Some(now);
+                if *delete_acknowledged {
+                    stored.delete_acknowledged_at = Some(now);
+                    stored.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
+                }
+            }
             stored.lobby.authority = None;
             stored.last_election = None;
             stored.terminal_at = Some(now);
@@ -1523,7 +1595,10 @@ async fn join_lobby(
                     ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch
                 );
             if stored.cleanup_pending
-                && stored.network_lifecycle != NetworkLifecycle::ManualRemediation
+                && !matches!(
+                    stored.network_lifecycle,
+                    NetworkLifecycle::ManualRemediation | NetworkLifecycle::VerifyingAbsence
+                )
             {
                 stored.network_lifecycle = NetworkLifecycle::CleanupPending;
             }
@@ -2737,6 +2812,7 @@ const fn observation_failure(error: &ProviderError) -> CachedObservationFailure 
         ProviderError::InsufficientScopes { .. } => CachedObservationFailure::PermissionDenied,
         ProviderError::IdentityMismatch => CachedObservationFailure::Conflict,
         ProviderError::ChildSecretUnavailable
+        | ProviderError::ChildPolicyGate { .. }
         | ProviderError::Upstream { .. }
         | ProviderError::Unavailable { .. } => CachedObservationFailure::SourceError,
     }
@@ -3296,7 +3372,7 @@ fn random_map_seed() -> u64 {
 }
 
 fn lobby_tag(lobby_id: LobbyId) -> String {
-    format!("tag:spurfire-lobby-{lobby_id}")
+    dedicated_rider_tag(lobby_id)
 }
 
 fn metadata_for(dry_run: bool) -> ResponseMetadata {
@@ -4043,6 +4119,11 @@ fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE,
             "manual_remediation_required",
             "provider credentials needed for this lobby are unavailable after restart",
+        ),
+        ProviderError::ChildPolicyGate { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "child_policy_gate_failed",
+            "the dedicated network failed restrictive policy verification and is being cleaned",
         ),
         ProviderError::InsufficientScopes { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,

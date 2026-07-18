@@ -145,8 +145,8 @@ absence plus encrypted-secret erasure, or complete shared-resource cleanup.
 Public real activation additionally requires capability migration on every lobby route, an
 independent default-off real-mutation kill switch, a dynamic encrypted child-OAuth vault,
 mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
-gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
-alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
+gateway abuse controls, private operator identity, live restrictive child-policy qualification,
+privacy approval, alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
 separate GitOps review. The hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`,
 `existingSecret=""`, and `persistence.enabled=false` until that review.
 

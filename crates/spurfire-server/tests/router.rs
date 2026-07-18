@@ -12,15 +12,16 @@ use axum::{
 use ed25519_dalek::{Signer, SigningKey};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use spurfire_control::{ChildPolicyEvidence, ChildTailnetPolicy};
 use spurfire_protocol::{
     canonical_keyreg_digest, canonical_manifest_digest, LobbyId, NetworkLifecycle, PlayerId,
     ProvisioningMode, ResponseMetadata, RosterManifest, RosterManifestEntry, SessionPublicKey,
     SessionSignature, TailnetDnsName, UnixMillis, DRY_RUN_AUTH_KEY,
 };
 use spurfire_server::{
-    build_router, AppState, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider,
-    InMemoryStore, JsonFileStore, ManualClock, MintCredentialRequest, MintedCredential,
-    NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
+    build_router, AppState, ChildPolicyStatus, CleanupLobbyRequest, CleanupOutcome, Config,
+    DryRunProvider, InMemoryStore, JsonFileStore, LobbyStore, ManualClock, MintCredentialRequest,
+    MintedCredential, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
     ProviderCapabilities, ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity,
     SecretString, TailnetPresenceRequest,
 };
@@ -46,6 +47,7 @@ struct RecordingProvider {
     tailnet_present: AtomicBool,
     fail_identity_cleanup: AtomicBool,
     fail_secret_erasure: AtomicBool,
+    policy_gate_failure: Mutex<Option<(ChildPolicyStatus, bool)>>,
     cleanup_requests: Mutex<Vec<CleanupLobbyRequest>>,
 }
 
@@ -66,6 +68,7 @@ impl RecordingProvider {
             tailnet_present: AtomicBool::new(false),
             fail_identity_cleanup: AtomicBool::new(false),
             fail_secret_erasure: AtomicBool::new(false),
+            policy_gate_failure: Mutex::new(None),
             cleanup_requests: Mutex::new(Vec::new()),
         }
     }
@@ -132,6 +135,10 @@ impl RecordingProvider {
     fn fail_secret_erasure(&self) {
         self.fail_secret_erasure.store(true, Ordering::SeqCst);
     }
+
+    fn fail_policy_gate(&self, status: ChildPolicyStatus, delete_acknowledged: bool) {
+        *self.policy_gate_failure.lock().unwrap() = Some((status, delete_acknowledged));
+    }
 }
 
 #[async_trait]
@@ -167,13 +174,34 @@ impl NetworkProvider for RecordingProvider {
         } else {
             "shared-test.ts.net"
         };
+        let identity = (!request.dry_run).then(|| ProviderNetworkIdentity {
+            provider_tailnet_id: (request.mode == ProvisioningMode::TailnetPerLobby)
+                .then(|| "TtRouterCNTRL".to_owned()),
+            tailnet_dns_name: TailnetDnsName::parse(tailnet).unwrap(),
+        });
+        if request.mode == ProvisioningMode::TailnetPerLobby && !request.dry_run {
+            if let Some((status, delete_acknowledged)) = *self.policy_gate_failure.lock().unwrap() {
+                return Err(ProviderError::ChildPolicyGate {
+                    identity: identity.clone().unwrap(),
+                    expected_digest: "a".repeat(64),
+                    status,
+                    delete_acknowledged,
+                });
+            }
+        }
         Ok(PreparedNetwork {
             tailnet: tailnet.to_owned(),
-            identity: (!request.dry_run).then(|| ProviderNetworkIdentity {
-                provider_tailnet_id: (request.mode == ProvisioningMode::TailnetPerLobby)
-                    .then(|| "TtRouterCNTRL".to_owned()),
-                tailnet_dns_name: TailnetDnsName::parse(tailnet).unwrap(),
-            }),
+            identity,
+            child_policy_evidence: (!request.dry_run
+                && request.mode == ProvisioningMode::TailnetPerLobby)
+                .then(|| ChildPolicyEvidence {
+                    semantic_digest: ChildTailnetPolicy::restrictive_riders(&format!(
+                        "tag:spurfire-lobby-{}",
+                        request.lobby_id
+                    ))
+                    .unwrap()
+                    .semantic_digest(),
+                }),
             dry_run: request.dry_run,
             metadata: ResponseMetadata {
                 dry_run: request.dry_run,
@@ -1028,6 +1056,31 @@ async fn real_mutations_default_off_and_singleton_lease_is_atomic() {
         second.1
     };
     assert_eq!(conflict["code"], "real_lobby_capacity_reached");
+    assert_eq!(provider.mutation_count(), 1);
+    assert!(store.real_lobby_lease_held().await);
+}
+
+#[tokio::test]
+async fn child_policy_failure_persists_safe_evidence_and_retains_real_lease() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_450_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    provider.fail_policy_gate(ChildPolicyStatus::Unavailable, true);
+    let (app, _, store) = live_app(clock, provider.clone());
+
+    let (status, created) = create(&app, "create-policy-timeout", "tailnet_per_lobby", 2).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let lobby_id =
+        spurfire_protocol::LobbyId::parse(created["lobby_id"].as_str().unwrap()).unwrap();
+    let stored = store.get(lobby_id).await.unwrap();
+    let diagnostic = format!("{stored:?}");
+    assert!(diagnostic.contains("state: Failed"));
+    assert!(diagnostic.contains("child_policy_unavailable"));
+    assert!(diagnostic.contains("cleanup_pending: true"));
+    assert!(diagnostic.contains("child_policy_digest_present: true"));
+    assert!(diagnostic.contains("child_policy_status: Some(\"unavailable\")"));
+    assert!(!diagnostic.contains("grants"));
+    assert!(!diagnostic.contains("udp:41643"));
     assert_eq!(provider.mutation_count(), 1);
     assert!(store.real_lobby_lease_held().await);
 }

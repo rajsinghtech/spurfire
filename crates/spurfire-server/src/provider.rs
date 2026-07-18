@@ -7,10 +7,14 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, RwLock,
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
-use spurfire_control::{AuthKeyOpts, ChildTailscaleClient, ControlError, TailscaleClient};
+use spurfire_control::{
+    AuthKeyOpts, ChildPolicyEvidence, ChildTailnetPolicy, ChildTailscaleClient, ControlError,
+    TailscaleClient,
+};
 
 use crate::vault::{ChildVaultIdentity, EncryptedChildVault, VaultError};
 use spurfire_protocol::{
@@ -21,6 +25,11 @@ use spurfire_protocol::{
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
+
+#[cfg(not(test))]
+const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Provider request made while a lobby record is being prepared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +85,8 @@ pub struct PreparedNetwork {
     pub tailnet: String,
     /// Exact provider identity; absent only in dry run.
     pub identity: Option<ProviderNetworkIdentity>,
+    /// Digest-only evidence of a successful restrictive child-policy readback.
+    pub child_policy_evidence: Option<ChildPolicyEvidence>,
     /// True when the provider suppressed all mutations.
     pub dry_run: bool,
     /// Response metadata for the create operation.
@@ -350,9 +361,22 @@ pub enum ProviderError {
     /// Durable lobby/generation/stable-ID/FQDN and provider custody disagree.
     #[error("provider identity tuple mismatch; manual remediation is required")]
     IdentityMismatch,
-    /// A child-tailnet record survived a process restart but its in-memory OAuth material did not.
+    /// A child-tailnet record survived but its exact encrypted/process-local OAuth custody did not.
     #[error("child tailnet credentials are unavailable; manual remediation is required")]
     ChildSecretUnavailable,
+    /// A created child failed the restrictive policy/readback gate. Exact identity and digest-only
+    /// evidence are retained so cleanup can continue without a display-name lookup.
+    #[error("child-tailnet restrictive policy gate failed closed")]
+    ChildPolicyGate {
+        /// Exact provider identity captured before policy application.
+        identity: ProviderNetworkIdentity,
+        /// Expected normalized semantic digest; contains no provider body.
+        expected_digest: String,
+        /// Stable non-secret failure status.
+        status: ChildPolicyStatus,
+        /// Whether exact child-scoped deletion returned success/404.
+        delete_acknowledged: bool,
+    },
     /// OAuth scopes denied a required operation.
     #[error("provider scopes are insufficient for {operation}")]
     InsufficientScopes {
@@ -375,6 +399,28 @@ pub enum ProviderError {
     },
 }
 
+/// Safe child-policy gate status persisted/exposed only as coarse evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildPolicyStatus {
+    /// Provider readback differed semantically from the generated policy.
+    Mismatch,
+    /// Child scope was denied policy write or read.
+    Denied,
+    /// Transport, timeout, or decoding prevented a matching readback.
+    Unavailable,
+}
+
+impl ChildPolicyStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mismatch => "mismatch",
+            Self::Denied => "denied",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 impl ProviderError {
     /// Machine-readable lobby reason suitable for a public response.
     #[must_use]
@@ -383,6 +429,18 @@ impl ProviderError {
             Self::RealMutationsDisabled => "real_mutations_disabled",
             Self::IdentityMismatch => "provider_identity_mismatch_manual_remediation",
             Self::ChildSecretUnavailable => "child_secret_unavailable_manual_remediation",
+            Self::ChildPolicyGate {
+                status: ChildPolicyStatus::Mismatch,
+                ..
+            } => "child_policy_readback_mismatch",
+            Self::ChildPolicyGate {
+                status: ChildPolicyStatus::Denied,
+                ..
+            } => "child_policy_blocked_403",
+            Self::ChildPolicyGate {
+                status: ChildPolicyStatus::Unavailable,
+                ..
+            } => "child_policy_unavailable",
             Self::InsufficientScopes {
                 operation: "organization_tailnet_create",
             } => "provisioning_blocked_organization_tailnets",
@@ -790,6 +848,53 @@ impl TailscaleProvider {
         self.child_vault.read().map_or(0, |vault| vault.len())
     }
 
+    async fn gate_child_policy_or_cleanup(
+        &self,
+        lobby_id: LobbyId,
+        identity: &ProviderNetworkIdentity,
+        child: &ChildTailscaleClient,
+        apply_first: bool,
+    ) -> Result<ChildPolicyEvidence, ProviderError> {
+        let policy = ChildTailnetPolicy::restrictive_riders(&dedicated_rider_tag(lobby_id))
+            .map_err(|_| ProviderError::IdentityMismatch)?;
+        let result = tokio::time::timeout(CHILD_POLICY_GATE_TIMEOUT, async {
+            if apply_first {
+                child
+                    .apply_and_verify_policy(identity.tailnet_dns_name.as_str(), &policy)
+                    .await
+            } else {
+                child
+                    .verify_policy(identity.tailnet_dns_name.as_str(), &policy)
+                    .await
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(evidence)) => Ok(evidence),
+            result => {
+                let status = match result {
+                    Ok(Err(ControlError::PolicyMismatch)) => ChildPolicyStatus::Mismatch,
+                    Ok(Err(ControlError::Http { status: 403 })) => ChildPolicyStatus::Denied,
+                    Ok(Err(_)) | Err(_) => ChildPolicyStatus::Unavailable,
+                    Ok(Ok(_)) => unreachable!("successful policy evidence returned above"),
+                };
+                // The exact typed FQDN and child scope are already available. Best-effort delete
+                // occurs before returning failure; encrypted custody is deliberately retained for
+                // the normal exact-absence proof and CAS erasure path.
+                let delete_acknowledged = child
+                    .delete_tailnet(identity.tailnet_dns_name.as_str())
+                    .await
+                    .is_ok();
+                Err(ProviderError::ChildPolicyGate {
+                    identity: identity.clone(),
+                    expected_digest: policy.semantic_digest(),
+                    status,
+                    delete_acknowledged,
+                })
+            }
+        }
+    }
+
     /// Builds the control adapter from `TS_API_BASE`, `TS_CLIENT_ID`, and
     /// `TS_CLIENT_SECRET`. The values remain inside `spurfire-control`.
     pub async fn from_env(shared_tailnet: impl Into<String>) -> Result<Self, ProviderError> {
@@ -988,6 +1093,7 @@ impl NetworkProvider for TailscaleProvider {
                     provider_tailnet_id: None,
                     tailnet_dns_name,
                 }),
+                child_policy_evidence: None,
                 dry_run: false,
                 metadata: ResponseMetadata::default(),
             });
@@ -997,21 +1103,34 @@ impl NetworkProvider for TailscaleProvider {
         // creation, but the provider boundary must also be safe when called directly or by a
         // future multi-request adapter.
         let _create_guard = self.child_create_lock.lock().await;
-        if let Ok(vault) = self.child_vault.read() {
-            if let Some(access) = vault.get(&request.lobby_id) {
-                if access.network_generation != request.network_generation {
-                    return Err(ProviderError::IdentityMismatch);
-                }
-                return Ok(PreparedNetwork {
-                    tailnet: access.dns_name.as_str().to_owned(),
-                    identity: Some(ProviderNetworkIdentity {
-                        provider_tailnet_id: Some(access.provider_tailnet_id.clone()),
-                        tailnet_dns_name: access.dns_name.clone(),
-                    }),
-                    dry_run: false,
-                    metadata: ResponseMetadata::default(),
-                });
+        let cached_access = self.child_vault.read().ok().and_then(|vault| {
+            vault.get(&request.lobby_id).map(|access| {
+                (
+                    access.network_generation,
+                    access.provider_tailnet_id.clone(),
+                    access.dns_name.clone(),
+                    Arc::clone(&access.client),
+                )
+            })
+        });
+        if let Some((generation, provider_tailnet_id, dns_name, child)) = cached_access {
+            if generation != request.network_generation {
+                return Err(ProviderError::IdentityMismatch);
             }
+            let identity = ProviderNetworkIdentity {
+                provider_tailnet_id: Some(provider_tailnet_id),
+                tailnet_dns_name: dns_name.clone(),
+            };
+            let evidence = self
+                .gate_child_policy_or_cleanup(request.lobby_id, &identity, &child, false)
+                .await?;
+            return Ok(PreparedNetwork {
+                tailnet: dns_name.as_str().to_owned(),
+                identity: Some(identity),
+                child_policy_evidence: Some(evidence),
+                dry_run: false,
+                metadata: ResponseMetadata::default(),
+            });
         }
 
         if let Some(durable) = &self.durable_child_vault {
@@ -1026,6 +1145,10 @@ impl NetworkProvider for TailscaleProvider {
                 }
                 let (credentials, _) = durable.get_exact(&identity).map_err(map_vault_error)?;
                 let child = Arc::new(self.client.child_scoped(credentials));
+                let provider_identity = ProviderNetworkIdentity {
+                    provider_tailnet_id: Some(identity.provider_tailnet_id.clone()),
+                    tailnet_dns_name: identity.tailnet_dns_name.clone(),
+                };
                 self.child_vault
                     .write()
                     .map_err(|_| ProviderError::Unavailable {
@@ -1035,17 +1158,23 @@ impl NetworkProvider for TailscaleProvider {
                         request.lobby_id,
                         ChildTailnetAccess {
                             network_generation: identity.network_generation,
-                            provider_tailnet_id: identity.provider_tailnet_id.clone(),
+                            provider_tailnet_id: identity.provider_tailnet_id,
                             dns_name: identity.tailnet_dns_name.clone(),
-                            client: child,
+                            client: Arc::clone(&child),
                         },
                     );
+                let evidence = self
+                    .gate_child_policy_or_cleanup(
+                        request.lobby_id,
+                        &provider_identity,
+                        &child,
+                        false,
+                    )
+                    .await?;
                 return Ok(PreparedNetwork {
                     tailnet: identity.tailnet_dns_name.as_str().to_owned(),
-                    identity: Some(ProviderNetworkIdentity {
-                        provider_tailnet_id: Some(identity.provider_tailnet_id),
-                        tailnet_dns_name: identity.tailnet_dns_name,
-                    }),
+                    identity: Some(provider_identity),
+                    child_policy_evidence: Some(evidence),
                     dry_run: false,
                     metadata: ResponseMetadata::default(),
                 });
@@ -1093,19 +1222,24 @@ impl NetworkProvider for TailscaleProvider {
                     network_generation: request.network_generation,
                     provider_tailnet_id: provider_tailnet_id.clone(),
                     dns_name: dns_name.clone(),
-                    client: child,
+                    client: Arc::clone(&child),
                 },
             );
+        let identity = ProviderNetworkIdentity {
+            provider_tailnet_id: Some(provider_tailnet_id.clone()),
+            tailnet_dns_name: dns_name.clone(),
+        };
+        let evidence = self
+            .gate_child_policy_or_cleanup(request.lobby_id, &identity, &child, true)
+            .await?;
         if let Ok(mut cache) = self.capabilities.write() {
             cache.oauth_token_ok = true;
             cache.can_manage_organization_tailnets = true;
         }
         Ok(PreparedNetwork {
             tailnet: dns_name.as_str().to_owned(),
-            identity: Some(ProviderNetworkIdentity {
-                provider_tailnet_id: Some(provider_tailnet_id),
-                tailnet_dns_name: dns_name,
-            }),
+            identity: Some(identity),
+            child_policy_evidence: Some(evidence),
             dry_run: false,
             metadata: ResponseMetadata::default(),
         })
@@ -1124,7 +1258,7 @@ impl NetworkProvider for TailscaleProvider {
             ephemeral: true,
             preauthorized: true,
             reusable: false,
-            tags: vec![request.tag],
+            tags: vec![request.tag.clone()],
             ttl_secs: 300,
         };
         let key = match request.mode {
@@ -1138,12 +1272,23 @@ impl NetworkProvider for TailscaleProvider {
                     .identity
                     .as_ref()
                     .ok_or(ProviderError::IdentityMismatch)?;
-                if identity.tailnet_dns_name.as_str() != request.tailnet {
+                if identity.tailnet_dns_name.as_str() != request.tailnet
+                    || request.tag != dedicated_rider_tag(request.lobby_id)
+                {
                     return Err(ProviderError::IdentityMismatch);
                 }
                 let child = self
                     .child_access(request.lobby_id, request.network_generation, identity)
                     .await?;
+                // Re-read immediately before every mint. A cached earlier success cannot authorize
+                // a key after out-of-band policy drift.
+                self.gate_child_policy_or_cleanup(
+                    request.lobby_id,
+                    identity,
+                    child.as_ref(),
+                    false,
+                )
+                .await?;
                 child.create_auth_key(&request.tailnet, &options).await
             }
             ProvisioningMode::DryRun => unreachable!("dry-run returned above"),
@@ -1457,6 +1602,7 @@ fn dry_prepared_network() -> PreparedNetwork {
     PreparedNetwork {
         tailnet: "dry-run.invalid".to_owned(),
         identity: None,
+        child_policy_evidence: None,
         dry_run: true,
         metadata: ResponseMetadata {
             dry_run: true,
@@ -1531,6 +1677,18 @@ fn map_vault_error(error: VaultError) -> ProviderError {
     }
 }
 
+/// The one generated rider tag shared by policy and tagged auth-key issuance.
+#[must_use]
+pub fn dedicated_rider_tag(lobby_id: LobbyId) -> String {
+    format!("tag:spurfire-lobby-{lobby_id}")
+}
+
+pub(crate) fn dedicated_policy_digest(lobby_id: LobbyId) -> Result<String, ProviderError> {
+    ChildTailnetPolicy::restrictive_riders(&dedicated_rider_tag(lobby_id))
+        .map(|policy| policy.semantic_digest())
+        .map_err(|_| ProviderError::IdentityMismatch)
+}
+
 fn valid_provider_tailnet_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -1544,9 +1702,10 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
         ControlError::Http { status: 403, .. } => ProviderError::InsufficientScopes { operation },
         ControlError::Http { status, .. } => ProviderError::Upstream { operation, status },
         ControlError::ProvisioningUnavailable(_) => ProviderError::Unavailable { operation },
-        ControlError::InvalidTailnetName(_) | ControlError::InvalidProviderPath => {
-            ProviderError::IdentityMismatch
-        }
+        ControlError::InvalidTailnetName(_)
+        | ControlError::InvalidProviderPath
+        | ControlError::InvalidPolicy
+        | ControlError::PolicyMismatch => ProviderError::IdentityMismatch,
         ControlError::Env(_) | ControlError::Reqwest(_) | ControlError::Json(_) => {
             ProviderError::Unavailable { operation }
         }
@@ -1555,9 +1714,72 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
 
 #[cfg(test)]
 mod tests {
-    use mockito::{Matcher, Server};
+    use mockito::{Matcher, Mock, Server};
 
     use super::*;
+
+    fn policy_readback(lobby_id: LobbyId) -> String {
+        let tag = dedicated_rider_tag(lobby_id);
+        serde_json::json!({
+            "tagOwners": {(tag.clone()): []},
+            "grants": [{"src":[tag.clone()], "dst":[tag], "ip":["udp:41643"]}]
+        })
+        .to_string()
+    }
+
+    async fn policy_fault_provider(
+        server: &mut Server,
+    ) -> (TailscaleProvider, LobbyId, Mock, Mock, Mock) {
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let organization_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::UrlEncoded("client_id".into(), "policy-org".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"organization-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .match_header("authorization", "Bearer organization-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "id":"TtPolicyFaultCNTRL",
+                    "dnsName":"tail-policy-fault.ts.net",
+                    "displayName":format!("spurfire-{lobby_id}"),
+                    "oauthClient":{"id":"policy-child","secret":"policy-child-secret"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let child_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::UrlEncoded(
+                "client_id".into(),
+                "policy-child".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"child-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        (
+            TailscaleProvider::new(
+                TailscaleClient::new(server.url(), "policy-org", "policy-org-secret"),
+                "-",
+            ),
+            lobby_id,
+            organization_token,
+            create,
+            child_token,
+        )
+    }
 
     #[test]
     fn secret_debug_is_redacted() {
@@ -1742,6 +1964,11 @@ mod tests {
             .expect(0)
             .create_async()
             .await;
+        let no_gets = server
+            .mock("GET", Matcher::Regex(".*".to_owned()))
+            .expect(0)
+            .create_async()
+            .await;
         let client = TailscaleClient::new(
             server.url(),
             "oauth-client-canary",
@@ -1797,6 +2024,7 @@ mod tests {
         assert_eq!(provider.child_secret_count(), 0);
         no_posts.assert_async().await;
         no_deletes.assert_async().await;
+        no_gets.assert_async().await;
     }
 
     #[tokio::test]
@@ -1848,6 +2076,23 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let policy_write = server
+            .mock("POST", "/tailnet/tail-provider.ts.net/acl")
+            .match_header("authorization", "Bearer child-token")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let policy_read = server
+            .mock("GET", "/tailnet/tail-provider.ts.net/acl")
+            .match_header("authorization", "Bearer child-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(policy_readback(lobby_id))
+            .expect(3)
+            .create_async()
+            .await;
         let key = server
             .mock("POST", "/tailnet/tail-provider.ts.net/keys")
             .match_header("authorization", "Bearer child-token")
@@ -1868,7 +2113,6 @@ mod tests {
             TailscaleClient::new(server.url(), "org-client", "org-secret"),
             "-",
         ));
-        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let player_id = PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap();
         let prepare_request = PrepareLobbyRequest {
             lobby_id,
@@ -1898,7 +2142,7 @@ mod tests {
                 mode: ProvisioningMode::TailnetPerLobby,
                 player_id,
                 tailnet: prepared.tailnet.clone(),
-                tag: "tag:spurfire-lobby-test".to_owned(),
+                tag: dedicated_rider_tag(lobby_id),
                 expires_at: UnixMillis::new(300_000),
                 dry_run: false,
             })
@@ -1946,8 +2190,224 @@ mod tests {
         organization_token.assert_async().await;
         create.assert_async().await;
         child_token.assert_async().await;
+        policy_write.assert_async().await;
+        policy_read.assert_async().await;
         key.assert_async().await;
         delete.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn policy_mismatch_deletes_before_mint_and_retains_encrypted_custody() {
+        let root = std::env::temp_dir().join(format!(
+            "spurfire-policy-mismatch-vault-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let key_path = root.join("key");
+        tokio::fs::write(&key_path, [17_u8; 32]).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                .await
+                .unwrap();
+        }
+        let durable = Arc::new(
+            EncryptedChildVault::open(root.join("vault.json"), &key_path)
+                .await
+                .unwrap(),
+        );
+        let mut server = Server::new_async().await;
+        let (mut provider, lobby_id, organization_token, create, child_token) =
+            policy_fault_provider(&mut server).await;
+        provider.durable_child_vault = Some(Arc::clone(&durable));
+        let tag = dedicated_rider_tag(lobby_id);
+        let policy_write = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/acl")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let policy_read = server
+            .mock("GET", "/tailnet/tail-policy-fault.ts.net/acl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "tagOwners":{(tag.clone()):[]},
+                    "grants":[{"src":[tag.clone()],"dst":[tag],"ip":["tcp:41643"]}]
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let delete = server
+            .mock("DELETE", "/tailnet/tail-policy-fault.ts.net")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let no_key = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/keys")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let error = provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 1,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+
+        match error {
+            ProviderError::ChildPolicyGate {
+                expected_digest,
+                status,
+                delete_acknowledged,
+                ..
+            } => {
+                assert_eq!(expected_digest.len(), 64);
+                assert_eq!(status, ChildPolicyStatus::Mismatch);
+                assert!(delete_acknowledged);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(provider.child_secret_count(), 1);
+        assert!(durable.contains_lobby(lobby_id));
+        organization_token.assert_async().await;
+        create.assert_async().await;
+        child_token.assert_async().await;
+        policy_write.assert_async().await;
+        policy_read.assert_async().await;
+        delete.assert_async().await;
+        no_key.assert_async().await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn policy_403_deletes_before_mint_and_exposes_only_safe_status() {
+        let mut server = Server::new_async().await;
+        let (provider, lobby_id, organization_token, create, child_token) =
+            policy_fault_provider(&mut server).await;
+        let denied = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/acl")
+            .with_status(403)
+            .with_body(r#"{"secret":"policy-provider-body-canary"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let delete = server
+            .mock("DELETE", "/tailnet/tail-policy-fault.ts.net")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let no_read = server
+            .mock("GET", "/tailnet/tail-policy-fault.ts.net/acl")
+            .expect(0)
+            .create_async()
+            .await;
+        let no_key = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/keys")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let error = provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 1,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        let diagnostic = format!("{error:?}");
+        assert!(!diagnostic.contains("policy-provider-body-canary"));
+        assert!(matches!(
+            error,
+            ProviderError::ChildPolicyGate {
+                status: ChildPolicyStatus::Denied,
+                delete_acknowledged: true,
+                ..
+            }
+        ));
+        assert_eq!(provider.child_secret_count(), 1);
+        organization_token.assert_async().await;
+        create.assert_async().await;
+        child_token.assert_async().await;
+        denied.assert_async().await;
+        delete.assert_async().await;
+        no_read.assert_async().await;
+        no_key.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn policy_timeout_is_bounded_then_deletes_before_mint() {
+        let mut server = Server::new_async().await;
+        let (provider, lobby_id, organization_token, create, child_token) =
+            policy_fault_provider(&mut server).await;
+        let policy_write = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/acl")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let readback = policy_readback(lobby_id);
+        let delayed_read = server
+            .mock("GET", "/tailnet/tail-policy-fault.ts.net/acl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_chunked_body(move |writer| {
+                std::thread::sleep(Duration::from_millis(250));
+                writer.write_all(readback.as_bytes())
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let delete = server
+            .mock("DELETE", "/tailnet/tail-policy-fault.ts.net")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let no_key = server
+            .mock("POST", "/tailnet/tail-policy-fault.ts.net/keys")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let error = provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 1,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::ChildPolicyGate {
+                status: ChildPolicyStatus::Unavailable,
+                delete_acknowledged: true,
+                ..
+            }
+        ));
+        assert_eq!(provider.child_secret_count(), 1);
+        organization_token.assert_async().await;
+        create.assert_async().await;
+        child_token.assert_async().await;
+        policy_write.assert_async().await;
+        delayed_read.assert_async().await;
+        delete.assert_async().await;
+        no_key.assert_async().await;
     }
 
     #[tokio::test]
@@ -1973,10 +2433,23 @@ mod tests {
         let mut server = Server::new_async().await;
         let token = server
             .mock("POST", "/oauth/token")
+            .match_body(Matcher::UrlEncoded("client_id".into(), "org".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"access_token":"organization-token","expires_in":3600}"#)
             .expect(1)
+            .create_async()
+            .await;
+        let child_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::UrlEncoded(
+                "client_id".into(),
+                "child-restart-id".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"child-token","expires_in":3600}"#)
+            .expect(2)
             .create_async()
             .await;
         let create = server
@@ -2001,6 +2474,20 @@ mod tests {
             mode: ProvisioningMode::TailnetPerLobby,
             dry_run: false,
         };
+        let policy_write = server
+            .mock("POST", "/tailnet/restart-vault.ts.net/acl")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let policy_read = server
+            .mock("GET", "/tailnet/restart-vault.ts.net/acl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(policy_readback(lobby_id))
+            .expect(2)
+            .create_async()
+            .await;
         let mut first =
             TailscaleProvider::new(TailscaleClient::new(server.url(), "org", "secret"), "-");
         first.durable_child_vault = Some(Arc::clone(&durable));
@@ -2022,7 +2509,10 @@ mod tests {
         // state commit: the retry must treat the exact missing tuple as erased.
         restarted.erase_child_secret(erase).await.unwrap();
         token.assert_async().await;
+        child_token.assert_async().await;
         create.assert_async().await;
+        policy_write.assert_async().await;
+        policy_read.assert_async().await;
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
@@ -2053,6 +2543,30 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let child_token = server
+            .mock("POST", "/oauth/token")
+            .match_body(Matcher::UrlEncoded("client_id".into(), "child-id".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"child-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let policy_write = server
+            .mock("POST", "/tailnet/tail-exact.ts.net/acl")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let policy_read = server
+            .mock("GET", "/tailnet/tail-exact.ts.net/acl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(policy_readback(lobby_id))
+            .expect(1)
+            .create_async()
+            .await;
         let no_delete = server
             .mock("DELETE", Matcher::Regex(".*".to_owned()))
             .expect(0)
@@ -2062,7 +2576,6 @@ mod tests {
             TailscaleClient::new(server.url(), "org-client", "org-secret"),
             "shared.ts.net",
         );
-        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let prepared = provider
             .prepare_lobby(PrepareLobbyRequest {
                 lobby_id,
@@ -2091,6 +2604,9 @@ mod tests {
         assert_eq!(provider.child_secret_count(), 1);
         organization_token.assert_async().await;
         create.assert_async().await;
+        child_token.assert_async().await;
+        policy_write.assert_async().await;
+        policy_read.assert_async().await;
         no_delete.assert_async().await;
     }
 
@@ -2125,7 +2641,7 @@ mod tests {
                 mode: ProvisioningMode::TailnetPerLobby,
                 player_id: PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
                 tailnet: "tail-restarted.ts.net".to_owned(),
-                tag: "tag:spurfire-lobby-test".to_owned(),
+                tag: dedicated_rider_tag(lobby_id),
                 expires_at: UnixMillis::new(300_000),
                 dry_run: false,
             })

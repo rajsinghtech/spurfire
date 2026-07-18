@@ -254,6 +254,12 @@ pub struct StoredLobby {
     pub(crate) network_lifecycle: NetworkLifecycle,
     #[serde(default)]
     pub(crate) network_identity: Option<StoredNetworkIdentity>,
+    /// SHA-256 over normalized generated child-policy semantics; never a provider body.
+    #[serde(default)]
+    pub(crate) child_policy_digest: Option<String>,
+    /// Coarse policy gate status (`verified`, `mismatch`, `denied`, or `unavailable`).
+    #[serde(default)]
+    pub(crate) child_policy_status: Option<String>,
     #[serde(default)]
     pub(crate) cleanup_requested_at: Option<UnixMillis>,
     #[serde(default)]
@@ -314,6 +320,8 @@ impl StoredLobby {
                 NetworkLifecycle::Reserved
             },
             network_identity: None,
+            child_policy_digest: None,
+            child_policy_status: None,
             cleanup_requested_at: None,
             delete_acknowledged_at: None,
             child_secret_erased_at: None,
@@ -458,6 +466,11 @@ impl fmt::Debug for StoredLobby {
             .field("session_generation", &self.session_generation)
             .field("network_lifecycle", &self.network_lifecycle)
             .field("network_identity_present", &self.network_identity.is_some())
+            .field(
+                "child_policy_digest_present",
+                &self.child_policy_digest.is_some(),
+            )
+            .field("child_policy_status", &self.child_policy_status)
             .field("capability_count", &self.capabilities.len())
             .field("measurement_count", &self.measurements.len())
             .field("credential_receipt_count", &self.credentials.len())

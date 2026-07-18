@@ -12,11 +12,12 @@ This document is the source of truth for dedicated lobby-network ownership, the 
 |---|---|
 | Organization tailnet list/create, typed stable ID and `dnsName`, child OAuth exchange, and child-scoped deletion | Implemented and live-proven in bounded disposable probes |
 | Child-scoped one-use auth-key issuance | Implemented and mock-tested; live end-to-end verification remains required |
+| Restrictive child policy | Typed same-rider-tag UDP/41643-only policy, exact child-scoped write, semantic readback before activation/every mint, digest/status-only persistence, and mismatch/403/timeout cleanup are mock/fault-tested; no live policy mutation/readback claim |
 | Dedicated `tailnet_per_lobby` isolation | Selected real-lobby path |
 | `shared_tailnet` | Separate compatibility path; never represented as dedicated isolation |
 | Child OAuth custody | Versioned ChaCha20-Poly1305 file vault with mounted key, exact tuple binding, restart recovery, CAS deletion, and secret canaries; setec/workload identity, external audit, backup/restore, and rotation remain required |
 | Durable provider identity, selected-lobby DTO/cache, capability-protected mutations, one-use grants/invitations, one-real-lobby lease, startup reconciliation, and default-off deployment switch | Integrated safe groundwork; not a basis for enabling public real mode |
-| Private operator listener, writer fencing, gateway-persistent limits/alerts, restrictive child policy, complete directional session reports, and separately authorized live proof | Activation work remains open |
+| Private operator listener, gateway-persistent limits/alerts, complete directional session reports, production secret-manager controls, and separately authorized live proof (including restrictive policy) | Activation work remains open |
 | Hosted public deployment | Public, credential-free, non-persistent dry-run; no real provider mutation |
 
 The server can exercise real provider code only when deliberately configured past its independent default-off switch. That private integration ability is not production authorization. The chart fixes the switch off and rejects enabling it. Until every gate in [Activation gates](#activation-gates) is green, public deployments must have no credential path and must force `dry_run`.
@@ -383,7 +384,7 @@ Every item is mandatory; order does not imply partial activation:
 - [ ] The create-to-vault crash window and exact-ID manual orphan-remediation procedure are approved and exercised.
 - [ ] Atomic one-real-lobby lease behavior is proven under concurrent create, replay, crash, timeout, restart, and cleanup/vault failure; deployment is single writer or uses fencing.
 - [ ] Public real mode accepts only `tailnet_per_lobby`; shared compatibility remains separately configured and consumes the same quota.
-- [ ] A restrictive child policy is applied and read back: rider tags reach only required gameplay UDP, with no SSH, Serve/Funnel, subnet/exit routes, unintended service, or control-plane membership. Direct, DERP, and Peer Relay paths are live-tested.
+- [ ] The implemented restrictive child policy is separately live-applied and read back: rider tags reach only gameplay UDP/41643, with no SSH, Serve/Funnel, subnet/exit routes, unintended service, or control-plane membership. The checked box requires approved live evidence; mocks alone do not satisfy it. Direct, DERP, and Peer Relay paths are live-tested.
 - [ ] Child-scoped device-list scopes and field semantics are live-verified. Provider online remains unknown if no verified field exists.
 - [ ] Application-level lobby/player/session binding is deployed; tailnet membership, hostname, address, device count, and peer report never become identity.
 - [ ] The operator listener is private and unreachable through the hosted public Gateway.
