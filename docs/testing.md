@@ -170,12 +170,12 @@ git diff --check origin/main...HEAD
 scripts/check-packaging.sh
 ```
 
-Implementation branches additionally run their scoped Rust checks on the Linux builder. Cross-platform compilation, tests, and artifacts run only in GitHub Actions. No test in this slice may create/delete a live tailnet, alter Ottawa, disturb a managed peer session, tag a release, or publish a package.
+Implementation branches additionally run their scoped Rust checks on the Linux builder. Cross-platform compilation, tests, and artifacts run only in GitHub Actions. No test in this slice may create/delete a live tailnet, alter a hosted deployment, disturb a managed peer session, tag a release, or publish a package.
 
 Before a separate public-real activation review, the evidence bundle must include:
 
 1. passing unit/fault tests for all capability, identity, freshness, lease, reconciliation, and cleanup cases in the normative matrix;
-2. rendered-chart policy evidence that Ottawa remains `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false`;
+2. rendered-chart policy evidence that the hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false`;
 3. a clean Linux run with no credentials and passing cross-platform GitHub Actions;
 4. separately approved, credentialed live evidence for restrictive child policy, device-list semantics, Direct/DERP/Peer Relay gameplay paths, and exact-ID cleanup;
 5. exercised operator alerts/runbook for create ambiguity, missing vault material, orphan quarantine, cleanup polling failure, and vault deletion failure.

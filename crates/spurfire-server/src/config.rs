@@ -26,7 +26,7 @@ pub struct Config {
     /// Independent fail-closed gate for every real provider mutation.
     ///
     /// Credentials and a real provisioning mode are insufficient without this
-    /// switch. It defaults off and Ottawa must keep it off.
+    /// switch. It defaults off and hosted public deployments must keep it off.
     pub real_mutations_enabled: bool,
     /// Shared tailnet selector passed to Tailscale (`-` means the token's tailnet).
     pub shared_tailnet: String,

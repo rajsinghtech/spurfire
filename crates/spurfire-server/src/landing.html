@@ -44,7 +44,7 @@
         <div class="downloads">Direct: <a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-macos-universal.zip">macOS</a><a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-windows-x86_64.zip">Windows</a><a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-linux-x86_64.tar.gz">Linux</a></div>
       </div>
       <aside class="statusbox" aria-live="polite">
-        <div class="statushead"><div class="status"><span id="dot" class="dot"></span><span id="status">Checking Ottawa…</span></div><span id="mode" class="mode">CHECKING</span></div>
+        <div class="statushead"><div class="status"><span id="dot" class="dot"></span><span id="status">Checking hosted service…</span></div><span id="mode" class="mode">CHECKING</span></div>
         <p id="status-detail" class="statusdetail">Reading the public control-plane capability report.</p>
         <div class="fact"><span>Gameplay path</span><strong>Peer to peer</strong></div>
         <div class="fact"><span>Real isolation path</span><strong>Dedicated lobby tailnet</strong></div>
@@ -57,7 +57,7 @@
     <section id="lobby" class="block">
       <div class="sectionhead">
         <div><div class="kicker">Inside a lobby</div><h2>A temporary posse, not a game server.</h2></div>
-        <p>The control plane creates, credentials, inspects, reconciles, and deletes the network boundary. It does not join that network. Once connected, gameplay travels between riders instead of bouncing through Ottawa.</p>
+        <p>The control plane creates, credentials, inspects, reconciles, and deletes the network boundary. It does not join that network. Once connected, gameplay travels between riders instead of bouncing through a permanent game server.</p>
       </div>
       <div class="steps">
         <article class="step"><span class="number">1</span><h3>Create</h3><p>A lobby record fixes capacity and expiry. Real isolation uses one provider tailnet dedicated to that lobby.</p></article>
@@ -66,7 +66,7 @@
         <article class="step"><span class="number">4</span><h3>Elect</h3><p>Fresh route, latency, loss, and device inputs produce a deterministic authority reference.</p></article>
         <article class="step"><span class="number">5</span><h3>Ride &amp; retire</h3><p>Authority can migrate after host loss. Cleanup is complete only after exact network absence is verified.</p></article>
       </div>
-      <div class="callout"><span class="marker" aria-hidden="true">⚑</span><div><strong>Public preview: zero Tailscale mutations</strong><p>Ottawa remains forced dry-run. It simulates dedicated tailnet-per-lobby lifecycle but creates no tailnet and never invents a tailnet DNS name.</p></div></div>
+      <div class="callout"><span class="marker" aria-hidden="true">⚑</span><div><strong>Public preview: zero Tailscale mutations</strong><p>The hosted preview remains forced dry-run. It simulates dedicated tailnet-per-lobby lifecycle but creates no tailnet and never invents a tailnet DNS name.</p></div></div>
     </section>
 
     <section id="inspect" class="block">
@@ -436,7 +436,7 @@
       ]).then(([health,capabilities])=>{
         const ok=health.status==='ok';
         byId('dot').className=`dot${ok?' ok':''}`;
-        byId('status').textContent=ok?'Ottawa control plane online':'Control plane degraded';
+        byId('status').textContent=ok?'Hosted lobby service online':'Lobby service degraded';
         const mode=byId('mode');
         if(capabilities.dry_run){
           mode.textContent='DRY-RUN PREVIEW';

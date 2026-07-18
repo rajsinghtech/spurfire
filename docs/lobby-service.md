@@ -2,7 +2,7 @@
 
 `spurfire-server` is the prototype HTTP control service. It creates lobby records, mints narrow Tailscale enrollment credentials, publishes deterministic authority elections, and coordinates teardown. Gameplay remains peer-to-peer; the service is not in the gameplay data path and, by D9, never joins a lobby tailnet.
 
-> **Activation status:** public real provisioning is closed. Safe groundwork adds an independent default-off real-mutation switch and a creator-capability network view, but legacy lobby routes still use client assertions, capability migration is incomplete, and child credentials remain process-local. The chart rejects enabling real mutations. Ottawa is public dry-run only. The accepted target contract and operator runbook are in [control-plane-network-view.md](control-plane-network-view.md).
+> **Activation status:** public real provisioning is closed. Safe groundwork adds an independent default-off real-mutation switch and a creator-capability network view, but legacy lobby routes still use client assertions, capability migration is incomplete, and child credentials remain process-local. The chart rejects enabling real mutations. The hosted public deployment is dry-run only. The accepted target contract and operator runbook are in [control-plane-network-view.md](control-plane-network-view.md).
 
 ## Start safely
 
