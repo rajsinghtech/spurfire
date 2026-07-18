@@ -1069,6 +1069,70 @@ mod tests {
         assert!(error.to_string().contains("discarded"));
     }
 
+    #[tokio::test]
+    async fn rejects_tailnet_path_injection_before_oauth_or_provider_io() {
+        let mut server = Server::new_async().await;
+        let no_requests = server
+            .mock("POST", Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(server.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+
+        for malicious in [
+            "tail.ts.net/../other",
+            "tail.ts.net?target=other",
+            "tail.ts.net#fragment",
+            "tail%2fother.ts.net",
+            "user@tail.ts.net",
+            "tail.ts.net:443",
+            "tail\nts.net",
+        ] {
+            assert!(matches!(
+                child.delete_tailnet(malicious).await,
+                Err(ControlError::InvalidTailnetName(_))
+            ));
+            assert!(matches!(
+                parent
+                    .create_auth_key(malicious, &AuthKeyOpts::default())
+                    .await,
+                Err(ControlError::InvalidTailnetName(_))
+            ));
+        }
+        no_requests.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_untyped_provider_fqdn_in_create_response() {
+        let mut server = Server::new_async().await;
+        let token = token_mock(&mut server, 3600, 1).await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "id":"TtStableCNTRL",
+                    "dnsName":"tail.ts.net/../other",
+                    "displayName":"spurfire-probe-test",
+                    "oauthClient":{"id":"child-id","secret":"child-secret"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(server.url(), "client", "secret");
+
+        assert!(matches!(
+            client.create_tailnet("spurfire-probe-test").await,
+            Err(ControlError::Json(_))
+        ));
+        token.assert_async().await;
+        create.assert_async().await;
+    }
+
     #[test]
     fn child_credentials_redact_debug_display_and_serde() {
         const ID: &str = "child-id-canary";

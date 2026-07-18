@@ -75,6 +75,7 @@ const PROVIDER_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 const MAX_CACHED_PROVIDER_OBSERVATIONS: usize = 10_000;
 const LANDING_HTML: &str = include_str!("landing.html");
+const INSPECT_HTML: &str = include_str!("inspect.html");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CachedObservationFailure {
@@ -326,20 +327,6 @@ impl AppState {
         .await;
     }
 
-    /// Pure cached selected-lobby view used after an authorization layer has
-    /// already selected one exact record. It performs no provider I/O, cleanup,
-    /// TTL transition, election, or store replacement.
-    pub async fn cached_network_view(&self, lobby_id: LobbyId) -> Option<LobbyNetworkView> {
-        let stored = self.store.get(lobby_id).await?;
-        let observation = self
-            .provider_observations
-            .read()
-            .await
-            .get(&lobby_id)
-            .copied();
-        build_network_view(&stored, observation, self.clock.now()).ok()
-    }
-
     /// Runs deterministic expiry/start-timeout transitions and teardown retries.
     pub async fn cleanup_expired_at(&self, now: UnixMillis) -> Vec<LobbyId> {
         let Ok(lobby_ids) = self.store.cleanup_expired(now).await else {
@@ -380,6 +367,7 @@ impl fmt::Debug for AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(landing))
+        .route("/inspect", get(inspect_shell))
         .route("/healthz", get(healthz))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/lobbies", post(create_lobby))
@@ -433,6 +421,29 @@ async fn landing() -> impl IntoResponse {
         HeaderValue::from_static("nosniff"),
     );
     (headers, Html(LANDING_HTML))
+}
+
+async fn inspect_shell() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    (headers, Html(INSPECT_HTML))
 }
 
 #[derive(Serialize)]

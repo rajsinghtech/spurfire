@@ -1014,6 +1014,20 @@ mod tests {
         )
     }
 
+    fn real_record(lobby_id: &str) -> StoredLobby {
+        let mut lobby = lobby();
+        lobby.lobby_id = LobbyId::parse(lobby_id).unwrap();
+        lobby.provisioning_mode = ProvisioningMode::TailnetPerLobby;
+        StoredLobby::new(
+            lobby,
+            player_id(),
+            "provisioning.invalid",
+            "tag:test",
+            false,
+            1_000,
+        )
+    }
+
     #[tokio::test]
     async fn cleanup_uses_caller_supplied_time() {
         let store = InMemoryStore::new();
@@ -1080,6 +1094,184 @@ mod tests {
         assert!(!encoded.contains("auth_key"));
         assert!(!encoded.contains("child_oauth"));
         assert!(!encoded.contains(CHILD_SECRET_CANARY));
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn real_lease_resolves_replay_before_quota_and_holds_ambiguity() {
+        let store = InMemoryStore::new();
+        let first = real_record("00000000-0000-4000-8000-000000000011");
+        let first_id = first.lobby.lobby_id;
+        assert!(matches!(
+            store
+                .create(
+                    "real-create".to_owned(),
+                    b"same-body".to_vec(),
+                    player_id(),
+                    UnixMillis::new(10),
+                    first,
+                    true,
+                )
+                .await
+                .unwrap(),
+            CreateStoreOutcome::Created(_)
+        ));
+        assert!(store.real_lobby_lease_held().await);
+
+        let replay_candidate = real_record("00000000-0000-4000-8000-000000000012");
+        let replay = store
+            .create(
+                "real-create".to_owned(),
+                b"same-body".to_vec(),
+                player_id(),
+                UnixMillis::new(11),
+                replay_candidate,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(replay, CreateStoreOutcome::Replay(stored) if stored.lobby.lobby_id == first_id)
+        );
+
+        let distinct = store
+            .create(
+                "other-real-create".to_owned(),
+                b"other-body".to_vec(),
+                player_id(),
+                UnixMillis::new(12),
+                real_record("00000000-0000-4000-8000-000000000013"),
+                true,
+            )
+            .await;
+        assert_eq!(distinct.unwrap_err(), StoreError::RealLobbyCapacityReached);
+
+        let mut retained = store.get(first_id).await.unwrap();
+        retained.network_lifecycle = NetworkLifecycle::CreateUnknown;
+        store.replace(retained).await.unwrap();
+        assert!(store.real_lobby_lease_held().await);
+    }
+
+    #[tokio::test]
+    async fn lease_releases_only_at_explicit_safe_terminal_network_lifecycle() {
+        let store = InMemoryStore::new();
+        let record = real_record("00000000-0000-4000-8000-000000000021");
+        let lobby_id = record.lobby.lobby_id;
+        store
+            .create(
+                "release-create".to_owned(),
+                b"body".to_vec(),
+                player_id(),
+                UnixMillis::new(10),
+                record,
+                true,
+            )
+            .await
+            .unwrap();
+        for lifecycle in [
+            NetworkLifecycle::Creating,
+            NetworkLifecycle::Active,
+            NetworkLifecycle::CleanupPending,
+            NetworkLifecycle::VerifyingAbsence,
+            NetworkLifecycle::ManualRemediation,
+        ] {
+            let mut stored = store.get(lobby_id).await.unwrap();
+            stored.network_lifecycle = lifecycle;
+            store.replace(stored).await.unwrap();
+            assert!(
+                store.real_lobby_lease_held().await,
+                "released at {lifecycle:?}"
+            );
+        }
+        let mut stored = store.get(lobby_id).await.unwrap();
+        stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+        store.replace(stored).await.unwrap();
+        assert!(!store.real_lobby_lease_held().await);
+    }
+
+    #[tokio::test]
+    async fn capability_lookup_is_exact_generation_expiring_and_constant_time_compare_path() {
+        let store = InMemoryStore::new();
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000031").unwrap();
+        let record = {
+            let mut record = record();
+            record.lobby.lobby_id = lobby_id;
+            record.with_creator_capability(StoredCapabilityVerifier::new(
+                [7; 32],
+                lobby_id,
+                1,
+                UnixMillis::new(100),
+            ))
+        };
+        store
+            .create(
+                "cap-create".to_owned(),
+                b"body".to_vec(),
+                player_id(),
+                UnixMillis::new(0),
+                record,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .get_authorized_network_view(lobby_id, [7; 32], UnixMillis::new(99))
+            .await
+            .is_some());
+        assert!(store
+            .get_authorized_network_view(lobby_id, [8; 32], UnixMillis::new(99))
+            .await
+            .is_none());
+        assert!(store
+            .get_authorized_network_view(lobby_id, [7; 32], UnixMillis::new(100))
+            .await
+            .is_none());
+        let mut stored = store.get(lobby_id).await.unwrap();
+        stored.network_generation = 2;
+        store.replace(stored).await.unwrap();
+        assert!(store
+            .get_authorized_network_view(lobby_id, [7; 32], UnixMillis::new(50))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn durable_restart_retains_real_lease_and_non_secret_identity_only() {
+        let path = std::env::temp_dir().join(format!(
+            "spurfire-real-lease-test-{}.json",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+        let store = JsonFileStore::open(&path).await.unwrap();
+        let mut record = real_record("00000000-0000-4000-8000-000000000041");
+        record.network_lifecycle = NetworkLifecycle::Active;
+        record.network_identity = Some(StoredNetworkIdentity {
+            provider_tailnet_id: Some("TtRestartCNTRL".to_owned()),
+            tailnet_dns_name: TailnetDnsName::parse("tail-restart.ts.net").unwrap(),
+            network_generation: 1,
+            captured_at: UnixMillis::new(10),
+        });
+        store
+            .create(
+                "restart-real".to_owned(),
+                b"body".to_vec(),
+                player_id(),
+                UnixMillis::new(10),
+                record,
+                true,
+            )
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = JsonFileStore::open(&path).await.unwrap();
+        assert!(reopened.real_lobby_lease_held().await);
+        let encoded = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(encoded.contains("TtRestartCNTRL"));
+        assert!(encoded.contains("tail-restart.ts.net"));
+        for forbidden in ["auth_key", "oauthClient", "child-secret", "bearer"] {
+            assert!(!encoded.contains(forbidden));
+        }
         let _ = tokio::fs::remove_file(&path).await;
     }
 

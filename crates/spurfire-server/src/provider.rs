@@ -1448,6 +1448,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_mismatch_blocks_child_deletion_before_destructive_io() {
+        let mut server = Server::new_async().await;
+        let organization_token = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"organization-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "id":"TtExactCNTRL",
+                    "dnsName":"tail-exact.ts.net",
+                    "displayName":"spurfire-00000000-0000-4000-8000-000000000001",
+                    "oauthClient":{"id":"child-id","secret":"child-secret"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let no_delete = server
+            .mock("DELETE", Matcher::Regex(".*".to_owned()))
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = TailscaleProvider::new(
+            TailscaleClient::new(server.url(), "org-client", "org-secret"),
+            "shared.ts.net",
+        );
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let prepared = provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 7,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+
+        let result = provider
+            .cleanup_lobby(CleanupLobbyRequest {
+                lobby_id,
+                network_generation: 8,
+                identity: prepared.identity,
+                mode: ProvisioningMode::TailnetPerLobby,
+                tailnet: prepared.tailnet,
+                tag: "tag:spurfire-test".to_owned(),
+                credentials: Vec::new(),
+                include_devices: true,
+                now: UnixMillis::new(1),
+                dry_run: false,
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), ProviderError::IdentityMismatch);
+        assert_eq!(provider.child_secret_count(), 1);
+        organization_token.assert_async().await;
+        create.assert_async().await;
+        no_delete.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn missing_child_vault_entry_fails_closed_with_stable_reason() {
         let provider = TailscaleProvider::new(
             TailscaleClient::new("http://127.0.0.1:1", "org-client", "org-secret"),
