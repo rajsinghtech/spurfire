@@ -217,9 +217,10 @@ impl PeerSession {
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
         let signal_player = self.local_player_id.clone();
+        let signal_epoch = self.authority_epoch;
         self.signals()
             .session_identity_bound()
-            .emit(&signal_player, self.authority_epoch);
+            .emit(&signal_player, signal_epoch);
         true
     }
 
