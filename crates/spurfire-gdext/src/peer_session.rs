@@ -1,6 +1,7 @@
 //! Godot-facing background RustScale application-UDP node.
 
 use std::{
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
@@ -160,6 +161,7 @@ pub struct PeerSession {
     #[var(no_set)]
     authority_epoch: i64,
     session: Option<SessionState>,
+    allowed_players: BTreeSet<PlayerId>,
     command_tx: Option<Sender<WorkerCommand>>,
     event_rx: Option<Receiver<WorkerEvent>>,
 }
@@ -188,6 +190,28 @@ impl PeerSession {
         authority_player_id: GString,
         now_ms: i64,
     ) -> bool {
+        let roster =
+            PackedStringArray::from([local_player_id.clone(), authority_player_id.clone()]);
+        self.configure_roster_session(
+            lobby_id,
+            local_player_id,
+            authority_player_id,
+            roster,
+            now_ms,
+        )
+    }
+
+    /// Bind packet acceptance to the exact control-plane roster. Unknown
+    /// tailnet members are rejected before SessionState can observe them.
+    #[func]
+    fn configure_roster_session(
+        &mut self,
+        lobby_id: GString,
+        local_player_id: GString,
+        authority_player_id: GString,
+        roster_player_ids: PackedStringArray,
+        now_ms: i64,
+    ) -> bool {
         let Ok(lobby_id) = LobbyId::parse(&lobby_id.to_string()) else {
             return false;
         };
@@ -200,6 +224,21 @@ impl PeerSession {
         let Ok(now_ms) = u64::try_from(now_ms) else {
             return false;
         };
+        let mut allowed_players = BTreeSet::new();
+        for value in roster_player_ids.as_slice() {
+            let Ok(player) = PlayerId::parse(&value.to_string()) else {
+                return false;
+            };
+            if !allowed_players.insert(player) {
+                return false;
+            }
+        }
+        if allowed_players.is_empty()
+            || !allowed_players.contains(&local_player)
+            || !allowed_players.contains(&authority)
+        {
+            return false;
+        }
         let authority_epoch = 1_u64;
         if let Some(mut rider) = self
             .base()
@@ -212,7 +251,12 @@ impl PeerSession {
                 return false;
             }
         }
-        self.session = Some(SessionState::new(lobby_id, local_player, authority, now_ms));
+        let mut session = SessionState::new(lobby_id, local_player, authority, now_ms);
+        for player in &allowed_players {
+            session.add_peer(*player, now_ms);
+        }
+        self.session = Some(session);
+        self.allowed_players = allowed_players;
         self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
@@ -419,7 +463,8 @@ impl PeerSession {
         result
     }
 
-    /// Validate one received packet. 0=accepted, 1=replay, 2=wrong lobby, 3=stale epoch, -1=invalid.
+    /// Validate one received packet. 0=accepted, 1=replay, 2=wrong lobby,
+    /// 3=stale epoch, 4=sender outside the selected roster, -1=invalid.
     #[func]
     fn accept_packet(&mut self, packet: PackedByteArray, now_ms: i64) -> i64 {
         let (Some(session), Ok(envelope), Ok(now_ms)) = (
@@ -429,6 +474,9 @@ impl PeerSession {
         ) else {
             return -1;
         };
+        if !self.allowed_players.contains(&envelope.sender) {
+            return 4;
+        }
         let outcome = session.accept(&envelope, now_ms);
         self.authority_player_id = GString::from(&session.authority().to_string());
         self.authority_epoch = i64::try_from(session.authority_epoch()).unwrap_or(i64::MAX);
@@ -491,12 +539,32 @@ impl PeerSession {
             .is_some_and(|sender| sender.send(WorkerCommand::QueryRoute { peer_ip }).is_ok())
     }
 
+    /// Build a signed, sequenced peer Leave packet before transport shutdown.
+    #[func]
+    fn make_leave(&mut self, tick: i64) -> PackedByteArray {
+        self.make_packet(tick, PeerPayload::Leave)
+    }
+
     #[func]
     fn shutdown(&mut self) {
         if let Some(sender) = self.command_tx.take() {
             let _ = sender.send(WorkerCommand::Stop);
         }
         self.connection_state = "disconnecting".into();
+    }
+
+    /// Forget all lobby-scoped identity after leave. Enrollment material is
+    /// owned by the worker and dropped when shutdown completes.
+    #[func]
+    fn clear_lobby_session(&mut self) {
+        self.shutdown();
+        self.session = None;
+        self.allowed_players.clear();
+        self.local_player_id = GString::new();
+        self.authority_player_id = GString::new();
+        self.authority_epoch = 0;
+        self.tailnet_ip = GString::new();
+        self.local_port = 0;
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
@@ -573,6 +641,7 @@ impl INode for PeerSession {
             authority_player_id: GString::new(),
             authority_epoch: 0,
             session: None,
+            allowed_players: BTreeSet::new(),
             command_tx: None,
             event_rx: None,
         }

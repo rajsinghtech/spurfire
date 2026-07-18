@@ -1,0 +1,302 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/lobby_shell.gd" id="1_shell"]
+[ext_resource type="Script" path="res://lobby/lobby_http_client.gd" id="2_http"]
+
+[sub_resource type="StyleBoxFlat" id="StyleCard"]
+bg_color = Color(0.075, 0.063, 0.052, 0.97)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.7, 0.43, 0.18, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[node name="LobbyShell" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_shell")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.025, 0.02, 0.018, 1)
+
+[node name="LobbyHttpClient" type="Node" parent="."]
+script = ExtResource("2_http")
+
+[node name="PeerSession" type="PeerSession" parent="."]
+
+[node name="Screens" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="Title" type="Control" parent="Screens"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Card" type="PanelContainer" parent="Screens/Title"]
+custom_minimum_size = Vector2(620, 0)
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -310.0
+offset_top = -260.0
+offset_right = 310.0
+offset_bottom = 260.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleCard")
+
+[node name="Margin" type="MarginContainer" parent="Screens/Title/Card"]
+layout_mode = 2
+theme_override_constants/margin_left = 32
+theme_override_constants/margin_top = 28
+theme_override_constants/margin_right = 32
+theme_override_constants/margin_bottom = 28
+
+[node name="VBox" type="VBoxContainer" parent="Screens/Title/Card/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Wordmark" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.72, 0.34, 1)
+theme_override_font_sizes/font_size = 42
+text = "SPURFIRE"
+horizontal_alignment = 1
+
+[node name="Tagline" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "HIGH NOON. LOW PING."
+horizontal_alignment = 1
+
+[node name="NameLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "RIDER NAME"
+
+[node name="Name" type="LineEdit" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+max_length = 64
+placeholder_text = "Your name for this lobby"
+
+[node name="CreateGrantLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "ONE-USE ALPHA GRANT"
+
+[node name="CreateGrant" type="LineEdit" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+editable = false
+secret = true
+placeholder_text = "Provided privately by the alpha operator"
+
+[node name="JoinCodeLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "POSSE CODE"
+
+[node name="JoinCode" type="LineEdit" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+editable = false
+secret = true
+placeholder_text = "Paste the one-use code from your host"
+
+[node name="Actions" type="HBoxContainer" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 12
+alignment = 1
+
+[node name="Create" type="Button" parent="Screens/Title/Card/Margin/VBox/Actions"]
+custom_minimum_size = Vector2(210, 48)
+layout_mode = 2
+disabled = true
+text = "CREATE LOBBY"
+
+[node name="Join" type="Button" parent="Screens/Title/Card/Margin/VBox/Actions"]
+custom_minimum_size = Vector2(210, 48)
+layout_mode = 2
+disabled = true
+text = "JOIN LOBBY"
+
+[node name="Practice" type="Button" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "Practice Range (offline)"
+flat = true
+
+[node name="Status" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+layout_mode = 2
+text = "Checking service…"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="Waiting" type="Control" parent="Screens"]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Card" type="PanelContainer" parent="Screens/Waiting"]
+custom_minimum_size = Vector2(720, 0)
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -360.0
+offset_top = -300.0
+offset_right = 360.0
+offset_bottom = 300.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleCard")
+
+[node name="Margin" type="MarginContainer" parent="Screens/Waiting/Card"]
+layout_mode = 2
+theme_override_constants/margin_left = 28
+theme_override_constants/margin_top = 24
+theme_override_constants/margin_right = 28
+theme_override_constants/margin_bottom = 24
+
+[node name="VBox" type="VBoxContainer" parent="Screens/Waiting/Card/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="LobbyName" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.72, 0.34, 1)
+theme_override_font_sizes/font_size = 30
+text = "PRIVATE POSSE"
+horizontal_alignment = 1
+
+[node name="ShareLabel" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+text = "ONE-USE POSSE CODE"
+
+[node name="ShareCode" type="LineEdit" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+editable = false
+secret = true
+placeholder_text = "Creating invitation…"
+
+[node name="RosterTitle" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+text = "SELECTED LOBBY ROSTER"
+
+[node name="Roster" type="ScrollContainer" parent="Screens/Waiting/Card/Margin/VBox"]
+custom_minimum_size = Vector2(0, 230)
+layout_mode = 2
+
+[node name="Rows" type="VBoxContainer" parent="Screens/Waiting/Card/Margin/VBox/Roster"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 8
+
+[node name="NetworkSummary" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+text = "Measuring network health…"
+autowrap_mode = 2
+
+[node name="Status" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+text = "Joining rider network…"
+autowrap_mode = 2
+
+[node name="Actions" type="HBoxContainer" parent="Screens/Waiting/Card/Margin/VBox"]
+layout_mode = 2
+alignment = 1
+
+[node name="Start" type="Button" parent="Screens/Waiting/Card/Margin/VBox/Actions"]
+custom_minimum_size = Vector2(150, 44)
+layout_mode = 2
+text = "START MATCH"
+
+[node name="Leave" type="Button" parent="Screens/Waiting/Card/Margin/VBox/Actions"]
+custom_minimum_size = Vector2(150, 44)
+layout_mode = 2
+text = "LEAVE"
+
+[node name="End" type="Button" parent="Screens/Waiting/Card/Margin/VBox/Actions"]
+custom_minimum_size = Vector2(150, 44)
+layout_mode = 2
+text = "END LOBBY"
+
+[node name="Teardown" type="Control" parent="Screens"]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Card" type="PanelContainer" parent="Screens/Teardown"]
+custom_minimum_size = Vector2(580, 220)
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -290.0
+offset_top = -110.0
+offset_right = 290.0
+offset_bottom = 110.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleCard")
+
+[node name="Margin" type="MarginContainer" parent="Screens/Teardown/Card"]
+layout_mode = 2
+theme_override_constants/margin_left = 32
+theme_override_constants/margin_top = 32
+theme_override_constants/margin_right = 32
+theme_override_constants/margin_bottom = 32
+
+[node name="VBox" type="VBoxContainer" parent="Screens/Teardown/Card/Margin"]
+layout_mode = 2
+alignment = 1
+
+[node name="Title" type="Label" parent="Screens/Teardown/Card/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "RIDING OUT"
+horizontal_alignment = 1
+
+[node name="Status" type="Label" parent="Screens/Teardown/Card/Margin/VBox"]
+layout_mode = 2
+text = "Closing the private lobby…"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[connection signal="pressed" from="Screens/Title/Card/Margin/VBox/Actions/Create" to="." method="_on_create_pressed"]
+[connection signal="pressed" from="Screens/Title/Card/Margin/VBox/Actions/Join" to="." method="_on_join_pressed"]
+[connection signal="pressed" from="Screens/Title/Card/Margin/VBox/Practice" to="." method="_on_practice_pressed"]
+[connection signal="pressed" from="Screens/Waiting/Card/Margin/VBox/Actions/Start" to="." method="_on_start_pressed"]
+[connection signal="pressed" from="Screens/Waiting/Card/Margin/VBox/Actions/Leave" to="." method="_on_leave_pressed"]
+[connection signal="pressed" from="Screens/Waiting/Card/Margin/VBox/Actions/End" to="." method="_on_end_pressed"]
