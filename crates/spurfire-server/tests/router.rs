@@ -11,11 +11,15 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use spurfire_protocol::{ProvisioningMode, ResponseMetadata, UnixMillis, DRY_RUN_AUTH_KEY};
+use spurfire_protocol::{
+    NetworkLifecycle, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
+    DRY_RUN_AUTH_KEY,
+};
 use spurfire_server::{
     build_router, AppState, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider,
     InMemoryStore, ManualClock, MintCredentialRequest, MintedCredential, NetworkProvider,
-    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderError, SecretString,
+    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderError,
+    ProviderNetworkIdentity, SecretString,
 };
 use tower::ServiceExt;
 
@@ -107,6 +111,7 @@ impl NetworkProvider for RecordingProvider {
         &self,
         _lobby_id: spurfire_protocol::LobbyId,
         mode: ProvisioningMode,
+        _network_lifecycle: NetworkLifecycle,
         dry_run: bool,
     ) -> Option<ProviderError> {
         (!dry_run
@@ -122,14 +127,20 @@ impl NetworkProvider for RecordingProvider {
         if request.mode == ProvisioningMode::TailnetPerLobby && !request.dry_run {
             self.mutations.fetch_add(1, Ordering::SeqCst);
         }
+        let tailnet = if request.dry_run {
+            "dry-run.invalid"
+        } else if request.mode == ProvisioningMode::TailnetPerLobby {
+            "child-test.ts.net"
+        } else {
+            "shared-test.ts.net"
+        };
         Ok(PreparedNetwork {
-            tailnet: if request.dry_run {
-                "dry-run.invalid".to_owned()
-            } else if request.mode == ProvisioningMode::TailnetPerLobby {
-                "child-test.ts.net".to_owned()
-            } else {
-                "-".to_owned()
-            },
+            tailnet: tailnet.to_owned(),
+            identity: (!request.dry_run).then(|| ProviderNetworkIdentity {
+                provider_tailnet_id: (request.mode == ProvisioningMode::TailnetPerLobby)
+                    .then(|| "TtRouterCNTRL".to_owned()),
+                tailnet_dns_name: TailnetDnsName::parse(tailnet).unwrap(),
+            }),
             dry_run: request.dry_run,
             metadata: ResponseMetadata {
                 dry_run: request.dry_run,
@@ -193,6 +204,10 @@ impl NetworkProvider for RecordingProvider {
             });
         }
         Ok(CleanupOutcome {
+            delete_acknowledged: request.mode == ProvisioningMode::TailnetPerLobby
+                && request.include_devices,
+            child_secret_erased: request.mode == ProvisioningMode::TailnetPerLobby
+                && request.include_devices,
             revoked_credential_ids: request
                 .credentials
                 .iter()
@@ -227,7 +242,12 @@ fn live_app(
     provider: Arc<RecordingProvider>,
 ) -> (Router, AppState, Arc<InMemoryStore>) {
     let store = Arc::new(InMemoryStore::new());
-    let state = AppState::new(Config::default(), store.clone(), provider).with_clock(clock);
+    let config = Config {
+        real_mutations_enabled: true,
+        shared_tailnet: "shared-test.ts.net".to_owned(),
+        ..Config::default()
+    };
+    let state = AppState::new(config, store.clone(), provider).with_clock(clock);
     (build_router(state.clone()), state, store)
 }
 

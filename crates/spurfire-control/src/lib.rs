@@ -11,8 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::Method;
+use reqwest::{Method, Url};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use spurfire_protocol::TailnetDnsName;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -144,8 +145,8 @@ impl fmt::Display for ChildOAuthCredentials {
 pub struct Tailnet {
     /// Stable organization tailnet ID.
     pub id: String,
-    /// DNS selector accepted by child-scoped tailnet operations.
-    pub dns_name: String,
+    /// Provider-returned, validated tailnet DNS name/FQDN.
+    pub dns_name: TailnetDnsName,
     /// Human-facing organization display name.
     pub display_name: String,
     #[serde(rename = "oauthClient")]
@@ -153,7 +154,22 @@ pub struct Tailnet {
 }
 
 impl Tailnet {
-    /// Transfers the one-time OAuth material into a child-scoped client or secret vault.
+    /// Splits the typed non-secret identity from the one-time OAuth material.
+    ///
+    /// Callers must bind the stable ID and DNS name to their durable generation
+    /// before using the child credential for any destructive operation.
+    #[must_use]
+    pub fn into_parts(self) -> (String, TailnetDnsName, String, ChildOAuthCredentials) {
+        (
+            self.id,
+            self.dns_name,
+            self.display_name,
+            self.oauth_credentials,
+        )
+    }
+
+    /// Transfers only the one-time OAuth material into a child-scoped client.
+    /// Prefer [`Self::into_parts`] when the provider identity must be retained.
     #[must_use]
     pub fn into_child_oauth_credentials(self) -> ChildOAuthCredentials {
         self.oauth_credentials
@@ -180,9 +196,9 @@ pub struct OrganizationTailnet {
     pub id: String,
     /// Human-facing organization display name.
     pub display_name: String,
-    /// DNS selector, when supplied by the listing API.
+    /// Validated DNS name/FQDN, when supplied by the listing API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_name: Option<String>,
+    pub dns_name: Option<TailnetDnsName>,
     /// Organization identifier, when supplied by the listing API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
@@ -254,6 +270,8 @@ pub enum ControlError {
     InvalidTailnetName(&'static str),
     #[error("tailnet operation requires child-scoped OAuth credentials: {0}")]
     ProvisioningUnavailable(String),
+    #[error("provider URL or path could not be constructed safely")]
+    InvalidProviderPath,
     #[error("Tailscale transport failed; details redacted")]
     Reqwest(#[source] reqwest::Error),
     #[error("Tailscale JSON response was invalid; details redacted")]
@@ -288,6 +306,7 @@ impl fmt::Debug for ControlError {
             Self::ProvisioningUnavailable(_) => {
                 formatter.write_str("ProvisioningUnavailable(<redacted>)")
             }
+            Self::InvalidProviderPath => formatter.write_str("InvalidProviderPath"),
             Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
         }
@@ -362,10 +381,41 @@ impl OAuthSession {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<reqwest::Response, ControlError> {
+        let url = Url::parse(&format!("{}{}", self.api_base, path))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+        self.send_url(method, url, body).await
+    }
+
+    async fn send_segments(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, ControlError> {
+        let mut url = Url::parse(&format!("{}/", self.api_base))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|_| ControlError::InvalidProviderPath)?;
+            path.pop_if_empty();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        self.send_url(method, url, body).await
+    }
+
+    async fn send_url(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, ControlError> {
         let token = self.access_token().await?;
         let mut request = self
             .http
-            .request(method, format!("{}{}", self.api_base, path))
+            .request(method, url)
             .bearer_auth(token.expose_secret());
         if let Some(body) = body {
             request = request.json(body);
@@ -400,8 +450,14 @@ impl OAuthSession {
         Ok(())
     }
 
-    async fn probe_get(&self, path: &str) -> Result<(), ControlError> {
-        self.send(Method::GET, path, None).await?;
+    async fn probe_tailnet_resource(
+        &self,
+        tailnet: &str,
+        resource: &str,
+    ) -> Result<(), ControlError> {
+        validate_tailnet_selector(tailnet)?;
+        self.send_segments(Method::GET, &["tailnet", tailnet, resource], None)
+            .await?;
         Ok(())
     }
 
@@ -410,7 +466,7 @@ impl OAuthSession {
         tailnet: &str,
         opts: &AuthKeyOpts,
     ) -> Result<AuthKey, ControlError> {
-        let path = format!("/tailnet/{tailnet}/keys");
+        validate_tailnet_selector(tailnet)?;
         let body = serde_json::json!({
             "capabilities": {
                 "devices": {
@@ -424,7 +480,9 @@ impl OAuthSession {
             },
             "expirySeconds": opts.ttl_secs,
         });
-        let response = self.send(Method::POST, &path, Some(&body)).await?;
+        let response = self
+            .send_segments(Method::POST, &["tailnet", tailnet, "keys"], Some(&body))
+            .await?;
         Self::decode(response).await
     }
 
@@ -433,8 +491,13 @@ impl OAuthSession {
         tailnet: &str,
         credential_id: &str,
     ) -> Result<(), ControlError> {
-        let path = format!("/tailnet/{tailnet}/keys/{credential_id}");
-        self.send(Method::DELETE, &path, None).await?;
+        validate_tailnet_selector(tailnet)?;
+        self.send_segments(
+            Method::DELETE,
+            &["tailnet", tailnet, "keys", credential_id],
+            None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -446,22 +509,28 @@ impl OAuthSession {
             Bare(Vec<Device>),
         }
 
-        let path = format!("/tailnet/{tailnet}/devices");
-        let response = self.send(Method::GET, &path, None).await?;
+        validate_tailnet_selector(tailnet)?;
+        let response = self
+            .send_segments(Method::GET, &["tailnet", tailnet, "devices"], None)
+            .await?;
         match Self::decode(response).await? {
             DevicesResponse::Wrapped { devices } | DevicesResponse::Bare(devices) => Ok(devices),
         }
     }
 
     async fn delete_device(&self, device_id: &str) -> Result<(), ControlError> {
-        let path = format!("/device/{device_id}");
-        self.send(Method::DELETE, &path, None).await?;
+        self.send_segments(Method::DELETE, &["device", device_id], None)
+            .await?;
         Ok(())
     }
 
     async fn delete_tailnet(&self, dns_name: &str) -> Result<(), ControlError> {
-        let path = format!("/tailnet/{dns_name}");
-        match self.send(Method::DELETE, &path, None).await {
+        let dns_name = TailnetDnsName::parse(dns_name)
+            .map_err(|_| ControlError::InvalidTailnetName("invalid tailnet DNS name/FQDN"))?;
+        match self
+            .send_segments(Method::DELETE, &["tailnet", dns_name.as_str()], None)
+            .await
+        {
             Ok(_) | Err(ControlError::Http { status: 404 }) => Ok(()),
             Err(error) => Err(error),
         }
@@ -585,22 +654,18 @@ impl TailscaleClient {
     /// Probe token/settings access without mutating the shared tailnet.
     pub async fn probe_settings(&self, tailnet: &str) -> Result<(), ControlError> {
         self.session
-            .probe_get(&format!("/tailnet/{tailnet}/settings"))
+            .probe_tailnet_resource(tailnet, "settings")
             .await
     }
 
     /// Probe shared auth-key scope using the non-mutating key-list endpoint.
     pub async fn probe_auth_keys(&self, tailnet: &str) -> Result<(), ControlError> {
-        self.session
-            .probe_get(&format!("/tailnet/{tailnet}/keys"))
-            .await
+        self.session.probe_tailnet_resource(tailnet, "keys").await
     }
 
     /// Probe shared ACL scope using the non-mutating policy-read endpoint.
     pub async fn probe_acl(&self, tailnet: &str) -> Result<(), ControlError> {
-        self.session
-            .probe_get(&format!("/tailnet/{tailnet}/acl"))
-            .await
+        self.session.probe_tailnet_resource(tailnet, "acl").await
     }
 
     /// List devices currently joined to the shared tailnet.
@@ -668,6 +733,23 @@ impl ChildTailscaleClient {
 impl fmt::Debug for ChildTailscaleClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ChildTailscaleClient(<redacted>)")
+    }
+}
+
+fn validate_tailnet_selector(tailnet: &str) -> Result<(), ControlError> {
+    let safe_compatibility_label = !tailnet.is_empty()
+        && tailnet.len() <= 63
+        && !tailnet.starts_with('-')
+        && !tailnet.ends_with('-')
+        && tailnet
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if tailnet == "-" || safe_compatibility_label || TailnetDnsName::parse(tailnet).is_ok() {
+        Ok(())
+    } else {
+        Err(ControlError::InvalidTailnetName(
+            "invalid safe tailnet selector",
+        ))
     }
 }
 
@@ -832,7 +914,7 @@ mod tests {
         let serialized = serde_json::to_string(&tailnet).unwrap();
 
         assert_eq!(tailnet.id, "TtStableCNTRL");
-        assert_eq!(tailnet.dns_name, "tail-test.ts.net");
+        assert_eq!(tailnet.dns_name.as_str(), "tail-test.ts.net");
         for output in [&debug, &serialized] {
             assert!(!output.contains(CHILD_ID));
             assert!(!output.contains(CHILD_SECRET));

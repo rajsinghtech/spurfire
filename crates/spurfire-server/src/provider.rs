@@ -12,8 +12,9 @@ use std::{
 use async_trait::async_trait;
 use spurfire_control::{AuthKeyOpts, ChildTailscaleClient, ControlError, TailscaleClient};
 use spurfire_protocol::{
-    CapabilitiesResponse, CapabilityModeStatus, CapabilityModes, LobbyId, PlannedAction, PlayerId,
-    ProvisioningMode, ResponseMetadata, UnixMillis, DRY_RUN_AUTH_KEY,
+    CapabilitiesResponse, CapabilityModeStatus, CapabilityModes, LobbyId, NetworkLifecycle,
+    PlannedAction, PlayerId, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
+    DRY_RUN_AUTH_KEY,
 };
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
@@ -24,10 +25,46 @@ use zeroize::Zeroizing;
 pub struct PrepareLobbyRequest {
     /// Public lobby identifier.
     pub lobby_id: LobbyId,
+    /// Non-zero generation reserved before provider I/O.
+    pub network_generation: u64,
     /// Requested backing mode.
     pub mode: ProvisioningMode,
     /// Whether this operation must be simulated.
     pub dry_run: bool,
+}
+
+/// Exact non-secret provider identity captured from a typed response.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderNetworkIdentity {
+    /// Stable organization tailnet ID. Dedicated mode always requires it.
+    pub provider_tailnet_id: Option<String>,
+    /// Canonical complete tailnet DNS name/FQDN.
+    pub tailnet_dns_name: TailnetDnsName,
+}
+
+impl ProviderNetworkIdentity {
+    /// Validates a provider identity before it can become destructive input.
+    pub fn validate_for_mode(&self, mode: ProvisioningMode) -> Result<(), ProviderError> {
+        if mode == ProvisioningMode::TailnetPerLobby
+            && self
+                .provider_tailnet_id
+                .as_deref()
+                .is_none_or(|id| !valid_provider_tailnet_id(id))
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ProviderNetworkIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderNetworkIdentity")
+            .field("provider_tailnet_id", &"<operator-metadata>")
+            .field("tailnet_dns_name", &"<topology-metadata>")
+            .finish()
+    }
 }
 
 /// Non-secret provider state retained with a lobby.
@@ -35,6 +72,8 @@ pub struct PrepareLobbyRequest {
 pub struct PreparedNetwork {
     /// Tailnet selector needed by later provider calls.
     pub tailnet: String,
+    /// Exact provider identity; absent only in dry run.
+    pub identity: Option<ProviderNetworkIdentity>,
     /// True when the provider suppressed all mutations.
     pub dry_run: bool,
     /// Response metadata for the create operation.
@@ -46,6 +85,10 @@ pub struct PreparedNetwork {
 pub struct MintCredentialRequest {
     /// Lobby receiving the player.
     pub lobby_id: LobbyId,
+    /// Durable generation to which this issuance is bound.
+    pub network_generation: u64,
+    /// Exact dedicated identity, when applicable.
+    pub identity: Option<ProviderNetworkIdentity>,
     /// Provisioning mode selected by the durable lobby record.
     pub mode: ProvisioningMode,
     /// Player receiving the credential.
@@ -112,6 +155,10 @@ pub struct CredentialCleanup {
 pub struct CleanupLobbyRequest {
     /// Lobby being cleaned.
     pub lobby_id: LobbyId,
+    /// Durable generation being cleaned.
+    pub network_generation: u64,
+    /// Exact provider identity bound to this generation.
+    pub identity: Option<ProviderNetworkIdentity>,
     /// Provisioning mode selected by the durable lobby record.
     pub mode: ProvisioningMode,
     /// Provider tailnet selector.
@@ -133,12 +180,53 @@ pub struct CleanupLobbyRequest {
 pub struct CleanupOutcome {
     /// True when capability-dependent cleanup should be retried.
     pub cleanup_pending: bool,
+    /// Child-scoped delete returned success/404; this is not absence proof.
+    pub delete_acknowledged: bool,
+    /// Process-local child credential material was erased after delete.
+    pub child_secret_erased: bool,
     /// Credential receipts successfully revoked or confirmed expired.
     pub revoked_credential_ids: Vec<String>,
     /// Number of device delete calls attempted.
     pub attempted_device_deletes: usize,
     /// Dry-run response metadata.
     pub metadata: ResponseMetadata,
+}
+
+/// Bounded read request for coarse provider enrollment metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObserveNetworkRequest {
+    /// Exact selected lobby.
+    pub lobby_id: LobbyId,
+    /// Generation bound to the selected identity.
+    pub network_generation: u64,
+    /// Provisioning mode for the cached record.
+    pub mode: ProvisioningMode,
+    /// Exact identity for dedicated mode.
+    pub identity: Option<ProviderNetworkIdentity>,
+    /// Provider selector used by shared compatibility mode.
+    pub tailnet: String,
+    /// Lobby tag used only to count shared-tailnet devices.
+    pub tag: String,
+    /// Simulation records never call the provider.
+    pub dry_run: bool,
+}
+
+/// Coarse provider observation with no device identifiers, tags, or hostnames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderDeviceObservation {
+    /// Devices enrolled as of one successful scoped poll.
+    pub enrolled_device_count: u32,
+}
+
+/// Exact stable-ID parent-organization presence check used only by cleanup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailnetPresenceRequest {
+    /// Exact lobby whose durable identity is being reconciled.
+    pub lobby_id: LobbyId,
+    /// Durable generation being reconciled.
+    pub network_generation: u64,
+    /// Dedicated provider identity; stable ID and FQDN must both match.
+    pub identity: ProviderNetworkIdentity,
 }
 
 /// Cached, non-secret capability verdict.
@@ -252,6 +340,9 @@ impl ProviderCapabilities {
 /// Safe provider failure classification. Upstream bodies are always discarded.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ProviderError {
+    /// Durable lobby/generation/stable-ID/FQDN and provider custody disagree.
+    #[error("provider identity tuple mismatch; manual remediation is required")]
+    IdentityMismatch,
     /// A child-tailnet record survived a process restart but its in-memory OAuth material did not.
     #[error("child tailnet credentials are unavailable; manual remediation is required")]
     ChildSecretUnavailable,
@@ -282,6 +373,7 @@ impl ProviderError {
     #[must_use]
     pub fn state_reason(&self) -> &'static str {
         match self {
+            Self::IdentityMismatch => "provider_identity_mismatch_manual_remediation",
             Self::ChildSecretUnavailable => "child_secret_unavailable_manual_remediation",
             Self::InsufficientScopes {
                 operation: "organization_tailnet_create",
@@ -321,6 +413,7 @@ pub trait NetworkProvider: Send + Sync {
         &self,
         _lobby_id: LobbyId,
         _mode: ProvisioningMode,
+        _network_lifecycle: NetworkLifecycle,
         _dry_run: bool,
     ) -> Option<ProviderError> {
         None
@@ -343,6 +436,27 @@ pub trait NetworkProvider: Send + Sync {
         &self,
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError>;
+
+    /// Performs one bounded, scoped device-list read. HTTP GET handlers never
+    /// call this method; background/operator refreshers populate a cache.
+    async fn observe_network(
+        &self,
+        _request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        Err(ProviderError::Unavailable {
+            operation: "device_inventory",
+        })
+    }
+
+    /// Checks exact stable-ID presence through the parent organization listing.
+    async fn tailnet_present(
+        &self,
+        _request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        Err(ProviderError::Unavailable {
+            operation: "organization_tailnet_presence",
+        })
+    }
 }
 
 /// Explicit simulation provider for tests and local development.
@@ -424,7 +538,9 @@ impl NetworkProvider for DryRunProvider {
 }
 
 struct ChildTailnetAccess {
-    dns_name: String,
+    network_generation: u64,
+    provider_tailnet_id: String,
+    dns_name: TailnetDnsName,
     client: Arc<ChildTailscaleClient>,
 }
 
@@ -456,8 +572,14 @@ impl TailscaleProvider {
     fn child_access(
         &self,
         lobby_id: LobbyId,
-        expected_dns_name: &str,
+        network_generation: u64,
+        expected: &ProviderNetworkIdentity,
     ) -> Result<Arc<ChildTailscaleClient>, ProviderError> {
+        expected.validate_for_mode(ProvisioningMode::TailnetPerLobby)?;
+        let expected_id = expected
+            .provider_tailnet_id
+            .as_deref()
+            .ok_or(ProviderError::IdentityMismatch)?;
         let vault = self
             .child_vault
             .read()
@@ -466,8 +588,13 @@ impl TailscaleProvider {
             })?;
         let access = vault
             .get(&lobby_id)
-            .filter(|access| access.dns_name == expected_dns_name)
             .ok_or(ProviderError::ChildSecretUnavailable)?;
+        if access.network_generation != network_generation
+            || access.provider_tailnet_id != expected_id
+            || access.dns_name != expected.tailnet_dns_name
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
         Ok(Arc::clone(&access.client))
     }
 
@@ -510,9 +637,18 @@ impl NetworkProvider for TailscaleProvider {
         &self,
         lobby_id: LobbyId,
         mode: ProvisioningMode,
+        network_lifecycle: NetworkLifecycle,
         dry_run: bool,
     ) -> Option<ProviderError> {
-        if dry_run || mode != ProvisioningMode::TailnetPerLobby {
+        if dry_run
+            || mode != ProvisioningMode::TailnetPerLobby
+            || matches!(
+                network_lifecycle,
+                NetworkLifecycle::VerifyingAbsence
+                    | NetworkLifecycle::DedicatedAbsent
+                    | NetworkLifecycle::CreateRejected
+            )
+        {
             return None;
         }
         match self.child_vault.read() {
@@ -561,8 +697,14 @@ impl NetworkProvider for TailscaleProvider {
             return Ok(dry_prepared_network());
         }
         if request.mode == ProvisioningMode::SharedTailnet {
+            let tailnet_dns_name = TailnetDnsName::parse(&self.shared_tailnet)
+                .map_err(|_| ProviderError::IdentityMismatch)?;
             return Ok(PreparedNetwork {
-                tailnet: self.shared_tailnet.clone(),
+                tailnet: tailnet_dns_name.as_str().to_owned(),
+                identity: Some(ProviderNetworkIdentity {
+                    provider_tailnet_id: None,
+                    tailnet_dns_name,
+                }),
                 dry_run: false,
                 metadata: ResponseMetadata::default(),
             });
@@ -574,8 +716,15 @@ impl NetworkProvider for TailscaleProvider {
         let _create_guard = self.child_create_lock.lock().await;
         if let Ok(vault) = self.child_vault.read() {
             if let Some(access) = vault.get(&request.lobby_id) {
+                if access.network_generation != request.network_generation {
+                    return Err(ProviderError::IdentityMismatch);
+                }
                 return Ok(PreparedNetwork {
-                    tailnet: access.dns_name.clone(),
+                    tailnet: access.dns_name.as_str().to_owned(),
+                    identity: Some(ProviderNetworkIdentity {
+                        provider_tailnet_id: Some(access.provider_tailnet_id.clone()),
+                        tailnet_dns_name: access.dns_name.clone(),
+                    }),
                     dry_run: false,
                     metadata: ResponseMetadata::default(),
                 });
@@ -590,11 +739,12 @@ impl NetworkProvider for TailscaleProvider {
             .create_tailnet(&display_name)
             .await
             .map_err(|error| map_control_error(error, "organization_tailnet_create"))?;
-        let dns_name = tailnet.dns_name.clone();
-        let child = Arc::new(
-            self.client
-                .child_scoped(tailnet.into_child_oauth_credentials()),
-        );
+        let (provider_tailnet_id, dns_name, _display_name, child_credentials) =
+            tailnet.into_parts();
+        if !valid_provider_tailnet_id(&provider_tailnet_id) || request.network_generation == 0 {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let child = Arc::new(self.client.child_scoped(child_credentials));
         self.child_vault
             .write()
             .map_err(|_| ProviderError::Unavailable {
@@ -603,6 +753,8 @@ impl NetworkProvider for TailscaleProvider {
             .insert(
                 request.lobby_id,
                 ChildTailnetAccess {
+                    network_generation: request.network_generation,
+                    provider_tailnet_id: provider_tailnet_id.clone(),
                     dns_name: dns_name.clone(),
                     client: child,
                 },
@@ -612,7 +764,11 @@ impl NetworkProvider for TailscaleProvider {
             cache.can_manage_organization_tailnets = true;
         }
         Ok(PreparedNetwork {
-            tailnet: dns_name,
+            tailnet: dns_name.as_str().to_owned(),
+            identity: Some(ProviderNetworkIdentity {
+                provider_tailnet_id: Some(provider_tailnet_id),
+                tailnet_dns_name: dns_name,
+            }),
             dry_run: false,
             metadata: ResponseMetadata::default(),
         })
@@ -641,7 +797,15 @@ impl NetworkProvider for TailscaleProvider {
                     .await
             }
             ProvisioningMode::TailnetPerLobby => {
-                let child = self.child_access(request.lobby_id, &request.tailnet)?;
+                let identity = request
+                    .identity
+                    .as_ref()
+                    .ok_or(ProviderError::IdentityMismatch)?;
+                if identity.tailnet_dns_name.as_str() != request.tailnet {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+                let child =
+                    self.child_access(request.lobby_id, request.network_generation, identity)?;
                 child.create_auth_key(&request.tailnet, &options).await
             }
             ProvisioningMode::DryRun => unreachable!("dry-run returned above"),
@@ -680,6 +844,74 @@ impl NetworkProvider for TailscaleProvider {
         }
         self.cleanup_shared_tailnet(request).await
     }
+
+    async fn observe_network(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        if request.dry_run || request.mode == ProvisioningMode::DryRun {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let count = match request.mode {
+            ProvisioningMode::TailnetPerLobby => {
+                let identity = request
+                    .identity
+                    .as_ref()
+                    .ok_or(ProviderError::IdentityMismatch)?;
+                if identity.tailnet_dns_name.as_str() != request.tailnet {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+                let child =
+                    self.child_access(request.lobby_id, request.network_generation, identity)?;
+                child
+                    .list_devices(identity.tailnet_dns_name.as_str())
+                    .await
+                    .map_err(|error| map_control_error(error, "device_inventory"))?
+                    .len()
+            }
+            ProvisioningMode::SharedTailnet => self
+                .client
+                .list_devices(&request.tailnet)
+                .await
+                .map_err(|error| map_control_error(error, "device_inventory"))?
+                .into_iter()
+                .filter(|device| device.tags.iter().any(|tag| tag == &request.tag))
+                .count(),
+            ProvisioningMode::DryRun => unreachable!("dry run returned above"),
+        };
+        Ok(ProviderDeviceObservation {
+            enrolled_device_count: u32::try_from(count).unwrap_or(u32::MAX),
+        })
+    }
+
+    async fn tailnet_present(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        request
+            .identity
+            .validate_for_mode(ProvisioningMode::TailnetPerLobby)?;
+        if request.network_generation == 0 {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let stable_id = request
+            .identity
+            .provider_tailnet_id
+            .as_deref()
+            .ok_or(ProviderError::IdentityMismatch)?;
+        let tailnets = self
+            .client
+            .list_organization_tailnets()
+            .await
+            .map_err(|error| map_control_error(error, "organization_tailnet_presence"))?;
+        let Some(found) = tailnets.into_iter().find(|tailnet| tailnet.id == stable_id) else {
+            return Ok(false);
+        };
+        if found.dns_name.as_ref() != Some(&request.identity.tailnet_dns_name) {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        Ok(true)
+    }
 }
 
 impl TailscaleProvider {
@@ -687,20 +919,41 @@ impl TailscaleProvider {
         &self,
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError> {
-        let child = self.child_access(request.lobby_id, &request.tailnet)?;
+        let identity = request
+            .identity
+            .as_ref()
+            .ok_or(ProviderError::IdentityMismatch)?;
+        if identity.tailnet_dns_name.as_str() != request.tailnet {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        let child = self.child_access(request.lobby_id, request.network_generation, identity)?;
         if request.include_devices {
             child
-                .delete_tailnet(&request.tailnet)
+                .delete_tailnet(identity.tailnet_dns_name.as_str())
                 .await
                 .map_err(|error| map_control_error(error, "child_tailnet_delete"))?;
-            self.child_vault
+            let removed = self
+                .child_vault
                 .write()
                 .map_err(|_| ProviderError::Unavailable {
                     operation: "child_secret_vault",
                 })?
-                .remove(&request.lobby_id);
+                .remove(&request.lobby_id)
+                .ok_or(ProviderError::IdentityMismatch)?;
+            if removed.network_generation != request.network_generation
+                || removed.provider_tailnet_id
+                    != identity
+                        .provider_tailnet_id
+                        .as_deref()
+                        .ok_or(ProviderError::IdentityMismatch)?
+                || removed.dns_name != identity.tailnet_dns_name
+            {
+                return Err(ProviderError::IdentityMismatch);
+            }
             return Ok(CleanupOutcome {
                 cleanup_pending: false,
+                delete_acknowledged: true,
+                child_secret_erased: true,
                 revoked_credential_ids: request
                     .credentials
                     .into_iter()
@@ -805,6 +1058,7 @@ impl TailscaleProvider {
 fn dry_prepared_network() -> PreparedNetwork {
     PreparedNetwork {
         tailnet: "dry-run.invalid".to_owned(),
+        identity: None,
         dry_run: true,
         metadata: ResponseMetadata {
             dry_run: true,
@@ -854,6 +1108,8 @@ fn dry_cleanup_outcome(request: &CleanupLobbyRequest) -> CleanupOutcome {
     }
     CleanupOutcome {
         cleanup_pending: false,
+        delete_acknowledged: false,
+        child_secret_erased: false,
         revoked_credential_ids: request
             .credentials
             .iter()
@@ -867,15 +1123,25 @@ fn dry_cleanup_outcome(request: &CleanupLobbyRequest) -> CleanupOutcome {
     }
 }
 
+fn valid_provider_tailnet_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn map_control_error(error: ControlError, operation: &'static str) -> ProviderError {
     match error {
         ControlError::Http { status: 403, .. } => ProviderError::InsufficientScopes { operation },
         ControlError::Http { status, .. } => ProviderError::Upstream { operation, status },
         ControlError::ProvisioningUnavailable(_) => ProviderError::Unavailable { operation },
-        ControlError::Env(_)
-        | ControlError::InvalidTailnetName(_)
-        | ControlError::Reqwest(_)
-        | ControlError::Json(_) => ProviderError::Unavailable { operation },
+        ControlError::InvalidTailnetName(_) | ControlError::InvalidProviderPath => {
+            ProviderError::IdentityMismatch
+        }
+        ControlError::Env(_) | ControlError::Reqwest(_) | ControlError::Json(_) => {
+            ProviderError::Unavailable { operation }
+        }
     }
 }
 
@@ -996,6 +1262,7 @@ mod tests {
         provider
             .prepare_lobby(PrepareLobbyRequest {
                 lobby_id,
+                network_generation: 1,
                 mode: ProvisioningMode::TailnetPerLobby,
                 dry_run: true,
             })
@@ -1004,6 +1271,8 @@ mod tests {
         let minted = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id,
+                network_generation: 1,
+                identity: None,
                 mode: ProvisioningMode::DryRun,
                 player_id,
                 tailnet: "-".to_owned(),
@@ -1017,6 +1286,8 @@ mod tests {
         provider
             .cleanup_lobby(CleanupLobbyRequest {
                 lobby_id,
+                network_generation: 1,
+                identity: None,
                 mode: ProvisioningMode::DryRun,
                 tailnet: "-".to_owned(),
                 tag: "tag:spurfire-lobby-test".to_owned(),
@@ -1109,6 +1380,7 @@ mod tests {
         let player_id = PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap();
         let prepare_request = PrepareLobbyRequest {
             lobby_id,
+            network_generation: 1,
             mode: ProvisioningMode::TailnetPerLobby,
             dry_run: false,
         };
@@ -1125,9 +1397,12 @@ mod tests {
         assert!(!provider_debug.contains(CHILD_ID));
         assert!(!provider_debug.contains(CHILD_SECRET));
 
+        let identity = prepared.identity.clone();
         let minted = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id,
+                network_generation: 1,
+                identity: identity.clone(),
                 mode: ProvisioningMode::TailnetPerLobby,
                 player_id,
                 tailnet: prepared.tailnet.clone(),
@@ -1146,6 +1421,8 @@ mod tests {
         let outcome = provider
             .cleanup_lobby(CleanupLobbyRequest {
                 lobby_id,
+                network_generation: 1,
+                identity,
                 mode: ProvisioningMode::TailnetPerLobby,
                 tailnet: prepared.tailnet,
                 tag: "tag:spurfire-lobby-test".to_owned(),
@@ -1178,7 +1455,12 @@ mod tests {
         );
         let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let error = provider
-            .lobby_access_error(lobby_id, ProvisioningMode::TailnetPerLobby, false)
+            .lobby_access_error(
+                lobby_id,
+                ProvisioningMode::TailnetPerLobby,
+                NetworkLifecycle::Active,
+                false,
+            )
             .unwrap();
         assert_eq!(
             error.state_reason(),
@@ -1188,6 +1470,11 @@ mod tests {
         let result = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id,
+                network_generation: 1,
+                identity: Some(ProviderNetworkIdentity {
+                    provider_tailnet_id: Some("TtRestartedCNTRL".to_owned()),
+                    tailnet_dns_name: TailnetDnsName::parse("tail-restarted.ts.net").unwrap(),
+                }),
                 mode: ProvisioningMode::TailnetPerLobby,
                 player_id: PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
                 tailnet: "tail-restarted.ts.net".to_owned(),
@@ -1256,6 +1543,8 @@ mod tests {
         let result = provider
             .mint_credential(MintCredentialRequest {
                 lobby_id: LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+                network_generation: 1,
+                identity: None,
                 mode: ProvisioningMode::SharedTailnet,
                 player_id: PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
                 tailnet: "-".to_owned(),
