@@ -267,9 +267,16 @@ impl SaddleDiveController {
         let prelaunch = dive_id
             .and_then(|id| self.kernel.instrumentation_row(id))
             .map_or([0; 2], |row| row.prelaunch_velocity_mmps);
-        let gait = self.horse().map_or(CombatGait::Idle, |horse| {
-            combat_gait(horse.bind().m2_snapshot().gait)
-        });
+        let gait = dive_id
+            .and_then(|id| self.kernel.instrumentation_row(id))
+            .map_or_else(
+                || {
+                    self.horse().map_or(CombatGait::Idle, |horse| {
+                        combat_gait(horse.bind().m2_snapshot().gait)
+                    })
+                },
+                |row| row.launch_gait,
+            );
         let shot = AcceptedShotMetadata {
             shooter: self.kernel.actor(),
             tick,
@@ -598,10 +605,16 @@ impl SaddleDiveController {
                     self.set_collision_enabled(true);
                     self.base_mut()
                         .set_velocity(mmps_to_vector(launch_velocity_mmps));
-                    if dive_id.is_none() {
-                        if let Some(mut horse) = self.horse() {
-                            horse.bind_mut().stop_for_dismount(tick_i64(tick));
+                    if let Some(id) = dive_id {
+                        if let Some(row) = self.kernel.instrumentation_row(id).cloned() {
+                            self.signals().dive_started().emit(
+                                dive_id_i64(id),
+                                mmps_to_vector(launch_velocity_mmps),
+                                f64::from(row.clamped_angle_millidegrees) / 1_000.0,
+                            );
                         }
+                    } else if let Some(mut horse) = self.horse() {
+                        horse.bind_mut().stop_for_dismount(tick_i64(tick));
                     }
                 }
                 SaddleDiveCommand::ApplyRiderDamage(command) => {
@@ -640,23 +653,6 @@ impl SaddleDiveController {
                 dive_id,
             );
             match (transition.from, transition.to) {
-                (SaddleDiveState::Mounted, SaddleDiveState::SaddleDiveAirborne) => {
-                    if let Some(id) = transition.dive_id {
-                        if let Some(row) = self.kernel.instrumentation_row(id).cloned() {
-                            self.signals().dive_started().emit(
-                                dive_id_i64(id),
-                                mmps_to_vector([
-                                    row.prelaunch_velocity_mmps[0]
-                                        + impulse_component(row.clamped_direction.x),
-                                    i32::from(row.vertical_pop_mmps as u16),
-                                    row.prelaunch_velocity_mmps[1]
-                                        + impulse_component(row.clamped_direction.z),
-                                ]),
-                                f64::from(row.clamped_angle_millidegrees) / 1_000.0,
-                            );
-                        }
-                    }
-                }
                 (SaddleDiveState::SaddleDiveAirborne, SaddleDiveState::LandingProne) => {
                     if let Some(id) = transition.dive_id {
                         if let Some(mut weapon) = self.weapon_controller() {
@@ -674,6 +670,12 @@ impl SaddleDiveController {
                                 bad,
                                 f64::from(row.landing_slope_millidegrees.unwrap_or(0)) / 1_000.0,
                                 &terrain,
+                            );
+                            let phase = GString::from("prone");
+                            self.signals().recovery_changed().emit(
+                                dive_id_i64(id),
+                                &phase,
+                                0.0,
                             );
                         }
                     }
@@ -889,11 +891,6 @@ fn mmps_to_vector(value: [i32; 3]) -> Vector3 {
     )
 }
 
-fn impulse_component(direction: i32) -> i32 {
-    ((i64::from(direction) * 6_000 + i64::from(DIRECTION_UNITS) / 2) / i64::from(DIRECTION_UNITS))
-        as i32
-}
-
 fn finite_positive_or(value: f64, fallback: f64) -> f64 {
     if value.is_finite() && value > 0.0 {
         value
@@ -947,12 +944,20 @@ fn instrumentation_dictionary(row: &DiveInstrumentationRow) -> VarDictionary {
     result.set("launch_weapon", i64::from(row.launch_weapon.as_u8()));
     result.set("launch_gait", row.launch_gait.as_str());
     result.set(
+        "prelaunch_velocity_mmps",
+        Vector2i::new(
+            row.prelaunch_velocity_mmps[0],
+            row.prelaunch_velocity_mmps[1],
+        ),
+    );
+    result.set(
         "prelaunch_velocity_mps",
         Vector2::new(
             row.prelaunch_velocity_mmps[0] as f32 / 1_000.0,
             row.prelaunch_velocity_mmps[1] as f32 / 1_000.0,
         ),
     );
+    result.set("prelaunch_speed_mmps", i64::from(row.prelaunch_speed_mmps));
     result.set(
         "prelaunch_speed_mps",
         f64::from(row.prelaunch_speed_mmps) / 1_000.0,
@@ -960,6 +965,18 @@ fn instrumentation_dictionary(row: &DiveInstrumentationRow) -> VarDictionary {
     result.set(
         "requested_direction",
         direction_to_vector(row.requested_direction),
+    );
+    result.set(
+        "requested_direction_quantized",
+        Vector3i::new(
+            row.requested_direction.x,
+            row.requested_direction.y,
+            row.requested_direction.z,
+        ),
+    );
+    result.set(
+        "requested_angle_millidegrees",
+        i64::from(row.requested_angle_millidegrees),
     );
     result.set(
         "requested_angle_degrees",
@@ -970,26 +987,52 @@ fn instrumentation_dictionary(row: &DiveInstrumentationRow) -> VarDictionary {
         direction_to_vector(row.clamped_direction),
     );
     result.set(
+        "clamped_direction_quantized",
+        Vector3i::new(
+            row.clamped_direction.x,
+            row.clamped_direction.y,
+            row.clamped_direction.z,
+        ),
+    );
+    result.set(
+        "clamped_angle_millidegrees",
+        i64::from(row.clamped_angle_millidegrees),
+    );
+    result.set(
         "clamped_angle_degrees",
         f64::from(row.clamped_angle_millidegrees) / 1_000.0,
     );
     result.set("direction_was_clamped", row.direction_was_clamped);
     result.set(
+        "horizontal_impulse_mmps",
+        i64::from(row.horizontal_impulse_mmps),
+    );
+    result.set(
         "horizontal_impulse_mps",
         f64::from(row.horizontal_impulse_mmps) / 1_000.0,
+    );
+    result.set(
+        "resulting_planar_speed_mmps",
+        i64::from(row.resulting_planar_speed_mmps),
     );
     result.set(
         "resulting_planar_speed_mps",
         f64::from(row.resulting_planar_speed_mmps) / 1_000.0,
     );
     result.set(
+        "resulting_total_speed_mmps",
+        i64::from(row.resulting_total_speed_mmps),
+    );
+    result.set(
         "resulting_total_speed_mps",
         f64::from(row.resulting_total_speed_mmps) / 1_000.0,
     );
+    result.set("vertical_pop_mmps", i64::from(row.vertical_pop_mmps));
     result.set(
         "vertical_pop_mps",
         f64::from(row.vertical_pop_mmps) / 1_000.0,
     );
+    result.set("launch_height_mm", i64::from(row.launch_height_mm));
     result.set("launch_height_m", f64::from(row.launch_height_mm) / 1_000.0);
     result.set(
         "nominal_airtime_ticks",
@@ -1007,6 +1050,11 @@ fn instrumentation_dictionary(row: &DiveInstrumentationRow) -> VarDictionary {
         "landing_terrain",
         row.landing_terrain.map_or("", landing_terrain_name),
     );
+    if let Some(value) = row.landing_slope_millidegrees {
+        result.set("landing_slope_millidegrees", i64::from(value));
+    } else {
+        result.set("landing_slope_millidegrees", &Variant::nil());
+    }
     result.set(
         "landing_slope_degrees",
         row.landing_slope_millidegrees

@@ -163,6 +163,12 @@ impl MountedWeaponController {
             ads,
             sprint_gallop,
         };
+        if !stance.is_known() {
+            self.riding = riding;
+            self.assign_stance(stance, None);
+            self.advance_kernel_to(SimulationTick::new(tick_value));
+            return false;
+        }
         if !riding.is_consistent() {
             return false;
         }

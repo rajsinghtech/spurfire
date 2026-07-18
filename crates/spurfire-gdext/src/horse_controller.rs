@@ -545,10 +545,9 @@ impl HorseController {
     fn emit_retrievable(&mut self, tick: SimulationTick) {
         self.assign_runout_properties();
         let distance = self.runout_distance_m;
-        self.signals().horse_retrievable().emit(
-            i64::try_from(tick.as_u64()).unwrap_or(i64::MAX),
-            distance,
-        );
+        self.signals()
+            .horse_retrievable()
+            .emit(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX), distance);
     }
 
     fn exported_tuning(&self) -> Tuning {

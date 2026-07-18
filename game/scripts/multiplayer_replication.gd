@@ -2,6 +2,7 @@ extends Node
 
 @export var peer_session: Node
 @export var local_horse: CharacterBody3D
+@export var local_rider: CharacterBody3D
 @export var remote_rider: Node3D
 
 var destination_ip := ""
@@ -128,22 +129,30 @@ func configure_remote(ip: String, port: int, is_authority: bool) -> bool:
 	}
 	return true
 
-func _physics_process(_delta: float) -> void:
-	simulation_tick += 1
-	if peer_session == null or local_horse == null or (_peers.is_empty() and destination_ip.is_empty()):
+## The M2 gameplay coordinator owns the sole absolute simulation clock.
+func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
+	if tick <= simulation_tick:
+		return
+	simulation_tick = tick
+	if peer_session == null or local_rider == null or (_peers.is_empty() and destination_ip.is_empty()):
 		return
 	var packet := PackedByteArray()
-	if (_demo_mode or local_is_authority) and simulation_tick % 2 == 0:
+	if (_demo_mode or local_is_authority) and (simulation_tick % 2 == 0 or stance_changed):
 		packet = peer_session.make_rider_snapshot(
 			simulation_tick,
-			local_horse.global_position,
-			local_horse.velocity,
-			rad_to_deg(local_horse.rotation.y)
+			local_rider.global_position,
+			local_rider.velocity,
+			rad_to_deg(local_rider.rotation.y),
+			int(local_rider.get("stance_id"))
 		)
 	elif not local_is_authority:
 		var throttle := roundi(Input.get_axis(&"move_back", &"move_forward") * 1000.0)
 		var steer := roundi(Input.get_axis(&"steer_left", &"steer_right") * 1000.0)
-		var buttons := 1 if Input.is_action_pressed(&"jump") else 0
+		var buttons := 0
+		if Input.is_action_just_pressed(&"jump"):
+			buttons |= 1
+		if Input.is_action_just_pressed(&"combat_interact"):
+			buttons |= 2
 		packet = peer_session.make_rider_input(simulation_tick, throttle, steer, buttons)
 	elif simulation_tick % 6 == 0:
 		packet = peer_session.make_heartbeat(simulation_tick)
@@ -218,7 +227,8 @@ func _apply_remote_snapshot(payload: Dictionary, now: int) -> void:
 		int(payload.get("tick", 0)),
 		payload.get("position", Vector3.ZERO),
 		payload.get("velocity", Vector3.ZERO),
-		float(payload.get("yaw_degrees", 0.0))
+		float(payload.get("yaw_degrees", 0.0)),
+		int(payload.get("stance_id", 1))
 	)
 
 func _remote_rider_for(sender: String) -> Node3D:
@@ -233,7 +243,7 @@ func _remote_rider_for(sender: String) -> Node3D:
 		rider.name = "RemoteRider_%d" % _remote_riders.size()
 	if rider == null:
 		return null
-	var body := rider.get_node_or_null("Body") as MeshInstance3D
+	var body := rider.get_node_or_null("RiderProxy/Body") as MeshInstance3D
 	if body:
 		var material := StandardMaterial3D.new()
 		material.albedo_color = RIDER_COLORS[_remote_riders.size() % RIDER_COLORS.size()]

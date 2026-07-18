@@ -133,10 +133,10 @@ func _check_native_api_if_available(failures: Array[String]) -> void:
 		failures.append("MountedWeaponController could not instantiate")
 		return
 	add_child(native)
-	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit"]:
+	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit", "resolve_local_miss", "set_rider_context", "advance_to_tick", "begin_saddle_dive", "finish_saddle_dive", "complete_remount"]:
 		if not native.has_method(method):
 			failures.append("MountedWeaponController lacks %s" % method)
-	for signal_name in [&"weapon_changed", &"ammo_changed", &"shot_fired", &"hit_confirmed"]:
+	for signal_name in [&"weapon_changed", &"ammo_changed", &"shot_fired", &"shot_accepted", &"shot_resolved", &"fire_rejected", &"hit_confirmed"]:
 		if not native.has_signal(signal_name):
 			failures.append("MountedWeaponController lacks %s signal" % signal_name)
 	native.queue_free()

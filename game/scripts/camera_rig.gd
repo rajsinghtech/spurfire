@@ -1,6 +1,7 @@
 extends Node3D
 
 @export var target: Node3D
+@export var telemetry_source: Node
 @export_range(4.5, 6.5, 0.1) var chase_distance := 5.5
 @export var pivot_height := 2.2
 @export var shoulder_offset := 0.4
@@ -23,8 +24,9 @@ func _ready() -> void:
 	if target:
 		global_position = target.global_position + Vector3.UP * pivot_height
 		rotation.y = target.global_rotation.y
-		if target.has_signal("telemetry_updated"):
-			target.telemetry_updated.connect(_on_telemetry)
+	var source := telemetry_source if telemetry_source else target
+	if source and source.has_signal("telemetry_updated"):
+		source.telemetry_updated.connect(_on_telemetry)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed(&"release_mouse"):

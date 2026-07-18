@@ -1,4 +1,4 @@
-[gd_scene load_steps=31 format=3]
+[gd_scene load_steps=38 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -17,6 +17,9 @@
 [ext_resource type="Script" path="res://scripts/combat_player.gd" id="15_combat_player"]
 [ext_resource type="Script" path="res://scripts/network_status.gd" id="16_network_status"]
 [ext_resource type="Script" path="res://scripts/multiplayer_replication.gd" id="17_replication"]
+[ext_resource type="Script" path="res://scripts/m2_gameplay.gd" id="18_m2_gameplay"]
+[ext_resource type="Script" path="res://scripts/rider_pose.gd" id="19_rider_pose"]
+[ext_resource type="Script" path="res://scripts/gameplay_toast.gd" id="20_gameplay_toast"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -80,6 +83,28 @@ bottom_radius = 0.035
 height = 1.05
 radial_segments = 8
 
+[sub_resource type="CapsuleShape3D" id="CapsuleShape_rider"]
+radius = 0.35
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="Material_rider"]
+albedo_color = Color(0.15, 0.58, 0.68, 1)
+roughness = 0.72
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_rider"]
+material = SubResource("Material_rider")
+radius = 0.34
+height = 1.7
+radial_segments = 12
+rings = 4
+
+[sub_resource type="SphereMesh" id="SphereMesh_rider_head"]
+material = SubResource("Material_rider")
+radius = 0.27
+height = 0.54
+radial_segments = 12
+rings = 6
+
 [sub_resource type="SphereShape3D" id="SphereShape_camera"]
 radius = 0.35
 
@@ -113,17 +138,17 @@ position = Vector3(0, 0.15, -12)
 [node name="TargetBodyNear" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
 position = Vector3(-4, 0, -28)
 target_id = 101
-controller = NodePath("../Horse/WeaponController")
+controller = NodePath("../Rider/WeaponController")
 
 [node name="TargetHeadMid" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
 position = Vector3(0, 0, -42)
 target_id = 102
-controller = NodePath("../Horse/WeaponController")
+controller = NodePath("../Rider/WeaponController")
 
 [node name="TargetBodyFar" parent="." node_paths=PackedStringArray("controller") instance=ExtResource("12_dummy")]
 position = Vector3(5, 0, -58)
 target_id = 103
-controller = NodePath("../Horse/WeaponController")
+controller = NodePath("../Rider/WeaponController")
 
 [node name="CombatEffects" parent="." instance=ExtResource("14_effects")]
 
@@ -197,32 +222,58 @@ mesh = SubResource("CylinderMesh_tail")
 [node name="VisualAnimator" type="Node" parent="Horse"]
 script = ExtResource("6_visual")
 
-[node name="WeaponController" type="MountedWeaponController" parent="Horse"]
-position = Vector3(0.52, 1.92, -0.18)
-
-[node name="MountedRifle" parent="Horse" node_paths=PackedStringArray("controller", "aim_source") instance=ExtResource("10_rifle")]
-position = Vector3(0.52, 1.92, -0.18)
-rotation_degrees = Vector3(-4, 0, 0)
-controller = NodePath("../WeaponController")
-aim_source = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
-
-[node name="CombatInput" type="Node" parent="Horse" node_paths=PackedStringArray("horse", "controller", "rifle", "aim_camera", "effects", "combat_hud")]
-script = ExtResource("15_combat_player")
-horse = NodePath("..")
-controller = NodePath("../WeaponController")
-rifle = NodePath("../MountedRifle")
-aim_camera = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
-effects = NodePath("../../CombatEffects")
-combat_hud = NodePath("../../CombatLayer/CombatHUD")
-
 [node name="ForwardMarker" type="MeshInstance3D" parent="Horse"]
 position = Vector3(0, 1.35, -1.35)
 scale = Vector3(0.3, 0.3, 0.3)
 mesh = SubResource("CapsuleMesh_horse")
 
-[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target")]
+[node name="Rider" type="SaddleDiveController" parent="." node_paths=PackedStringArray("horse_path", "saddle_path", "collision_shape_path", "weapon_controller_path")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.92, 25)
+horse_path = NodePath("../Horse")
+saddle_path = NodePath("../Horse/SaddleProxy")
+collision_shape_path = NodePath("CollisionShape3D")
+weapon_controller_path = NodePath("WeaponController")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Rider"]
+position = Vector3(0, 0.9, 0)
+shape = SubResource("CapsuleShape_rider")
+disabled = true
+
+[node name="RiderProxy" type="Node3D" parent="Rider" node_paths=PackedStringArray("rider")]
+script = ExtResource("19_rider_pose")
+rider = NodePath("..")
+
+[node name="Body" type="MeshInstance3D" parent="Rider/RiderProxy"]
+position = Vector3(0, 0.88, 0)
+mesh = SubResource("CapsuleMesh_rider")
+
+[node name="Head" type="MeshInstance3D" parent="Rider/RiderProxy"]
+position = Vector3(0, 1.82, 0)
+mesh = SubResource("SphereMesh_rider_head")
+
+[node name="WeaponController" type="MountedWeaponController" parent="Rider"]
+position = Vector3(0.52, 1.12, -0.18)
+
+[node name="MountedRifle" parent="Rider/RiderProxy" node_paths=PackedStringArray("controller", "aim_source") instance=ExtResource("10_rifle")]
+position = Vector3(0.52, 1.12, -0.18)
+rotation_degrees = Vector3(-4, 0, 0)
+controller = NodePath("../../WeaponController")
+aim_source = NodePath("../../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
+
+[node name="CombatInput" type="Node" parent="Rider" node_paths=PackedStringArray("rider", "horse", "controller", "rifle", "aim_camera", "effects", "combat_hud")]
+script = ExtResource("15_combat_player")
+rider = NodePath("..")
+horse = NodePath("../../Horse")
+controller = NodePath("../WeaponController")
+rifle = NodePath("../RiderProxy/MountedRifle")
+aim_camera = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
+effects = NodePath("../../CombatEffects")
+combat_hud = NodePath("../../CombatLayer/CombatHUD")
+
+[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "telemetry_source")]
 script = ExtResource("2_camera")
-target = NodePath("../Horse")
+target = NodePath("../Rider")
+telemetry_source = NodePath("../Horse")
 
 [node name="PitchPivot" type="Node3D" parent="CameraRig"]
 
@@ -250,8 +301,9 @@ shape = SubResource("BoxShape_kill")
 [node name="FeedbackLayer" type="CanvasLayer" parent="."]
 layer = 0
 
-[node name="StylizedFeedback" parent="FeedbackLayer" node_paths=PackedStringArray("horse") instance=ExtResource("8_feedback")]
+[node name="StylizedFeedback" parent="FeedbackLayer" node_paths=PackedStringArray("horse", "rider") instance=ExtResource("8_feedback")]
 horse = NodePath("../../Horse")
+rider = NodePath("../../Rider")
 
 [node name="ArchetypeLayer" type="CanvasLayer" parent="."]
 layer = 5
@@ -265,14 +317,33 @@ horse_path = NodePath("../../Horse")
 [node name="RemoteRider" type="NetworkRider" parent="."]
 visible = false
 
-[node name="Body" type="MeshInstance3D" parent="RemoteRider"]
-mesh = SubResource("BoxMesh_body")
+[node name="RiderProxy" type="Node3D" parent="RemoteRider" node_paths=PackedStringArray("rider")]
+script = ExtResource("19_rider_pose")
+rider = NodePath("..")
 
-[node name="NetworkReplication" type="Node" parent="." node_paths=PackedStringArray("peer_session", "local_horse", "remote_rider")]
+[node name="Body" type="MeshInstance3D" parent="RemoteRider/RiderProxy"]
+position = Vector3(0, 0.88, 0)
+mesh = SubResource("CapsuleMesh_rider")
+
+[node name="Head" type="MeshInstance3D" parent="RemoteRider/RiderProxy"]
+position = Vector3(0, 1.82, 0)
+mesh = SubResource("SphereMesh_rider_head")
+
+[node name="NetworkReplication" type="Node" parent="." node_paths=PackedStringArray("peer_session", "local_horse", "local_rider", "remote_rider")]
 script = ExtResource("17_replication")
 peer_session = NodePath("../PeerSession")
 local_horse = NodePath("../Horse")
+local_rider = NodePath("../Rider")
 remote_rider = NodePath("../RemoteRider")
+
+[node name="M2Gameplay" type="Node" parent="." node_paths=PackedStringArray("rider", "horse", "aim_camera", "weapon_controller", "combat_input", "replication")]
+script = ExtResource("18_m2_gameplay")
+rider = NodePath("../Rider")
+horse = NodePath("../Horse")
+aim_camera = NodePath("../CameraRig/PitchPivot/SpringArm3D/Camera3D")
+weapon_controller = NodePath("../Rider/WeaponController")
+combat_input = NodePath("../Rider/CombatInput")
+replication = NodePath("../NetworkReplication")
 
 [node name="NetworkLayer" type="CanvasLayer" parent="." node_paths=PackedStringArray("peer_session", "replication")]
 layer = 4
@@ -339,7 +410,37 @@ text = "Private tailnet endpoints only • Hold TAB to inspect"
 layer = 3
 
 [node name="CombatHUD" parent="CombatLayer" node_paths=PackedStringArray("controller") instance=ExtResource("11_combat_hud")]
-controller = NodePath("../../Horse/WeaponController")
+controller = NodePath("../../Rider/WeaponController")
+
+[node name="GameplayEventLayer" type="CanvasLayer" parent="."]
+layer = 6
+
+[node name="GameplayToast" type="Control" parent="GameplayEventLayer" node_paths=PackedStringArray("rider")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("20_gameplay_toast")
+rider = NodePath("../../Rider")
+
+[node name="Notification" type="Label" parent="GameplayEventLayer/GameplayToast"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_top = 92.0
+offset_bottom = 142.0
+grow_horizontal = 2
+theme_override_colors/font_color = Color(1, 0.72, 0.25, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.85)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 28
+text = "FLYING DISMOUNT"
+horizontal_alignment = 1
 
 [node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse")]
 layer = 2
@@ -388,4 +489,4 @@ offset_left = 20.0
 offset_top = 225.0
 offset_right = 560.0
 offset_bottom = 290.0
-text = "W/S ride  •  A/D steer/sidestep  •  Mouse1 fire  •  Mouse2 aim  •  R reload\n4/5/6 rifles  •  T reset  •  1/2/3 horse  •  H stats  •  Hold TAB peer routes"
+text = "W/S ride  •  A/D steer/sidestep  •  E dismount / Saddle Dive / remount  •  Mouse1 fire\nMouse2 aim  •  R reload  •  4/5/6 rifles  •  T reset  •  Hold TAB peer routes"
