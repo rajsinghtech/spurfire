@@ -96,6 +96,17 @@ pub struct CreateLobbyResponse {
     pub metadata: ResponseMetadata,
 }
 
+/// First successful create response. Replay uses [`CreateLobbyResponse`] and
+/// never re-emits capability plaintext.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateLobbyFirstResponse {
+    /// Non-secret create receipt.
+    #[serde(flatten)]
+    pub response: CreateLobbyResponse,
+    /// Creator control capability returned once.
+    pub creator_capability: OpaqueCapability,
+}
+
 /// Pollable `GET /v1/lobbies/{lobby_id}` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LobbyResponse {
@@ -109,6 +120,107 @@ pub struct LobbyResponse {
 
 /// Conventional route-specific alias for [`LobbyResponse`].
 pub type GetLobbyResponse = LobbyResponse;
+
+/// Public names for exact-lobby capability privileges. Plaintext capabilities are
+/// returned only in explicitly documented first-success responses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LobbyCapabilityScope {
+    /// Read the selected lobby and cached network view.
+    LobbyRead,
+    /// Submit bounded participant/network measurements.
+    LobbyReport,
+    /// Create one-use invitations.
+    LobbyInvite,
+    /// Start and otherwise manage lobby coordination.
+    LobbyManage,
+    /// End the lobby and request exact cleanup.
+    LobbyDestroy,
+    /// Consume once to join one exact lobby.
+    LobbyJoin,
+    /// Participate in heartbeat/results coordination.
+    LobbyPlay,
+    /// Remove only the capability-bound participant.
+    LobbyLeaveSelf,
+    /// Operator-issued one-use admission to one real create.
+    LobbyCreateReal,
+}
+
+/// First-response-only opaque capability. Debug output remains redacted.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct OpaqueCapability {
+    token: String,
+    /// Non-secret privileges bound to the token verifier.
+    pub scopes: Vec<LobbyCapabilityScope>,
+    /// Absolute capability expiry.
+    pub expires_at: UnixMillis,
+}
+
+impl OpaqueCapability {
+    /// Constructs an explicitly exposable first-response capability.
+    #[must_use]
+    pub fn new(
+        token: impl Into<String>,
+        scopes: Vec<LobbyCapabilityScope>,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            token: token.into(),
+            scopes,
+            expires_at,
+        }
+    }
+
+    /// Exposes plaintext only to the dedicated first-response serializer/native handoff.
+    #[must_use]
+    pub fn expose_token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl fmt::Debug for OpaqueCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpaqueCapability")
+            .field("token", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl Serialize for OpaqueCapability {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            token: &'a str,
+            scopes: &'a [LobbyCapabilityScope],
+            expires_at: UnixMillis,
+        }
+        Wire {
+            token: &self.token,
+            scopes: &self.scopes,
+            expires_at: self.expires_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// `POST /v1/lobbies/{id}/invitations` request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateInvitationRequest {}
+
+/// First-success invitation returned once. Replays never re-emit this object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateInvitationResponse {
+    /// One-use invitation capability.
+    pub invitation: OpaqueCapability,
+    /// Lobby generation to which the invitation is bound.
+    pub network_generation: u64,
+}
 
 /// `POST /v1/lobbies/{lobby_id}/join` request body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +259,8 @@ impl JoinLobbyRequest {
 pub struct JoinLobbyResponse {
     /// One-use secret returned exactly once.
     pub join_credential: JoinCredential,
+    /// Participant capability returned exactly once with the enrollment key.
+    pub participant_capability: OpaqueCapability,
     /// Public post-join lobby snapshot.
     pub lobby: Lobby,
     /// Dry-run metadata.
@@ -161,6 +275,7 @@ impl Serialize for JoinLobbyResponse {
         #[derive(Serialize)]
         struct Wire<'a> {
             join_credential: crate::credential::JoinCredentialWire<'a>,
+            participant_capability: &'a OpaqueCapability,
             lobby: &'a Lobby,
             #[serde(flatten)]
             metadata: &'a ResponseMetadata,
@@ -168,6 +283,7 @@ impl Serialize for JoinLobbyResponse {
 
         Wire {
             join_credential: self.join_credential.as_wire(),
+            participant_capability: &self.participant_capability,
             lobby: &self.lobby,
             metadata: &self.metadata,
         }
@@ -183,6 +299,7 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
         #[derive(Deserialize)]
         struct Wire {
             join_credential: JoinCredential,
+            participant_capability: OpaqueCapability,
             lobby: Lobby,
             #[serde(flatten)]
             metadata: ResponseMetadata,
@@ -191,6 +308,7 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
         let wire = Wire::deserialize(deserializer)?;
         Ok(Self {
             join_credential: wire.join_credential,
+            participant_capability: wire.participant_capability,
             lobby: wire.lobby,
             metadata: wire.metadata,
         })
@@ -511,6 +629,9 @@ pub struct CapabilityModes {
 /// `GET /v1/capabilities` response. It contains booleans and verdicts only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
+    /// Product-level admission decision. Provider probes alone never open Create Lobby.
+    #[serde(default)]
+    pub real_lobby_creation_authorized: bool,
     /// OAuth token exchange succeeded.
     pub oauth_token_ok: bool,
     /// Organization tailnet listing is permitted.
@@ -710,6 +831,11 @@ mod tests {
     fn auth_key_is_serialized_only_by_explicit_first_join_response() {
         let secret = "synthetic-auth-key-canary-secret-value";
         let response = JoinLobbyResponse {
+            participant_capability: OpaqueCapability::new(
+                "synthetic-participant-capability",
+                vec![LobbyCapabilityScope::LobbyRead],
+                UnixMillis::new(300_000),
+            ),
             join_credential: JoinCredential::new(
                 "credential-1",
                 secret,

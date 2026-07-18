@@ -11,6 +11,8 @@ use std::{
 
 use async_trait::async_trait;
 use spurfire_control::{AuthKeyOpts, ChildTailscaleClient, ControlError, TailscaleClient};
+
+use crate::vault::{ChildVaultIdentity, EncryptedChildVault, VaultError};
 use spurfire_protocol::{
     CapabilitiesResponse, CapabilityModeStatus, CapabilityModes, LobbyId, NetworkLifecycle,
     PlannedAction, PlayerId, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
@@ -315,6 +317,7 @@ impl ProviderCapabilities {
     #[must_use]
     pub fn response(self, metadata: ResponseMetadata) -> CapabilitiesResponse {
         CapabilitiesResponse {
+            real_lobby_creation_authorized: false,
             oauth_token_ok: self.oauth_token_ok,
             can_manage_organization_tailnets: self.can_manage_organization_tailnets,
             can_mint_auth_keys: self.can_mint_auth_keys,
@@ -421,6 +424,25 @@ pub trait NetworkProvider: Send + Sync {
         _dry_run: bool,
     ) -> Option<ProviderError> {
         None
+    }
+
+    /// Validates exact generation-bound child custody without provider I/O.
+    fn validate_child_custody(
+        &self,
+        _lobby_id: LobbyId,
+        _network_generation: u64,
+        _identity: &ProviderNetworkIdentity,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    /// Read-only startup comparison of expected exact identities and provider-owned
+    /// `spurfire-*` children. False means missing/mismatched state or an orphan.
+    async fn reconcile_upstream_identities(
+        &self,
+        _expected: Vec<ProviderNetworkIdentity>,
+    ) -> Result<bool, ProviderError> {
+        Ok(true)
     }
 
     /// Prepares non-secret backing metadata. Shared mode performs no mutating call here.
@@ -533,6 +555,23 @@ impl NetworkProvider for MutationGatedProvider {
             self.inner
                 .lobby_access_error(lobby_id, mode, network_lifecycle, dry_run)
         })
+    }
+
+    fn validate_child_custody(
+        &self,
+        lobby_id: LobbyId,
+        network_generation: u64,
+        identity: &ProviderNetworkIdentity,
+    ) -> Result<(), ProviderError> {
+        self.inner
+            .validate_child_custody(lobby_id, network_generation, identity)
+    }
+
+    async fn reconcile_upstream_identities(
+        &self,
+        expected: Vec<ProviderNetworkIdentity>,
+    ) -> Result<bool, ProviderError> {
+        self.inner.reconcile_upstream_identities(expected).await
     }
 
     async fn prepare_lobby(
@@ -675,6 +714,7 @@ pub struct TailscaleProvider {
     simulated_mints: AtomicU64,
     capabilities: RwLock<ProviderCapabilities>,
     child_vault: RwLock<BTreeMap<LobbyId, ChildTailnetAccess>>,
+    durable_child_vault: Option<Arc<EncryptedChildVault>>,
     child_create_lock: AsyncMutex<()>,
 }
 
@@ -688,11 +728,12 @@ impl TailscaleProvider {
             simulated_mints: AtomicU64::new(0),
             capabilities: RwLock::new(ProviderCapabilities::blocked()),
             child_vault: RwLock::new(BTreeMap::new()),
+            durable_child_vault: None,
             child_create_lock: AsyncMutex::new(()),
         }
     }
 
-    fn child_access(
+    async fn child_access(
         &self,
         lobby_id: LobbyId,
         network_generation: u64,
@@ -703,22 +744,44 @@ impl TailscaleProvider {
             .provider_tailnet_id
             .as_deref()
             .ok_or(ProviderError::IdentityMismatch)?;
-        let vault = self
-            .child_vault
-            .read()
+        if let Ok(vault) = self.child_vault.read() {
+            if let Some(access) = vault.get(&lobby_id) {
+                if access.network_generation != network_generation
+                    || access.provider_tailnet_id != expected_id
+                    || access.dns_name != expected.tailnet_dns_name
+                {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+                return Ok(Arc::clone(&access.client));
+            }
+        }
+        let durable = self
+            .durable_child_vault
+            .as_ref()
+            .ok_or(ProviderError::ChildSecretUnavailable)?;
+        let identity = ChildVaultIdentity {
+            lobby_id,
+            network_generation,
+            provider_tailnet_id: expected_id.to_owned(),
+            tailnet_dns_name: expected.tailnet_dns_name.clone(),
+        };
+        let (credentials, _) = durable.get_exact(&identity).map_err(map_vault_error)?;
+        let client = Arc::new(self.client.child_scoped(credentials));
+        self.child_vault
+            .write()
             .map_err(|_| ProviderError::Unavailable {
                 operation: "child_secret_vault",
-            })?;
-        let access = vault
-            .get(&lobby_id)
-            .ok_or(ProviderError::ChildSecretUnavailable)?;
-        if access.network_generation != network_generation
-            || access.provider_tailnet_id != expected_id
-            || access.dns_name != expected.tailnet_dns_name
-        {
-            return Err(ProviderError::IdentityMismatch);
-        }
-        Ok(Arc::clone(&access.client))
+            })?
+            .insert(
+                lobby_id,
+                ChildTailnetAccess {
+                    network_generation,
+                    provider_tailnet_id: expected_id.to_owned(),
+                    dns_name: expected.tailnet_dns_name.clone(),
+                    client: Arc::clone(&client),
+                },
+            );
+        Ok(client)
     }
 
     #[cfg(test)]
@@ -733,6 +796,19 @@ impl TailscaleProvider {
             .await
             .map_err(|error| map_control_error(error, "startup"))?;
         Ok(Self::new(client, shared_tailnet))
+    }
+
+    /// Builds the production adapter with encrypted restart-recoverable child custody.
+    pub async fn from_env_with_vault(
+        shared_tailnet: impl Into<String>,
+        vault: Arc<EncryptedChildVault>,
+    ) -> Result<Self, ProviderError> {
+        let client = TailscaleClient::from_env()
+            .await
+            .map_err(|error| map_control_error(error, "startup"))?;
+        let mut provider = Self::new(client, shared_tailnet);
+        provider.durable_child_vault = Some(vault);
+        Ok(provider)
     }
 }
 
@@ -776,11 +852,94 @@ impl NetworkProvider for TailscaleProvider {
         }
         match self.child_vault.read() {
             Ok(vault) if vault.contains_key(&lobby_id) => None,
+            Ok(_)
+                if self
+                    .durable_child_vault
+                    .as_ref()
+                    .is_some_and(|vault| vault.contains_lobby(lobby_id)) =>
+            {
+                None
+            }
             Ok(_) => Some(ProviderError::ChildSecretUnavailable),
             Err(_) => Some(ProviderError::Unavailable {
                 operation: "child_secret_vault",
             }),
         }
+    }
+
+    fn validate_child_custody(
+        &self,
+        lobby_id: LobbyId,
+        network_generation: u64,
+        identity: &ProviderNetworkIdentity,
+    ) -> Result<(), ProviderError> {
+        identity.validate_for_mode(ProvisioningMode::TailnetPerLobby)?;
+        let expected_id = identity
+            .provider_tailnet_id
+            .as_deref()
+            .ok_or(ProviderError::IdentityMismatch)?;
+        if let Ok(vault) = self.child_vault.read() {
+            if let Some(access) = vault.get(&lobby_id) {
+                return if access.network_generation == network_generation
+                    && access.provider_tailnet_id == expected_id
+                    && access.dns_name == identity.tailnet_dns_name
+                {
+                    Ok(())
+                } else {
+                    Err(ProviderError::IdentityMismatch)
+                };
+            }
+        }
+        let durable = self
+            .durable_child_vault
+            .as_ref()
+            .ok_or(ProviderError::ChildSecretUnavailable)?;
+        let exact = ChildVaultIdentity {
+            lobby_id,
+            network_generation,
+            provider_tailnet_id: expected_id.to_owned(),
+            tailnet_dns_name: identity.tailnet_dns_name.clone(),
+        };
+        durable
+            .get_exact(&exact)
+            .map(|_| ())
+            .map_err(map_vault_error)
+    }
+
+    async fn reconcile_upstream_identities(
+        &self,
+        expected: Vec<ProviderNetworkIdentity>,
+    ) -> Result<bool, ProviderError> {
+        let upstream = self
+            .client
+            .list_organization_tailnets()
+            .await
+            .map_err(|error| map_control_error(error, "startup_reconciliation"))?;
+        for identity in &expected {
+            let stable_id = identity
+                .provider_tailnet_id
+                .as_deref()
+                .ok_or(ProviderError::IdentityMismatch)?;
+            let Some(found) = upstream.iter().find(|tailnet| tailnet.id == stable_id) else {
+                return Ok(false);
+            };
+            if found
+                .dns_name
+                .as_ref()
+                .map(spurfire_control::TailnetDnsName::as_str)
+                != Some(identity.tailnet_dns_name.as_str())
+            {
+                return Err(ProviderError::IdentityMismatch);
+            }
+        }
+        let expected_ids: std::collections::BTreeSet<&str> = expected
+            .iter()
+            .filter_map(|identity| identity.provider_tailnet_id.as_deref())
+            .collect();
+        Ok(!upstream.iter().any(|tailnet| {
+            tailnet.display_name.starts_with("spurfire-")
+                && !expected_ids.contains(tailnet.id.as_str())
+        }))
     }
 
     async fn refresh_capabilities(&self) -> ProviderCapabilities {
@@ -854,6 +1013,44 @@ impl NetworkProvider for TailscaleProvider {
             }
         }
 
+        if let Some(durable) = &self.durable_child_vault {
+            if let Some(identity) = durable
+                .identities()
+                .map_err(map_vault_error)?
+                .into_iter()
+                .find(|identity| identity.lobby_id == request.lobby_id)
+            {
+                if identity.network_generation != request.network_generation {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+                let (credentials, _) = durable.get_exact(&identity).map_err(map_vault_error)?;
+                let child = Arc::new(self.client.child_scoped(credentials));
+                self.child_vault
+                    .write()
+                    .map_err(|_| ProviderError::Unavailable {
+                        operation: "child_secret_vault",
+                    })?
+                    .insert(
+                        request.lobby_id,
+                        ChildTailnetAccess {
+                            network_generation: identity.network_generation,
+                            provider_tailnet_id: identity.provider_tailnet_id.clone(),
+                            dns_name: identity.tailnet_dns_name.clone(),
+                            client: child,
+                        },
+                    );
+                return Ok(PreparedNetwork {
+                    tailnet: identity.tailnet_dns_name.as_str().to_owned(),
+                    identity: Some(ProviderNetworkIdentity {
+                        provider_tailnet_id: Some(identity.provider_tailnet_id),
+                        tailnet_dns_name: identity.tailnet_dns_name,
+                    }),
+                    dry_run: false,
+                    metadata: ResponseMetadata::default(),
+                });
+            }
+        }
+
         // The verified displayName grammar is ASCII and at most 50 bytes. A UUIDv4 plus this
         // prefix is 45 bytes and does not include user-controlled lobby text.
         let display_name = format!("spurfire-{}", request.lobby_id);
@@ -868,6 +1065,20 @@ impl NetworkProvider for TailscaleProvider {
             .map_err(|_| ProviderError::IdentityMismatch)?;
         if !valid_provider_tailnet_id(&provider_tailnet_id) || request.network_generation == 0 {
             return Err(ProviderError::IdentityMismatch);
+        }
+        if let Some(vault) = &self.durable_child_vault {
+            vault
+                .put_if_absent(
+                    ChildVaultIdentity {
+                        lobby_id: request.lobby_id,
+                        network_generation: request.network_generation,
+                        provider_tailnet_id: provider_tailnet_id.clone(),
+                        tailnet_dns_name: dns_name.clone(),
+                    },
+                    child_credentials.clone(),
+                )
+                .await
+                .map_err(map_vault_error)?;
         }
         let child = Arc::new(self.client.child_scoped(child_credentials));
         self.child_vault
@@ -929,8 +1140,9 @@ impl NetworkProvider for TailscaleProvider {
                 if identity.tailnet_dns_name.as_str() != request.tailnet {
                     return Err(ProviderError::IdentityMismatch);
                 }
-                let child =
-                    self.child_access(request.lobby_id, request.network_generation, identity)?;
+                let child = self
+                    .child_access(request.lobby_id, request.network_generation, identity)
+                    .await?;
                 child.create_auth_key(&request.tailnet, &options).await
             }
             ProvisioningMode::DryRun => unreachable!("dry-run returned above"),
@@ -995,8 +1207,9 @@ impl NetworkProvider for TailscaleProvider {
                 if identity.tailnet_dns_name.as_str() != request.tailnet {
                     return Err(ProviderError::IdentityMismatch);
                 }
-                let child =
-                    self.child_access(request.lobby_id, request.network_generation, identity)?;
+                let child = self
+                    .child_access(request.lobby_id, request.network_generation, identity)
+                    .await?;
                 child
                     .list_devices(identity.tailnet_dns_name.as_str())
                     .await
@@ -1025,15 +1238,37 @@ impl NetworkProvider for TailscaleProvider {
         request
             .identity
             .validate_for_mode(ProvisioningMode::TailnetPerLobby)?;
+        let durable_identity = ChildVaultIdentity {
+            lobby_id: request.lobby_id,
+            network_generation: request.network_generation,
+            provider_tailnet_id: request
+                .identity
+                .provider_tailnet_id
+                .clone()
+                .ok_or(ProviderError::IdentityMismatch)?,
+            tailnet_dns_name: request.identity.tailnet_dns_name.clone(),
+        };
+        if let Some(durable) = &self.durable_child_vault {
+            let (_, version) = durable
+                .get_exact(&durable_identity)
+                .map_err(map_vault_error)?;
+            durable
+                .delete_cas(&durable_identity, version)
+                .await
+                .map_err(map_vault_error)?;
+        }
         let mut vault = self
             .child_vault
             .write()
             .map_err(|_| ProviderError::Unavailable {
                 operation: "child_secret_vault",
             })?;
-        let access = vault
-            .get(&request.lobby_id)
-            .ok_or(ProviderError::ChildSecretUnavailable)?;
+        let Some(access) = vault.get(&request.lobby_id) else {
+            if self.durable_child_vault.is_some() {
+                return Ok(());
+            }
+            return Err(ProviderError::ChildSecretUnavailable);
+        };
         if request.network_generation == 0
             || access.network_generation != request.network_generation
             || access.provider_tailnet_id
@@ -1096,7 +1331,9 @@ impl TailscaleProvider {
         if identity.tailnet_dns_name.as_str() != request.tailnet {
             return Err(ProviderError::IdentityMismatch);
         }
-        let child = self.child_access(request.lobby_id, request.network_generation, identity)?;
+        let child = self
+            .child_access(request.lobby_id, request.network_generation, identity)
+            .await?;
         if request.include_devices {
             child
                 .delete_tailnet(identity.tailnet_dns_name.as_str())
@@ -1271,6 +1508,16 @@ fn dry_cleanup_outcome(request: &CleanupLobbyRequest) -> CleanupOutcome {
         metadata: ResponseMetadata {
             dry_run: true,
             planned_actions,
+        },
+    }
+}
+
+fn map_vault_error(error: VaultError) -> ProviderError {
+    match error {
+        VaultError::Conflict | VaultError::Invalid => ProviderError::IdentityMismatch,
+        VaultError::Missing => ProviderError::ChildSecretUnavailable,
+        VaultError::Io | VaultError::Crypto => ProviderError::Unavailable {
+            operation: "child_secret_vault",
         },
     }
 }
@@ -1692,6 +1939,73 @@ mod tests {
         child_token.assert_async().await;
         key.assert_async().await;
         delete.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn encrypted_vault_recovers_prepare_after_restart_without_second_create() {
+        let root =
+            std::env::temp_dir().join(format!("spurfire-provider-vault-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let key_path = root.join("key");
+        tokio::fs::write(&key_path, [9_u8; 32]).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                .await
+                .unwrap();
+        }
+        let durable = Arc::new(
+            EncryptedChildVault::open(root.join("vault.json"), &key_path)
+                .await
+                .unwrap(),
+        );
+        let mut server = Server::new_async().await;
+        let token = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"organization-token","expires_in":3600}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "id":"TtRestartVaultCNTRL", "dnsName":"restart-vault.ts.net",
+                    "displayName":"spurfire-00000000-0000-4000-8000-000000000001",
+                    "oauthClient":{"id":"child-restart-id","secret":"child-restart-secret"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let request = PrepareLobbyRequest {
+            lobby_id,
+            network_generation: 7,
+            mode: ProvisioningMode::TailnetPerLobby,
+            dry_run: false,
+        };
+        let mut first =
+            TailscaleProvider::new(TailscaleClient::new(server.url(), "org", "secret"), "-");
+        first.durable_child_vault = Some(Arc::clone(&durable));
+        let prepared = first.prepare_lobby(request).await.unwrap();
+        drop(first);
+        let mut restarted =
+            TailscaleProvider::new(TailscaleClient::new(server.url(), "org", "secret"), "-");
+        restarted.durable_child_vault = Some(durable);
+        let recovered = restarted.prepare_lobby(request).await.unwrap();
+        assert_eq!(recovered.tailnet, prepared.tailnet);
+        assert_eq!(recovered.identity, prepared.identity);
+        token.assert_async().await;
+        create.assert_async().await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]

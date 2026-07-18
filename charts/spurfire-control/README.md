@@ -74,3 +74,26 @@ Gateway API CRDs, TLS, request limits, and a listener that permits the route mus
 The deployment is fixed at one replica with a `Recreate` strategy because the prototype JSON store has no HA fencing. The pod runs as UID/GID `10001`, drops all Linux capabilities, disables privilege escalation and service-account token mounting, uses `RuntimeDefault` seccomp and a read-only root filesystem, and mounts only `/tmp` and `/var/lib/spurfire` writable. Startup/liveness probes check `/healthz`; readiness additionally requires `"provisioning_ready":true` because degraded health responses still return HTTP 200.
 
 See [`docs/deployment.md`](../../docs/deployment.md) for artifact tags, signatures, publishing, and operations. Its historical real-mode examples do not override the activation-closed guard in this chart revision.
+
+## Alpha safety configuration contract
+
+The shipped chart remains activation-closed: `config.realMutationsEnabled` and
+`config.realAdmissionEnabled` are schema-fixed to `false`, legacy asserted-player
+mutations are disabled, and public routing is accepted only for credential-free
+dry-run.
+
+A future separately reviewed private profile must provide all of the following
+without putting secret values in Helm values:
+
+- a persistent single-writer state volume and the fixed one-real-lobby policy;
+- `SPURFIRE_REAL_MUTATIONS_ENABLED=1` **and** the separate admission switch;
+- an existing parent OAuth Secret;
+- an existing encryption-key Secret mounted at
+  `/var/run/secrets/spurfire/vault.key` with mode `0440` for the pod `fsGroup`; the dynamic child OAuth
+  plaintext is encrypted into the retained state volume and is never rendered
+  into a Secret or ConfigMap;
+- startup reconciliation readiness before admission.
+
+This chart version deliberately cannot render that activation profile. The
+configuration shape is present so a future activation change can be reviewed
+without inventing a plaintext dynamic-secret path.

@@ -3515,8 +3515,10 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chacha20poly1305",
  "clap",
  "dotenvy",
+ "getrandom 0.2.17",
  "http-body-util",
  "mockito",
  "serde",

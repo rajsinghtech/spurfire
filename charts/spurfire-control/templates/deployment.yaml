@@ -110,6 +110,12 @@ spec:
               mountPath: /var/lib/spurfire
             - name: tmp
               mountPath: /tmp
+            {{ if .Values.childVault.existingSecret }}
+            - name: child-vault-key
+              mountPath: {{ .Values.childVault.mountPath | quote }}
+              subPath: {{ .Values.childVault.key | quote }}
+              readOnly: true
+            {{ end }}
       volumes:
         - name: state
           {{- if .Values.persistence.enabled }}
@@ -121,6 +127,12 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        {{ if .Values.childVault.existingSecret }}
+        - name: child-vault-key
+          secret:
+            secretName: {{ .Values.childVault.existingSecret | quote }}
+            defaultMode: 0440
+        {{ end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -195,6 +195,13 @@ impl ChildOAuthCredentials {
             client_secret: ChildOAuthClientSecret::new(client_secret),
         }
     }
+
+    /// Transfers both secret allocations into an encrypted-vault adapter.
+    /// Callers must encrypt immediately and must never log or persist plaintext.
+    #[must_use]
+    pub fn into_secret_parts(self) -> (Zeroizing<String>, Zeroizing<String>) {
+        (self.client_id.0, self.client_secret.0)
+    }
 }
 
 impl fmt::Debug for ChildOAuthCredentials {
