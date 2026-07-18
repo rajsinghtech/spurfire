@@ -18,21 +18,21 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    elect_authority, elect_authority_for_roster, validate_start_roster, ApplicationQuality,
-    AuthorityCandidate, AuthorityElection, AuthorityElectionError, AuthorityHeartbeatRequest,
-    AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary, BackingMode,
-    CapabilitiesResponse, ControlElectionReference, CreateLobbyRequest, CreateLobbyResponse,
-    DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore, Freshness,
-    InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt, JoinLobbyReplayResponse,
-    JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest, LeaveLobbyResponse, Lobby, LobbyId,
-    LobbyNetworkView, LobbyResponse, LobbyState, LobbyTtl, NetworkAuthority, NetworkBacking,
-    NetworkCleanup, NetworkCounts, NetworkIsolation, NetworkLifecycle, NetworkTruthLabel,
-    ParticipantCleanupReason, Player, PlayerId, PlayerJoinState, ProvisioningMode,
-    ResponseMetadata, RouteAggregate, StartLobbyRequest, StartLobbyResponse,
-    SubmitMeasurementsRequest, SubmitMeasurementsResponse, SubmitResultsRequest,
-    SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
-    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS,
-    PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
+    elect_authority, elect_authority_for_roster, validate_start_roster, AcceptedHeartbeatReference,
+    ApplicationQuality, AuthorityCandidate, AuthorityElection, AuthorityElectionError,
+    AuthorityHeartbeatRequest, AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary,
+    BackingMode, CapabilitiesResponse, ControlElectionReference, CreateLobbyRequest,
+    CreateLobbyResponse, DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore,
+    Freshness, InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt,
+    JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest,
+    LeaveLobbyResponse, Lobby, LobbyId, LobbyNetworkView, LobbyResponse, LobbyState, LobbyTtl,
+    NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
+    NetworkLifecycle, NetworkTruthLabel, ParticipantCleanupReason, Player, PlayerId,
+    PlayerJoinState, ProvisioningMode, ResponseMetadata, RouteAggregate, StartLobbyRequest,
+    StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
+    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
+    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
+    MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -48,9 +48,9 @@ use crate::{
         ProviderNetworkIdentity, TailnetPresenceRequest,
     },
     store::{
-        apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredCapabilityVerifier,
-        StoredCredential, StoredIssuanceReservation, StoredJoinAttempt, StoredJoinReplay,
-        StoredLobby, StoredMutationReplay, StoredNetworkIdentity,
+        apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
+        StoredCapabilityVerifier, StoredCredential, StoredIssuanceReservation, StoredJoinAttempt,
+        StoredJoinReplay, StoredLobby, StoredMutationReplay, StoredNetworkIdentity,
     },
 };
 
@@ -141,6 +141,7 @@ impl GeneratedCapability {
         let mut bytes = [0_u8; 32];
         getrandom::fill(&mut bytes).map_err(|_| internal_error(false))?;
         let plaintext = Zeroizing::new(URL_SAFE_NO_PAD.encode(bytes));
+        bytes.zeroize();
         let verifier = capability_verifier(plaintext.as_bytes());
         Ok(Self {
             plaintext,
@@ -256,6 +257,17 @@ impl AppState {
             })?;
         if stored.dry_run || stored.lobby.provisioning_mode == ProvisioningMode::DryRun {
             return Ok(());
+        }
+        if !matches!(
+            stored.network_lifecycle,
+            NetworkLifecycle::Active
+                | NetworkLifecycle::CleanupRequested
+                | NetworkLifecycle::CleanupPending
+                | NetworkLifecycle::VerifyingAbsence
+        ) {
+            return Err(ProviderError::Unavailable {
+                operation: "network_observation_inactive",
+            });
         }
         let request = observe_request(&stored)?;
         let outcome = tokio::time::timeout(
@@ -620,12 +632,7 @@ async fn create_lobby(
                         transition(&mut advanced.lobby, LobbyState::Forming, effective_dry_run)?;
                     } else {
                         transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
-                        advanced.network_lifecycle =
-                            if effective_mode == ProvisioningMode::TailnetPerLobby {
-                                NetworkLifecycle::ManualRemediation
-                            } else {
-                                NetworkLifecycle::CleanupPending
-                            };
+                        advanced.network_lifecycle = NetworkLifecycle::ManualRemediation;
                         advanced.cleanup_pending = true;
                         advanced.lobby.state_reason = Some(
                             state
@@ -1446,6 +1453,12 @@ async fn authority_heartbeat(
         transition(&mut stored.lobby, LobbyState::InMatch, dry_run)?;
     }
     stored.last_authority_heartbeat_at = Some(now);
+    stored.last_accepted_heartbeat = Some(StoredAcceptedHeartbeat {
+        player_id: actor,
+        epoch: stored.authority_epoch,
+        input_hash: request.input_hash,
+        received_at: now,
+    });
     let authority = stored
         .lobby
         .authority
@@ -1660,25 +1673,32 @@ fn sensitive_response_headers(mut response: Response) -> Response {
 
 fn provider_identity(stored: &StoredLobby) -> Option<ProviderNetworkIdentity> {
     let identity = stored.network_identity.as_ref()?;
-    if identity.network_generation != stored.network_generation {
+    if stored.network_generation == 0
+        || identity.network_generation != stored.network_generation
+        || identity.tailnet_dns_name.as_str() != stored.tailnet
+    {
         return None;
     }
-    Some(ProviderNetworkIdentity {
+    let identity = ProviderNetworkIdentity {
         provider_tailnet_id: identity.provider_tailnet_id.clone(),
         tailnet_dns_name: identity.tailnet_dns_name.clone(),
-    })
+    };
+    identity
+        .validate_for_mode(stored.lobby.provisioning_mode)
+        .ok()?;
+    Some(identity)
 }
 
 fn observe_request(stored: &StoredLobby) -> Result<ObserveNetworkRequest, ProviderError> {
-    let identity = provider_identity(stored);
-    if stored.lobby.provisioning_mode == ProvisioningMode::TailnetPerLobby && identity.is_none() {
+    let identity = provider_identity(stored).ok_or(ProviderError::IdentityMismatch)?;
+    if identity.tailnet_dns_name.as_str() != stored.tailnet {
         return Err(ProviderError::IdentityMismatch);
     }
     Ok(ObserveNetworkRequest {
         lobby_id: stored.lobby.lobby_id,
         network_generation: stored.network_generation,
         mode: stored.lobby.provisioning_mode,
-        identity,
+        identity: Some(identity),
         tailnet: stored.tailnet.clone(),
         tag: stored.tag.clone(),
         dry_run: stored.dry_run,
@@ -1958,9 +1978,30 @@ fn build_network_view(
             )
         },
     );
-    let last_accepted_heartbeat = stored.last_authority_heartbeat_at.map_or_else(
+    let last_accepted_heartbeat = stored.last_accepted_heartbeat.map_or_else(
         || unknown_control(UnknownReason::NeverObserved, None),
-        |received_at| unknown_control(UnknownReason::Unsupported, Some(received_at)),
+        |heartbeat| {
+            Fact::known(
+                AcceptedHeartbeatReference {
+                    player_id: heartbeat.player_id,
+                    epoch: heartbeat.epoch,
+                    input_hash: heartbeat.input_hash,
+                    received_at: heartbeat.received_at,
+                },
+                FactSource::ControlStore,
+                FactAssurance::Authoritative,
+                Some(heartbeat.received_at),
+                heartbeat.received_at,
+                if now
+                    .checked_duration_since(heartbeat.received_at)
+                    .is_some_and(|age| age < MEASUREMENT_FRESHNESS_MS)
+                {
+                    Freshness::Fresh
+                } else {
+                    Freshness::Stale
+                },
+            )
+        },
     );
 
     let cleanup = if dry_run {
@@ -2525,6 +2566,13 @@ fn apply_election(
         .iter()
         .find(|score| score.player_id == election.winner_player_id)
         .map_or(0, |score| score.score_milli);
+    let election_changed = stored.last_election.as_ref().is_none_or(|previous| {
+        previous.winner_player_id != election.winner_player_id
+            || previous.input_hash != election.input_hash
+    });
+    if election_changed {
+        stored.authority_epoch = stored.authority_epoch.saturating_add(1).max(1);
+    }
     stored.lobby.authority = Some(AuthoritySummary {
         candidate_player_id: election.winner_player_id,
         formula_version: election.formula_version.clone(),
@@ -2632,6 +2680,17 @@ async fn cleanup_resources(
     finalize: bool,
 ) -> ResponseMetadata {
     let dry_run = stored.dry_run;
+    if stored.cleanup_requested_at.is_none() {
+        stored.measurements.clear();
+        for player in &mut stored.lobby.roster {
+            player.route_summary = Default::default();
+        }
+        state
+            .provider_observations
+            .write()
+            .await
+            .remove(&stored.lobby.lobby_id);
+    }
 
     if stored.lobby.provisioning_mode == ProvisioningMode::TailnetPerLobby
         && stored.network_lifecycle == NetworkLifecycle::VerifyingAbsence

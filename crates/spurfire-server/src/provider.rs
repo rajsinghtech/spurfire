@@ -839,6 +839,15 @@ impl NetworkProvider for TailscaleProvider {
         if request.dry_run || request.mode == ProvisioningMode::DryRun {
             return Ok(dry_cleanup_outcome(&request));
         }
+        let identity = request
+            .identity
+            .as_ref()
+            .ok_or(ProviderError::IdentityMismatch)?;
+        identity.validate_for_mode(request.mode)?;
+        if request.network_generation == 0 || identity.tailnet_dns_name.as_str() != request.tailnet
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
         if request.mode == ProvisioningMode::TailnetPerLobby {
             return self.cleanup_child_tailnet(request).await;
         }
@@ -907,7 +916,11 @@ impl NetworkProvider for TailscaleProvider {
         let Some(found) = tailnets.into_iter().find(|tailnet| tailnet.id == stable_id) else {
             return Ok(false);
         };
-        if found.dns_name.as_ref() != Some(&request.identity.tailnet_dns_name) {
+        if found
+            .dns_name
+            .as_ref()
+            .is_some_and(|dns_name| dns_name != &request.identity.tailnet_dns_name)
+        {
             return Err(ProviderError::IdentityMismatch);
         }
         Ok(true)

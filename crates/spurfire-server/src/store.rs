@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    AuthorityElection, ConnectivitySample, JoinCredentialReceipt, Lobby, LobbyId, LobbyState,
-    NetworkLifecycle, PlayerId, TailnetDnsName, UnixMillis,
+    AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby, LobbyId,
+    LobbyState, NetworkLifecycle, PlayerId, TailnetDnsName, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -32,6 +32,7 @@ pub const MAX_CREATE_REPLAYS: usize = 20_000;
 pub const CREATOR_CAPABILITY_CLEANUP_GRACE_MS: u64 = 15 * 60 * 1_000;
 
 const IDEMPOTENCY_DIGEST_DOMAIN: &[u8] = b"spurfire-real-lobby-lease-v1\0";
+const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 
 const fn default_network_generation() -> u64 {
     1
@@ -122,10 +123,21 @@ impl fmt::Debug for StoredNetworkIdentity {
     }
 }
 
+/// Persisted capability scope. This slice issues creator `lobby.read` only;
+/// invitation, reporting, and mutation scopes remain activation blockers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredCapabilityScope {
+    #[default]
+    LobbyRead,
+}
+
 /// Hash-only exact-lobby capability record. Plaintext is never persisted.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredCapabilityVerifier {
     verifier: [u8; 32],
+    #[serde(default)]
+    scope: StoredCapabilityScope,
     lobby_id: LobbyId,
     network_generation: u64,
     expires_at: UnixMillis,
@@ -143,6 +155,7 @@ impl StoredCapabilityVerifier {
     ) -> Self {
         Self {
             verifier,
+            scope: StoredCapabilityScope::LobbyRead,
             lobby_id,
             network_generation,
             expires_at,
@@ -158,6 +171,7 @@ impl StoredCapabilityVerifier {
         now: UnixMillis,
     ) -> bool {
         !self.revoked
+            && self.scope == StoredCapabilityScope::LobbyRead
             && self.lobby_id == lobby_id
             && self.network_generation == generation
             && now < self.expires_at
@@ -170,12 +184,23 @@ impl fmt::Debug for StoredCapabilityVerifier {
         formatter
             .debug_struct("StoredCapabilityVerifier")
             .field("verifier", &"<sha256-verifier>")
+            .field("scope", &self.scope)
             .field("lobby_id", &self.lobby_id)
             .field("network_generation", &self.network_generation)
             .field("expires_at", &self.expires_at)
             .field("revoked", &self.revoked)
             .finish()
     }
+}
+
+/// Durable receipt of one accepted authority heartbeat. It is authoritative
+/// only as a service receipt event, never as current gameplay truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAcceptedHeartbeat {
+    pub(crate) player_id: PlayerId,
+    pub(crate) epoch: u64,
+    pub(crate) input_hash: InputHash,
+    pub(crate) received_at: UnixMillis,
 }
 
 /// Complete lobby record. It never contains auth-key/OAuth material or device IDs.
@@ -214,8 +239,12 @@ pub struct StoredLobby {
     pub(crate) join_attempts: VecDeque<StoredJoinAttempt>,
     pub(crate) cleanup_pending: bool,
     pub(crate) last_election: Option<AuthorityElection>,
+    #[serde(default)]
+    pub(crate) authority_epoch: u64,
     pub(crate) started_at: Option<UnixMillis>,
     pub(crate) last_authority_heartbeat_at: Option<UnixMillis>,
+    #[serde(default)]
+    pub(crate) last_accepted_heartbeat: Option<StoredAcceptedHeartbeat>,
     pub(crate) terminal_at: Option<UnixMillis>,
 }
 
@@ -260,8 +289,10 @@ impl StoredLobby {
             join_attempts: VecDeque::new(),
             cleanup_pending: false,
             last_election: None,
+            authority_epoch: 0,
             started_at: None,
             last_authority_heartbeat_at: None,
+            last_accepted_heartbeat: None,
             terminal_at: None,
         }
     }
@@ -703,12 +734,8 @@ fn replace_in_data(data: &mut StoreData, lobby: StoredLobby) -> Result<(), Store
     };
     *slot = lobby.clone();
 
-    let release = matches!(
-        lobby.network_lifecycle,
-        NetworkLifecycle::CreateRejected
-            | NetworkLifecycle::DedicatedAbsent
-            | NetworkLifecycle::SharedResourcesClean
-    );
+    let release_requested = lease_release_lifecycle(lobby.network_lifecycle);
+    let release = release_requested && has_release_proof(&lobby);
     if let Some(lease) = data
         .real_lobby_lease
         .as_mut()
@@ -721,6 +748,8 @@ fn replace_in_data(data: &mut StoreData, lobby: StoredLobby) -> Result<(), Store
         lease.lifecycle = lobby.network_lifecycle;
         if release {
             data.real_lobby_lease = None;
+        } else if release_requested {
+            data.real_creation_quarantined = true;
         }
     } else if !lobby.dry_run && !release {
         // A retained real record without its exact lease is restart ambiguity.
@@ -749,6 +778,51 @@ fn idempotency_digest(fingerprint: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+fn has_release_proof(stored: &StoredLobby) -> bool {
+    match stored.network_lifecycle {
+        NetworkLifecycle::CreateRejected => stored.network_identity.is_none(),
+        NetworkLifecycle::DedicatedAbsent => {
+            let identity_matches = stored.network_identity.as_ref().is_some_and(|identity| {
+                identity.network_generation == stored.network_generation
+                    && identity.tailnet_dns_name.as_str() == stored.tailnet
+                    && identity.provider_tailnet_id.as_deref().is_some_and(|id| {
+                        !id.is_empty()
+                            && id.len() <= 128
+                            && id.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                            })
+                    })
+            });
+            identity_matches
+                && stored.cleanup_requested_at.is_some()
+                && stored.delete_acknowledged_at.is_some()
+                && stored.child_secret_erased_at.is_some()
+                && matches!(
+                    (
+                        stored.first_absence_observed_at,
+                        stored.absence_confirmed_at
+                    ),
+                    (Some(first), Some(confirmed))
+                        if confirmed
+                            .checked_duration_since(first)
+                            .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS)
+                )
+                && !stored.cleanup_pending
+        }
+        NetworkLifecycle::SharedResourcesClean => {
+            stored.lobby.provisioning_mode == spurfire_protocol::ProvisioningMode::SharedTailnet
+                && stored.network_identity.as_ref().is_some_and(|identity| {
+                    identity.network_generation == stored.network_generation
+                        && identity.provider_tailnet_id.is_none()
+                        && identity.tailnet_dns_name.as_str() == stored.tailnet
+                })
+                && stored.cleanup_requested_at.is_some()
+                && !stored.cleanup_pending
+        }
+        _ => false,
+    }
+}
+
 fn lease_release_lifecycle(lifecycle: NetworkLifecycle) -> bool {
     matches!(
         lifecycle,
@@ -766,7 +840,9 @@ fn normalize_loaded_store(data: &mut StoreData) -> bool {
         .lobbies
         .iter_mut()
         .filter_map(|(lobby_id, stored)| {
-            if stored.dry_run || lease_release_lifecycle(stored.network_lifecycle) {
+            if stored.dry_run
+                || (lease_release_lifecycle(stored.network_lifecycle) && has_release_proof(stored))
+            {
                 return None;
             }
             if stored.network_generation == 0 {
@@ -1183,8 +1259,27 @@ mod tests {
                 "released at {lifecycle:?}"
             );
         }
+        let mut destroyed_only = store.get(lobby_id).await.unwrap();
+        destroyed_only.lobby.state = LobbyState::Destroyed;
+        destroyed_only.network_lifecycle = NetworkLifecycle::Active;
+        store.replace(destroyed_only).await.unwrap();
+        assert!(store.real_lobby_lease_held().await);
+
         let mut stored = store.get(lobby_id).await.unwrap();
         stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+        stored.tailnet = "tail-release.ts.net".to_owned();
+        stored.network_identity = Some(StoredNetworkIdentity {
+            provider_tailnet_id: Some("TtReleaseCNTRL".to_owned()),
+            tailnet_dns_name: TailnetDnsName::parse("tail-release.ts.net").unwrap(),
+            network_generation: 1,
+            captured_at: UnixMillis::new(10),
+        });
+        stored.cleanup_requested_at = Some(UnixMillis::new(20));
+        stored.delete_acknowledged_at = Some(UnixMillis::new(21));
+        stored.child_secret_erased_at = Some(UnixMillis::new(21));
+        stored.first_absence_observed_at = Some(UnixMillis::new(30));
+        stored.absence_confirmed_at = Some(UnixMillis::new(35 + 5_000));
+        stored.cleanup_pending = false;
         store.replace(stored).await.unwrap();
         assert!(!store.real_lobby_lease_held().await);
     }
@@ -1245,6 +1340,7 @@ mod tests {
         let store = JsonFileStore::open(&path).await.unwrap();
         let mut record = real_record("00000000-0000-4000-8000-000000000041");
         record.network_lifecycle = NetworkLifecycle::Active;
+        record.tailnet = "tail-restart.ts.net".to_owned();
         record.network_identity = Some(StoredNetworkIdentity {
             provider_tailnet_id: Some("TtRestartCNTRL".to_owned()),
             tailnet_dns_name: TailnetDnsName::parse("tail-restart.ts.net").unwrap(),

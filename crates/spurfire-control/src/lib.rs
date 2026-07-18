@@ -231,10 +231,28 @@ impl Default for AuthKeyOpts {
 }
 
 /// A minted auth key. `key` is a secret — never log it.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthKey {
     pub id: String,
     pub key: String,
+}
+
+impl Serialize for AuthKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct RedactedAuthKey<'a> {
+            id: &'a str,
+            key: &'static str,
+        }
+        RedactedAuthKey {
+            id: &self.id,
+            key: REDACTED,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl fmt::Debug for AuthKey {
@@ -989,6 +1007,9 @@ mod tests {
 
         assert_eq!(result.id, "key-id");
         assert!(!format!("{result:?}").contains("synthetic-auth-key-secret"));
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("synthetic-auth-key-secret"));
+        assert!(serialized.contains(REDACTED));
         token.assert_async().await;
         key.assert_async().await;
     }

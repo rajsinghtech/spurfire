@@ -532,6 +532,7 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(created["dry_run"], true);
     assert_eq!(created["planned_actions"], json!([]));
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let network_capability = created["creator_capability"].as_str().unwrap();
     assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
 
     make_ready(
@@ -584,6 +585,21 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(heartbeat["state"], "IN_MATCH");
+    let (_, network_view) = network(&app, lobby_id, network_capability).await;
+    assert_eq!(
+        network_view["authority"]["last_accepted_heartbeat"]["value"]["player_id"],
+        PLAYER_1
+    );
+    assert_eq!(
+        network_view["authority"]["last_accepted_heartbeat"]["assurance"],
+        "authoritative"
+    );
+    assert!(
+        network_view["authority"]["last_accepted_heartbeat"]["value"]["epoch"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 
     let (status, results) = json_request(
         &app,
@@ -673,6 +689,7 @@ async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_re
     assert_eq!(view["backing"]["control_service_member"]["value"], false);
     assert_eq!(provider.mutating_call_count(), 0);
     let wire = view.to_string();
+    assert!(!wire.contains(capability));
     for forbidden in [
         "dry-run.invalid",
         "provisioning.invalid",
@@ -1438,6 +1455,24 @@ async fn service_capacity_validation_precedes_provider_mutation() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error["code"], "max_players_exceeds_service_limit");
     assert_eq!(provider.mutation_count(), 0);
+}
+
+#[test]
+fn server_manifest_cannot_gain_tailnet_membership_or_gameplay_runtime_dependencies() {
+    let manifest = include_str!("../Cargo.toml").to_ascii_lowercase();
+    for forbidden in [
+        "spurfire-net",
+        "rustscale",
+        "tailscale-tsnet",
+        "boringtun",
+        "gameplay-listener",
+        "observer-node",
+    ] {
+        assert!(
+            !manifest.contains(forbidden),
+            "server dependency boundary contains {forbidden}"
+        );
+    }
 }
 
 #[test]
