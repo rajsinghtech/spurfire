@@ -672,11 +672,9 @@ impl SaddleDiveController {
                                 &terrain,
                             );
                             let phase = GString::from("prone");
-                            self.signals().recovery_changed().emit(
-                                dive_id_i64(id),
-                                &phase,
-                                0.0,
-                            );
+                            self.signals()
+                                .recovery_changed()
+                                .emit(dive_id_i64(id), &phase, 0.0);
                         }
                     }
                 }
