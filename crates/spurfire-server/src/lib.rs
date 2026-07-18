@@ -20,8 +20,8 @@ pub use provider::{
     CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest,
     MintedCredential, MutationGatedProvider, NetworkProvider, ObserveNetworkRequest,
     PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
-    ProviderError, ProviderNetworkIdentity,
-    SecretString, TailnetPresenceRequest, TailscaleProvider,
+    ProviderError, ProviderNetworkIdentity, SecretString, TailnetPresenceRequest,
+    TailscaleProvider,
 };
 pub use service::{build_router, router, AppState};
 pub use store::{

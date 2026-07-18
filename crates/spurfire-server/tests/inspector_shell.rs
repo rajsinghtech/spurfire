@@ -23,7 +23,10 @@ fn capability_is_memory_only_and_forgotten_on_exit() {
         "redirect: 'error'",
         "referrerPolicy: 'no-referrer'",
     ] {
-        assert!(HTML.contains(required), "missing browser safeguard: {required}");
+        assert!(
+            HTML.contains(required),
+            "missing browser safeguard: {required}"
+        );
     }
     for forbidden in [
         "localStorage",
@@ -75,7 +78,10 @@ fn output_uses_precise_truth_and_provenance_terms() {
         "Application RTT median (ms)",
         "Control election winner",
     ] {
-        assert!(HTML.contains(required), "missing inspector term: {required}");
+        assert!(
+            HTML.contains(required),
+            "missing inspector term: {required}"
+        );
     }
     for forbidden_field in [
         "provider_tailnet_id",

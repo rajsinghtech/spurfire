@@ -43,8 +43,8 @@ use crate::{
     error::ApiError,
     provider::{
         CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
-        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, ProviderError,
-        ProviderNetworkIdentity, TailnetPresenceRequest,
+        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest,
+        ProviderError, ProviderNetworkIdentity, TailnetPresenceRequest,
     },
     store::{
         apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
@@ -104,11 +104,7 @@ struct CachedProviderObservation {
 }
 
 impl CachedProviderObservation {
-    const fn success(
-        network_generation: u64,
-        enrolled_device_count: u32,
-        at: UnixMillis,
-    ) -> Self {
+    const fn success(network_generation: u64, enrolled_device_count: u32, at: UnixMillis) -> Self {
         Self {
             network_generation,
             enrolled_device_count: Some(enrolled_device_count),
@@ -202,10 +198,7 @@ impl AppState {
         Self {
             config: Arc::new(config),
             store,
-            provider: Arc::new(MutationGatedProvider::new(
-                provider,
-                real_mutations_enabled,
-            )),
+            provider: Arc::new(MutationGatedProvider::new(provider, real_mutations_enabled)),
             clock: Arc::new(SystemClock),
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),

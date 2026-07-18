@@ -487,7 +487,10 @@ impl MutationGatedProvider {
     /// Wraps a provider with the immutable process-wide mutation decision.
     #[must_use]
     pub fn new(inner: Arc<dyn NetworkProvider>, real_mutations_enabled: bool) -> Self {
-        Self { inner, real_mutations_enabled }
+        Self {
+            inner,
+            real_mutations_enabled,
+        }
     }
 
     fn require_allowed(&self, dry_run: bool) -> Result<(), ProviderError> {
