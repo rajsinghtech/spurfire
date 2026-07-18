@@ -35,7 +35,7 @@ Release tags must be strict `vX.Y.Z` or `vX.Y.Z-prerelease`, point to a commit o
 A semantic release tag publishes the same semantic chart version, with no synthetic `latest` chart tag. Each `main` run publishes a unique prerelease chart version shaped like:
 
 ```text
-0.1.0-main.<run-number>.<run-attempt>.sha-<12-character-sha>
+<server-version>-main.<run-number>.<run-attempt>.sha-<12-character-sha>
 ```
 
 A main-channel chart defaults to its corresponding immutable `sha-<full-commit-sha>` image tag. Use a semantic release version for stable deployment and record the resolved image and chart digests in GitOps.
