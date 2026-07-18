@@ -65,6 +65,9 @@ pub enum NetworkIsolation {
     Unknown,
 }
 
+/// Schema-name alias for [`NetworkIsolation`].
+pub type Isolation = NetworkIsolation;
+
 /// Lifecycle of the backing network, independent of the lobby lifecycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -266,6 +269,9 @@ pub enum InspectionRouteClass {
     #[serde(other)]
     Unknown,
 }
+
+/// Schema-name alias for [`InspectionRouteClass`].
+pub type RouteClass = InspectionRouteClass;
 
 /// A value together with its source, assurance, time, and freshness.
 ///
