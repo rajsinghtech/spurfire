@@ -2012,6 +2012,15 @@ mod tests {
         let recovered = restarted.prepare_lobby(request).await.unwrap();
         assert_eq!(recovered.tailnet, prepared.tailnet);
         assert_eq!(recovered.identity, prepared.identity);
+        let erase = TailnetPresenceRequest {
+            lobby_id,
+            network_generation: 7,
+            identity: recovered.identity.unwrap(),
+        };
+        restarted.erase_child_secret(erase.clone()).await.unwrap();
+        // Models a crash after durable erase but before the non-secret cleanup
+        // state commit: the retry must treat the exact missing tuple as erased.
+        restarted.erase_child_secret(erase).await.unwrap();
         token.assert_async().await;
         create.assert_async().await;
         let _ = tokio::fs::remove_dir_all(&root).await;
