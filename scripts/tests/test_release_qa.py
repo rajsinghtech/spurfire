@@ -27,6 +27,94 @@ EVIDENCE = load_script("check-alpha-evidence.py")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
+def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
+    source = root / "source"
+    source.mkdir()
+    archives = {
+        "Spurfire-linux-x86_64.tar.gz": "linux-x86_64",
+        "Spurfire-macos-universal.zip": "macos-universal",
+        "Spurfire-windows-x86_64.zip": "windows-x86_64",
+    }
+    for name in archives:
+        (source / name).write_bytes(name.encode())
+
+    def archive_sha(name: str) -> str:
+        return hashlib.sha256((source / name).read_bytes()).hexdigest()
+
+    records = {
+        "linux-trust.json": {
+            "schema_version": 1,
+            "platform": "linux-x86_64",
+            "source_sha": SHA,
+            "archive": "Spurfire-linux-x86_64.tar.gz",
+            "archive_sha256": archive_sha("Spurfire-linux-x86_64.tar.gz"),
+            "launch_smoke_passed": True,
+            "signature": "unsigned_archive",
+        },
+        "macos-trust.json": {
+            "schema_version": 1,
+            "platform": "macos-universal",
+            "source_sha": SHA,
+            "archive": "Spurfire-macos-universal.zip",
+            "archive_sha256": archive_sha("Spurfire-macos-universal.zip"),
+            "launch_smoke_passed": True,
+            "signature": "developer_id" if trusted else "ad_hoc",
+            "developer_id_signed": trusted,
+            "notarized": trusted,
+            "verification": {
+                "codesign_deep_strict": trusted,
+                "notarization_stapled": trusted,
+                "gatekeeper_assessment": trusted,
+                "team_id": "A" * 10 if trusted else "",
+            },
+        },
+        "windows-trust.json": {
+            "schema_version": 1,
+            "platform": "windows-x86_64",
+            "source_sha": SHA,
+            "archive": "Spurfire-windows-x86_64.zip",
+            "archive_sha256": archive_sha("Spurfire-windows-x86_64.zip"),
+            "launch_smoke_passed": True,
+            "signature": "authenticode" if trusted else "unsigned",
+            "authenticode_signed": trusted,
+            "verification": {
+                "status": "Valid" if trusted else "NotSigned",
+                "timestamp_verified": trusted,
+                "signer_certificate_sha256": "a" * 64 if trusted else "",
+            },
+        },
+    }
+    for name, record in records.items():
+        (source / name).write_text(json.dumps(record), encoding="utf-8")
+    return source
+
+
+def run_candidate_metadata(source: Path, output: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "python3",
+            ROOT / "scripts/make-alpha-candidate-metadata.py",
+            "--input-dir",
+            source,
+            "--output-dir",
+            output,
+            "--source-sha",
+            SHA,
+            "--run-id",
+            "1",
+            "--run-attempt",
+            "1",
+            "--event",
+            "workflow_dispatch",
+            "--provenance-verified",
+            *extra,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def base_record(event: str, session: str = "session-local-1") -> dict:
     return {"schema_version": 1, "build_commit": SHA, "session_id": session, "event_type": event}
 
@@ -214,6 +302,10 @@ class CommandTests(unittest.TestCase):
             )
             subprocess.run(["git", "-C", repo, "add", "docs"], check=True)
             subprocess.run(["git", "-C", repo, "commit", "-qm", "release evidence"], check=True)
+            metadata_sha = subprocess.check_output(
+                ["git", "-C", repo, "rev-parse", "HEAD"], text=True
+            ).strip()
+            self.assertNotEqual(source_sha, metadata_sha)
             subprocess.run(
                 [ROOT / "scripts/check-release-tag-binding.sh", "0.2.0", "HEAD"],
                 cwd=repo,
@@ -259,9 +351,29 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("git tag", preflight)
         self.assertNotIn("git push", preflight)
         self.assertNotIn("gh release create", preflight)
+        self.assertGreaterEqual(
+            preflight.count("ref: ${{ needs.metadata.outputs.source_sha }}"), 5
+        )
+        self.assertGreaterEqual(
+            preflight.count('test "$(git rev-parse HEAD)" = "$SOURCE_SHA"'), 4
+        )
+        self.assertIn(".pull_request.head.sha", preflight)
+        self.assertIn("GITHUB_SHA: ${{ needs.metadata.outputs.source_sha }}", preflight)
+        self.assertIn('--source-digest "$source_sha"', preflight)
+        self.assertIn("environment: alpha-release", preflight)
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'",
+            preflight,
+        )
+        self.assertIn("candidate-mode trusted-release", preflight)
         self.assertIn("environment: alpha-release", publisher)
         self.assertIn("refusing to overwrite it", publisher)
         self.assertIn("--expected-sha256", publisher)
+        self.assertIn('echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"', publisher)
+        self.assertIn("VALIDATED_TAG_SHA: ${{ steps.validate.outputs.tag_sha }}", publisher)
+        self.assertIn("VALIDATED_SOURCE_SHA: ${{ steps.validate.outputs.source_sha }}", publisher)
+        self.assertNotIn('= "$tag_sha"', publisher.split("Verify and publish release", 1)[1])
+        self.assertIn('--source-digest "$VALIDATED_SOURCE_SHA"', publisher)
         self.assertNotIn(".head_branch == $tag", publisher)
         self.assertNotIn('--source-sha "$GITHUB_SHA"', preflight)
         self.assertNotIn('--source-sha "$GITHUB_SHA"', packages)
@@ -272,40 +384,79 @@ class CommandTests(unittest.TestCase):
     def test_candidate_metadata_is_nonpublishing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "source"
+            source = write_candidate_inputs(root)
             output = root / "output"
-            source.mkdir()
-            for name in {
-                "Spurfire-linux-x86_64.tar.gz",
-                "Spurfire-macos-universal.zip",
-                "Spurfire-windows-x86_64.zip",
-            }:
-                (source / name).write_bytes(name.encode())
-            subprocess.run(
-                [
-                    "python3",
-                    ROOT / "scripts/make-alpha-candidate-metadata.py",
-                    "--input-dir",
-                    source,
-                    "--output-dir",
-                    output,
-                    "--source-sha",
-                    SHA,
-                    "--run-id",
-                    "1",
-                    "--run-attempt",
-                    "1",
-                    "--event",
-                    "workflow_dispatch",
-                    "--provenance-verified",
-                ],
-                check=True,
-            )
+            result = run_candidate_metadata(source, output)
+            self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((output / "candidate-manifest.json").read_text())
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["candidate_mode"], "preflight")
             self.assertFalse(manifest["release_eligible"])
+            self.assertEqual(manifest["publication"], "forbidden")
             self.assertEqual(len(manifest["artifacts"]), 3)
             self.assertTrue((output / "SHA256SUMS").is_file())
             self.assertTrue((output / "candidate.spdx.json").is_file())
+
+    def trusted_args(self, apple: str = "A" * 10, windows: str = "a" * 64) -> tuple[str, ...]:
+        return (
+            "--candidate-mode",
+            "trusted-release",
+            "--approved-apple-team-id",
+            apple,
+            "--approved-windows-certificate-sha256",
+            windows,
+        )
+
+    def test_trusted_candidate_eligibility_requires_bound_verified_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root, trusted=True)
+            output = root / "output"
+            result = run_candidate_metadata(source, output, *self.trusted_args())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output / "candidate-manifest.json").read_text())
+            self.assertTrue(manifest["release_eligible"])
+            self.assertFalse(manifest["candidate_only"])
+            self.assertEqual(manifest["blockers"], [])
+            self.assertEqual(manifest["publication"], "protected_manual_only")
+
+    def test_tampered_trust_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root, trusted=True)
+            trust_path = source / "windows-trust.json"
+            trust = json.loads(trust_path.read_text())
+            trust["archive_sha256"] = "f" * 64
+            trust_path.write_text(json.dumps(trust), encoding="utf-8")
+            result = run_candidate_metadata(
+                source, root / "output", *self.trusted_args()
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("archive_sha256 does not match", result.stderr)
+
+    def test_trusted_mode_rejects_unsigned_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root)
+            output = root / "output"
+            result = run_candidate_metadata(source, output, *self.trusted_args())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output / "candidate-manifest.json").read_text())
+            self.assertFalse(manifest["release_eligible"])
+            self.assertIn("verified Apple", " ".join(manifest["blockers"]))
+
+    def test_trusted_mode_rejects_unapproved_signer_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root, trusted=True)
+            output = root / "output"
+            result = run_candidate_metadata(
+                source, output, *self.trusted_args("B" * 10, "b" * 64)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output / "candidate-manifest.json").read_text())
+            self.assertFalse(manifest["release_eligible"])
+            self.assertNotEqual(manifest["blockers"], [])
 
     def test_two_client_entry_point_with_simulated_driver(self):
         with tempfile.TemporaryDirectory() as directory:
