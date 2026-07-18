@@ -1822,7 +1822,7 @@ impl SaddleDiveKernel {
             }
             let all_accepted_results_settled =
                 record.accepted_shots.len() == record.resolved_shots.len();
-            let terminal = match record.row.censor_reason {
+            match record.row.censor_reason {
                 Some(
                     DiveCensorReason::MatchEnded
                     | DiveCensorReason::Reset
@@ -1841,8 +1841,7 @@ impl SaddleDiveKernel {
                         && record.row.death_within_3s.is_some()
                         && record.row.remount_tick.is_some()
                 }
-            };
-            terminal
+            }
         });
         if !should_finalize {
             return;
