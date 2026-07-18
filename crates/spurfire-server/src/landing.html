@@ -441,9 +441,9 @@
           mode.textContent='DRY-RUN PREVIEW';
           byId('status-detail').textContent='Lobby lifecycle is available for safe API previews; no real tailnet or enrollment key is created.';
         }else{
-          mode.textContent=health.provisioning_ready?'PROVISIONING READY':'PROVISIONING PAUSED';
+          mode.textContent=health.provisioning_ready?'PROVIDER CONFIGURED':'PROVIDER PAUSED';
           mode.className=`mode${health.provisioning_ready?' live':''}`;
-          byId('status-detail').textContent=health.provisioning_ready?'The configured lobby network provider is ready.':'New network provisioning is paused while existing sessions remain peer-hosted.';
+          byId('status-detail').textContent=health.provisioning_ready?'The configured provider adapter reports ready. This does not attest the separate public real-activation gates.':'New network provisioning is paused while existing sessions remain peer-hosted.';
         }
       }).catch(()=>{
         byId('status').textContent='Control plane unavailable';
