@@ -3,9 +3,9 @@
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
 use spurfire_protocol::{
-    effective_spread_millidegrees, AcceptedShotMetadata, CombatGait, CombatKernel,
-    DiveContextError, DiveFireRejection, DiveId, EntityId, FireRejection, HitZone, PlayerId,
-    QuantizedDirection, QuantizedOrigin, ReloadStartError, RiderStance, RidingState,
+    clamp_launch_direction, effective_spread_millidegrees, AcceptedShotMetadata, CombatGait,
+    CombatKernel, DiveContextError, DiveFireRejection, DiveId, EntityId, FireRejection, HitZone,
+    PlayerId, QuantizedDirection, QuantizedOrigin, ReloadStartError, RiderStance, RidingState,
     ShotAttributionLedger, ShotOutcome, ShotRejectionReason, ShotResult, ShotTelemetry,
     SimulationTick, WeaponAmmo, WeaponId, WeaponStats, DIRECTION_UNITS, ORIGIN_LEASH_MM,
 };
@@ -121,6 +121,20 @@ impl MountedWeaponController {
     /// Stable rejection reason; M2 internal cap reasons remain precise here.
     #[signal]
     fn fire_rejected(tick: i64, reason: GString);
+
+    /// Authoritative reload lifecycle. Progress is native active-tick truth;
+    /// presentation must not run a second wall-clock timer.
+    #[signal]
+    fn reload_started(tick: i64, required_ticks: i64);
+
+    #[signal]
+    fn reload_progressed(tick: i64, progress: f64, active_ticks: i64, required_ticks: i64);
+
+    #[signal]
+    fn reload_completed(tick: i64, mag: i64, reserve: i64);
+
+    #[signal]
+    fn reload_rejected(tick: i64, reason: GString);
 
     /// Emitted when an authority result confirms a target hit.
     #[signal]
@@ -555,17 +569,49 @@ impl MountedWeaponController {
         let tick = SimulationTick::new(self.current_tick.max(0).cast_unsigned());
         let riding = self.handling_state();
         match self.kernel.request_reload(tick, riding) {
-            Ok(_) => {
+            Ok(reload) => {
                 self.last_reject_reason = GString::new();
                 self.update_runtime_properties();
+                let tick_value = i64::try_from(tick.as_u64()).unwrap_or(i64::MAX);
+                let required_ticks = i64::try_from(reload.required_ticks).unwrap_or(i64::MAX);
+                self.signals()
+                    .reload_started()
+                    .emit(tick_value, required_ticks);
+                self.signals()
+                    .reload_progressed()
+                    .emit(tick_value, 0.0, 0, required_ticks);
                 true
             }
             Err(reason) => {
-                self.last_reject_reason = GString::from(reload_error_name(reason));
+                let exact_reason = reload_rejection_name(reason, riding.stance);
+                self.last_reject_reason = GString::from(exact_reason);
                 self.update_runtime_properties();
+                let signal_reason = GString::from(exact_reason);
+                self.signals().reload_rejected().emit(
+                    i64::try_from(tick.as_u64()).unwrap_or(i64::MAX),
+                    &signal_reason,
+                );
                 false
             }
         }
+    }
+
+    /// Exact kernel-equivalent camera-relative Saddle Dive launch preview.
+    /// This is presentation-only and cannot mutate launch or combat state.
+    #[func]
+    pub fn preview_dive_direction(
+        &self,
+        horse_velocity: Vector3,
+        chosen_direction: Vector3,
+    ) -> VarDictionary {
+        let velocity = quantized_velocity_mmps(horse_velocity);
+        let chosen = QuantizedDirection::from_components(
+            f64::from(chosen_direction.x),
+            f64::from(chosen_direction.y),
+            f64::from(chosen_direction.z),
+        )
+        .ok();
+        launch_preview_dictionary(velocity, chosen)
     }
 
     /// Return the complete locked design row and live ammo state.
@@ -840,13 +886,44 @@ impl MountedWeaponController {
 
     fn advance_kernel_to(&mut self, tick: SimulationTick) -> bool {
         let previous_ammo = self.kernel.equipped_ammo();
-        if self.kernel.advance_to(tick, self.riding).is_err() {
+        let previous_reload = self.kernel.reload();
+        let Ok(outcome) = self.kernel.advance_to(tick, self.riding) else {
             return false;
-        }
+        };
         self.current_tick = i64::try_from(tick.as_u64()).unwrap_or(i64::MAX);
         self.update_runtime_properties();
+        let emitted_tick = self.current_tick;
+        let current_reload = self.kernel.reload();
+        if let Some(reload) = current_reload {
+            if previous_reload != Some(reload) {
+                self.signals().reload_progressed().emit(
+                    emitted_tick,
+                    f64::from(reload.progress_milli()) / 1_000.0,
+                    i64::try_from(reload.active_ticks).unwrap_or(i64::MAX),
+                    i64::try_from(reload.required_ticks).unwrap_or(i64::MAX),
+                );
+            }
+        } else if outcome.reload_completed {
+            let required_ticks = previous_reload
+                .map(|reload| i64::try_from(reload.required_ticks).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            self.signals().reload_progressed().emit(
+                emitted_tick,
+                1.0,
+                required_ticks,
+                required_ticks,
+            );
+        }
         if self.kernel.equipped_ammo() != previous_ammo {
             self.emit_ammo_changed();
+        }
+        if outcome.reload_completed {
+            let ammo = self.kernel.equipped_ammo();
+            self.signals().reload_completed().emit(
+                emitted_tick,
+                i64::from(ammo.magazine),
+                i64::from(ammo.reserve),
+            );
         }
         true
     }
@@ -1092,6 +1169,40 @@ fn degrees_to_millidegrees(value: f64) -> Option<i32> {
     }
 }
 
+fn quantized_velocity_mmps(value: Vector3) -> [i32; 3] {
+    [value.x, value.y, value.z].map(|component| {
+        if !component.is_finite() {
+            0
+        } else {
+            (f64::from(component) * 1_000.0)
+                .round()
+                .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+        }
+    })
+}
+
+fn launch_preview_dictionary(
+    horse_velocity_mmps: [i32; 3],
+    chosen_direction: Option<QuantizedDirection>,
+) -> VarDictionary {
+    let preview = clamp_launch_direction(horse_velocity_mmps, chosen_direction);
+    let mut row = VarDictionary::new();
+    row.set(
+        "requested_angle_degrees",
+        f64::from(preview.requested_angle_millidegrees) / 1_000.0,
+    );
+    row.set(
+        "clamped_angle_degrees",
+        f64::from(preview.clamped_angle_millidegrees) / 1_000.0,
+    );
+    row.set("direction_was_clamped", preview.direction_was_clamped);
+    row.set(
+        "clamped_direction",
+        to_godot_direction(preview.clamped_direction),
+    );
+    row
+}
+
 fn finite_vector_or_zero(value: Vector3) -> Vector3 {
     if value.x.is_finite() && value.y.is_finite() && value.z.is_finite() {
         value
@@ -1116,8 +1227,17 @@ const fn authority_snapshot_rejection(stance: RiderStance) -> ShotRejectionReaso
     }
 }
 
-fn reload_error_name(error: ReloadStartError) -> &'static str {
+fn reload_rejection_name(error: ReloadStartError, stance: RiderStance) -> &'static str {
     match error {
+        ReloadStartError::Dismounted
+            if matches!(
+                stance,
+                RiderStance::LandingProne | RiderStance::LandingRecovery
+            ) =>
+        {
+            "recovering"
+        }
+        ReloadStartError::Dismounted if stance == RiderStance::OnFootStanding => "holstered",
         ReloadStartError::TickReplay => "tick_replay",
         ReloadStartError::Holstered => "holstered",
         ReloadStartError::Airborne => "airborne",
@@ -1333,5 +1453,43 @@ mod tests {
         assert_eq!(weapon_color(WeaponId::Dustwalker), "tan_brown");
         assert_eq!(weapon_color(WeaponId::Longspur), "gunmetal_wood");
         assert_eq!(weapon_color(WeaponId::Rattler), "olive");
+    }
+
+    #[test]
+    fn reload_rejections_are_stance_specific_for_presentation() {
+        assert_eq!(
+            reload_rejection_name(ReloadStartError::Airborne, RiderStance::SaddleDiveAirborne),
+            "airborne"
+        );
+        assert_eq!(
+            reload_rejection_name(ReloadStartError::Dismounted, RiderStance::LandingRecovery),
+            "recovering"
+        );
+        assert_eq!(
+            reload_rejection_name(ReloadStartError::Dismounted, RiderStance::OnFootStanding),
+            "holstered"
+        );
+    }
+
+    #[test]
+    fn dive_preview_uses_the_locked_seventy_five_degree_kernel_cone() {
+        let velocity = [0, 0, -9_000];
+        for (angle, expected, clamped) in [
+            (0_i32, 0_i32, false),
+            (45_000, 45_000, false),
+            (-45_000, -45_000, false),
+            (75_000, 75_000, false),
+            (-75_000, -75_000, false),
+            (90_000, 75_000, true),
+            (-90_000, -75_000, true),
+            (180_000, 75_000, true),
+        ] {
+            let radians = f64::from(angle).to_radians() / 1_000.0;
+            let chosen = QuantizedDirection::from_components(-radians.sin(), 0.0, -radians.cos())
+                .expect("test direction is normalized");
+            let preview = clamp_launch_direction(velocity, Some(chosen));
+            assert!((preview.clamped_angle_millidegrees - expected).abs() <= 1);
+            assert_eq!(preview.direction_was_clamped, clamped);
+        }
     }
 }

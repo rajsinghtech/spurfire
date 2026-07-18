@@ -17,7 +17,7 @@ Spurfire M1 adds a playable, deterministic mounted-rifle range on top of the M0.
 - **SF-L12 Longspur:** slower precision rifle with higher per-hit damage.
 - **SF-R45 Rattler:** high-cadence close-range rifle with a larger magazine and spread.
 
-All cadence, magazine/reserve ammunition, reload duration, deterministic spread, recoil, mounted movement/yaw/airborne sway, range clamp, falloff, and headshot damage are defined in `spurfire-protocol`. `MountedWeaponController` is a thin Godot adapter.
+All cadence, magazine/reserve ammunition, reload duration, deterministic spread, recoil, mounted movement/yaw/airborne sway, range clamp, falloff, and headshot damage are defined in `spurfire-protocol`. `MountedWeaponController` is a thin Godot adapter. Its reload started/progress/completed/rejected signals expose the same native active-tick state to the HUD; presentation does not run a second wall-clock reload. Airborne, recovery, and holstered rejections are visible immediately.
 
 ## Authority boundary
 
@@ -35,6 +35,6 @@ The course contains three target dummies, target-range dressing, crosshair, ammo
 just game-test
 ```
 
-The gate covers Rust authority vectors, Godot combat UI scenes, native class API, mounted movement/sidestep regressions, accepted native shot and ammo consumption, local authority damage reaching a target dummy, clean asset import, and a short main-scene runtime.
+The gate covers Rust authority vectors, Godot combat UI scenes, native class API, mounted movement/sidestep regressions, accepted native shot and ammo consumption, local authority damage reaching a target dummy, clean asset import, and a short main-scene runtime. The integrated M2 smoke also drains Dustwalker to `0 | 107`, rejects reload while airborne/recovering, remounts, presses the physical R action once, and requires native completion at tick +126 with `30 | 77`.
 
 M1 does not yet implement Saddle Dive, rider/horse combat health, network transport, lag compensation history, or authority migration. Those are subsequent milestones built on the DTO and authority kernel added here.

@@ -16,7 +16,10 @@ Saddle Dive is Spurfire's M2 release candidate: a deterministic flying dismount 
 
 - The movement/combat kernel uses one absolute 60 Hz simulation tick and fixed, replayable launch, recovery, horse-runout, event, and instrumentation rules. Gameplay state does not use wall-clock time.
 - Rider snapshots advance wire compatibility from 1.0 to 1.1 with a numeric stance field. Missing legacy stance defaults to Mounted; unknown future stance IDs are preserved but grant no gameplay capability.
-- Every accepted dive records launch speed and angle, airtime, attempts and accepted shots, hits and damage, landing terrain and slope, death within the inclusive three-second window, and time to remount.
+- Every accepted dive records launch speed and angle, airtime, attempts and accepted shots, hits and damage, landing terrain and slope, death within the inclusive three-second window, and time to remount. Finalized/censored rows append to secret-free per-session JSONL under `user://logs`; no credentials, capabilities, join material, seeds, or endpoints are allowed in that recorder.
+- Local physics interpolation and render-time camera/rider sampling smooth 60 Hz transforms on high-refresh displays without changing gameplay state. Teleport/reset guards clear interpolation history, and stance-aware camera anchors preserve the no-kick/no-dip/no-roll comfort contract at the shipped 70→78 FOV.
+- Reload HUD state now follows native active ticks and visibly reports airborne/recovery/holstered rejection. The integrated smoke proves the observed `0 | 107` case after a real dive/remount completes as `30 | 77` at tick +126.
+- A camera-relative preview reports the exact kernel-clamped direction and amber clamp state while dive-ready. The launch cone remains ±75°; this is feedback, not a geometry change.
 - Release qualification covers Rust source gates on Ubuntu, macOS, and Windows, bounded Godot 4.7.1 smoke tests on Linux, and nonpublishing Linux x86_64, Windows x86_64, and macOS universal client exports.
 
 ## Playtest status
