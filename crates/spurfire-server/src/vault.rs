@@ -278,10 +278,7 @@ impl EncryptedChildVault {
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.mode(0o600);
         let mut file = options.open(&temporary).await.map_err(|_| VaultError::Io)?;
         file.write_all(&bytes).await.map_err(|_| VaultError::Io)?;
         file.sync_all().await.map_err(|_| VaultError::Io)?;
