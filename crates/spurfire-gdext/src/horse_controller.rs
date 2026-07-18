@@ -2,6 +2,9 @@ use std::f64::consts::PI;
 
 use godot::classes::{CharacterBody3D, ICharacterBody3D, Input, Marker3D, Node};
 use godot::prelude::*;
+use spurfire_protocol::{
+    HorseRunoutKernel, HorseRunoutState, QuantizedOrigin, SimulationTick, SADDLE_DIVE_TICK_RATE_HZ,
+};
 
 use crate::archetype::{HorseArchetype, HorseStats};
 use crate::locomotion::{
@@ -18,6 +21,15 @@ const GAIT_DOWN: &str = "gait_down";
 const HARD_BRAKE: &str = "hard_brake";
 const JUMP: &str = "jump";
 const RESET_HORSE: &str = "reset_horse";
+
+#[derive(Clone, Copy)]
+pub(crate) struct HorseM2Snapshot {
+    pub position: Vector3,
+    pub velocity: Vector3,
+    pub grounded: bool,
+    pub gait: i64,
+    pub retrievable: bool,
+}
 
 /// Godot adapter for the pure locomotion kernel.
 #[derive(GodotClass)]
@@ -163,8 +175,17 @@ pub struct HorseController {
     sidestep_blocked_reason: GString,
     #[var(no_set)]
     last_telemetry: VarDictionary,
+    #[var(no_set)]
+    control_mode: i64,
+    #[var(no_set)]
+    is_retrievable: bool,
+    #[var(no_set)]
+    runout_distance_m: f64,
 
     kernel: HorseKernel,
+    runout_kernel: HorseRunoutKernel,
+    external_simulation_enabled: bool,
+    last_external_tick: Option<SimulationTick>,
     back_tap_elapsed: f64,
     back_double_tap_active: bool,
 }
@@ -179,6 +200,12 @@ impl HorseController {
 
     #[signal]
     fn telemetry_updated(telemetry: VarDictionary);
+
+    #[signal]
+    fn runout_started(tick: i64);
+
+    #[signal]
+    fn horse_retrievable(tick: i64, distance_m: f64);
 
     /// Select 0=Courser, 1=Warhorse, or 2=Mustang.
     #[func]
@@ -208,11 +235,86 @@ impl HorseController {
         archetype_stats_dictionary(self.kernel.archetype_stats())
     }
 
-    /// Restore the configured spawn marker synchronously.
+    /// Start fixed-heading, collision-resolved M2 horse continuation.
+    #[func]
+    pub fn start_dive_runout(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        let Some(position) = quantized_origin(self.base().get_global_position()) else {
+            return false;
+        };
+        let velocity = quantized_velocity(self.base().get_velocity());
+        if self
+            .runout_kernel
+            .start_runout(tick, position, velocity)
+            .is_err()
+        {
+            return false;
+        }
+        self.assign_runout_properties();
+        self.signals()
+            .runout_started()
+            .emit(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
+        true
+    }
+
+    /// Stop in place for an ordinary below-threshold dismount.
+    #[func]
+    pub fn stop_for_dismount(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        let Some(position) = quantized_origin(self.base().get_global_position()) else {
+            return false;
+        };
+        self.runout_kernel.stop_for_dismount(tick, position);
+        self.base_mut().set_velocity(Vector3::ZERO);
+        self.assign_runout_properties();
+        self.emit_retrievable(tick);
+        true
+    }
+
+    /// Advance the same horse object on the injected absolute 60 Hz clock.
+    #[func]
+    pub fn set_external_simulation_tick(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        if self
+            .last_external_tick
+            .is_some_and(|current| tick <= current)
+        {
+            return false;
+        }
+        self.external_simulation_enabled = true;
+        self.last_external_tick = Some(tick);
+        self.simulate_external_tick(tick)
+    }
+
+    /// Return player control after the rider kernel has range-checked remount.
+    #[func]
+    pub fn complete_remount(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        if self.runout_kernel.complete_remount(tick).is_err() {
+            return false;
+        }
+        self.assign_runout_properties();
+        true
+    }
+
+    /// Restore the configured spawn marker synchronously. Course reset is an
+    /// explicit censor/reset path, never normal horse retrieval.
     #[func]
     pub fn reset_horse(&mut self) {
         self.refresh_spawn();
         let transition = self.kernel.reset();
+        self.runout_kernel =
+            HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ).expect("M2 tick rate is nonzero");
+        self.last_external_tick = None;
+        self.assign_runout_properties();
         self.apply_kernel_transform();
         self.emit_transition(transition);
         self.emit_telemetry();
@@ -291,7 +393,14 @@ impl ICharacterBody3D for HorseController {
             turn_radius_m: 0.0,
             sidestep_blocked_reason: GString::from(SidestepBlockReason::None.name()),
             last_telemetry: VarDictionary::new(),
+            control_mode: 0,
+            is_retrievable: false,
+            runout_distance_m: 0.0,
             kernel: HorseKernel::new(tuning, KernelVec3::ZERO, 0.0),
+            runout_kernel: HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
+                .expect("M2 tick rate is nonzero"),
+            external_simulation_enabled: false,
+            last_external_tick: None,
             back_tap_elapsed: f64::INFINITY,
             back_double_tap_active: false,
         }
@@ -306,6 +415,7 @@ impl ICharacterBody3D for HorseController {
         let grounded = self.base().is_on_floor();
         self.kernel.resolve_motion(position, velocity, grounded);
         self.update_archetype_properties();
+        self.assign_runout_properties();
         let archetype = self.kernel.archetype().id();
         self.signals()
             .archetype_changed()
@@ -314,6 +424,80 @@ impl ICharacterBody3D for HorseController {
     }
 
     fn physics_process(&mut self, delta: f64) {
+        if self.external_simulation_enabled {
+            return;
+        }
+        self.simulate_player_control(delta);
+    }
+}
+
+impl HorseController {
+    pub(crate) fn m2_snapshot(&self) -> HorseM2Snapshot {
+        HorseM2Snapshot {
+            position: self.base().get_global_position(),
+            velocity: self.base().get_velocity(),
+            grounded: self.base().is_on_floor(),
+            gait: self.current_gait,
+            retrievable: self.runout_kernel.is_retrievable(),
+        }
+    }
+
+    fn simulate_external_tick(&mut self, tick: SimulationTick) -> bool {
+        self.sync_tuning();
+        self.configure_character_body();
+        let Ok(runout) = self.runout_kernel.begin_tick(tick) else {
+            return false;
+        };
+        self.assign_runout_properties();
+        if let Some(transition) = runout.transition {
+            if transition.to == HorseRunoutState::IdleRetrievable {
+                self.emit_retrievable(transition.tick);
+            }
+        }
+
+        match runout.state {
+            HorseRunoutState::PlayerControlled => {
+                self.simulate_player_control(1.0 / f64::from(SADDLE_DIVE_TICK_RATE_HZ));
+            }
+            HorseRunoutState::Runout | HorseRunoutState::IdleRetrievable => {
+                let velocity = Vector3::new(
+                    runout.requested_velocity_mmps[0] as f32 / 1_000.0,
+                    runout.requested_velocity_mmps[1] as f32 / 1_000.0,
+                    runout.requested_velocity_mmps[2] as f32 / 1_000.0,
+                );
+                self.base_mut().set_velocity(velocity);
+                if runout.state == HorseRunoutState::Runout {
+                    self.base_mut().move_and_slide();
+                }
+                let position = self.base().get_global_position();
+                let resolved_velocity = self.base().get_velocity();
+                let Some(position_mm) = quantized_origin(position) else {
+                    return false;
+                };
+                let transition = self
+                    .runout_kernel
+                    .resolve_motion(tick, position_mm, quantized_velocity(resolved_velocity))
+                    .ok()
+                    .flatten();
+                self.kernel.resolve_motion(
+                    from_godot_vector(position),
+                    from_godot_vector(resolved_velocity),
+                    self.base().is_on_floor(),
+                );
+                self.assign_runout_properties();
+                self.update_telemetry_properties();
+                if let Some(transition) = transition {
+                    if transition.to == HorseRunoutState::IdleRetrievable {
+                        self.base_mut().set_velocity(Vector3::ZERO);
+                        self.emit_retrievable(transition.tick);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn simulate_player_control(&mut self, delta: f64) {
         self.sync_tuning();
         self.configure_character_body();
 
@@ -329,6 +513,9 @@ impl ICharacterBody3D for HorseController {
         };
 
         if outcome.reset {
+            self.runout_kernel =
+                HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ).expect("M2 tick rate is nonzero");
+            self.assign_runout_properties();
             self.apply_kernel_transform();
         } else {
             self.apply_requested_motion(outcome);
@@ -344,9 +531,25 @@ impl ICharacterBody3D for HorseController {
             self.update_telemetry_properties();
         }
     }
-}
 
-impl HorseController {
+    fn assign_runout_properties(&mut self) {
+        self.control_mode = match self.runout_kernel.state() {
+            HorseRunoutState::PlayerControlled => 0,
+            HorseRunoutState::Runout => 1,
+            HorseRunoutState::IdleRetrievable => 2,
+        };
+        self.is_retrievable = self.runout_kernel.is_retrievable();
+        self.runout_distance_m = f64::from(self.runout_kernel.cumulative_travel_mm()) / 1_000.0;
+    }
+
+    fn emit_retrievable(&mut self, tick: SimulationTick) {
+        self.assign_runout_properties();
+        let distance = self.runout_distance_m;
+        self.signals()
+            .horse_retrievable()
+            .emit(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX), distance);
+    }
+
     fn exported_tuning(&self) -> Tuning {
         Tuning {
             walk_speed: self.walk_speed,
@@ -736,6 +939,22 @@ fn finite_positive_or(value: f64, fallback: f64) -> f64 {
     } else {
         fallback
     }
+}
+
+fn quantized_origin(value: Vector3) -> Option<QuantizedOrigin> {
+    QuantizedOrigin::from_meters(f64::from(value.x), f64::from(value.y), f64::from(value.z)).ok()
+}
+
+fn quantized_velocity(value: Vector3) -> [i32; 3] {
+    [value.x, value.y, value.z].map(|component| {
+        if !component.is_finite() {
+            0
+        } else {
+            (f64::from(component) * 1_000.0)
+                .round()
+                .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+        }
+    })
 }
 
 #[cfg(test)]

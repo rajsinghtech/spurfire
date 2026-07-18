@@ -1,6 +1,7 @@
 extends Node
 class_name CombatPlayer
 
+@export var rider: CharacterBody3D
 @export var horse: CharacterBody3D
 @export var controller: Node3D
 @export var rifle: Node3D
@@ -14,14 +15,16 @@ func _ready() -> void:
 		rifle.set("aim_source", aim_camera)
 		rifle.call("equip")
 	if combat_hud and combat_hud.has_method("bind_controller"):
-		# CombatInput may become ready before the later CanvasLayer sibling; defer until the HUD's
-		# @onready references are initialized.
+		# CombatInput may become ready before the later CanvasLayer sibling.
 		combat_hud.call_deferred("bind_controller", controller)
 
-func _physics_process(_delta: float) -> void:
-	_update_mounted_handling()
+## Called exactly once by M2Gameplay after movement context is installed for the
+## shared absolute tick and before rider/horse collision resolution.
+func process_combat_tick(tick: int) -> void:
 	if Input.is_action_pressed(&"combat_fire"):
-		_fire_once()
+		if rider and rider.has_method("record_shot_attempt"):
+			rider.call("record_shot_attempt", tick)
+		_fire_once(tick)
 	if Input.is_action_just_pressed(&"combat_reload") and rifle:
 		rifle.call("request_reload")
 	if Input.is_action_just_pressed(&"weapon_dustwalker"):
@@ -31,26 +34,13 @@ func _physics_process(_delta: float) -> void:
 	elif Input.is_action_just_pressed(&"weapon_rattler"):
 		_select_weapon(2)
 
-func _update_mounted_handling() -> void:
-	if horse == null or controller == null:
-		return
-	controller.set("mounted", true)
-	controller.set("gait", int(horse.get("current_gait")))
-	controller.set("speed_mps", float(horse.get("speed_mps")))
-	controller.set("yaw_rate_degrees", float(horse.get("yaw_rate_degrees")))
-	controller.set("airborne", bool(horse.get("is_airborne")))
-	controller.set("ads", Input.is_action_pressed(&"combat_aim"))
-	var stats := horse.call("get_archetype_stats") as Dictionary
-	controller.set("gait_top_speed_mps", float(stats.get("gallop_mps", 13.0)))
-
 func _select_weapon(id: int) -> void:
 	if rifle and rifle.has_method("set_weapon"):
 		rifle.call("set_weapon", id)
 
-func _fire_once() -> void:
-	if controller == null or rifle == null or aim_camera == null:
+func _fire_once(tick: int) -> void:
+	if controller == null or rifle == null or aim_camera == null or rider == null:
 		return
-	var tick := int(controller.get("current_tick"))
 	if not bool(rifle.call("request_fire", tick)):
 		return
 	var origin := controller.get("last_shot_origin") as Vector3
@@ -61,16 +51,31 @@ func _fire_once() -> void:
 	var query := PhysicsRayQueryParameters3D.create(origin, endpoint)
 	query.collide_with_areas = true
 	query.collide_with_bodies = true
+	var excluded: Array[RID] = [rider.get_rid()]
 	if horse:
-		query.exclude = [horse.get_rid()]
-	var hit := horse.get_world_3d().direct_space_state.intersect_ray(query)
+		excluded.append(horse.get_rid())
+	query.exclude = excluded
+	var hit := rider.get_world_3d().direct_space_state.intersect_ray(query)
+	var resolved_hit := false
 	if not hit.is_empty():
 		endpoint = hit.position
 		var collider := hit.collider as Object
 		if collider and collider.has_meta("target_id") and collider.has_meta("hit_zone"):
 			var distance := origin.distance_to(endpoint)
-			controller.call("resolve_local_hit", int(collider.get_meta("target_id")), String(collider.get_meta("hit_zone")), distance)
+			resolved_hit = bool(controller.call(
+				"resolve_local_hit",
+				int(collider.get_meta("target_id")),
+				String(collider.get_meta("hit_zone")),
+				distance
+			))
 		if effects and effects.has_method("show_impact"):
-			effects.call("show_impact", endpoint, hit.normal, String(collider.get_meta("hit_zone", "body")) == "head" if collider else false)
+			effects.call(
+				"show_impact",
+				endpoint,
+				hit.normal,
+				String(collider.get_meta("hit_zone", "body")) == "head" if collider else false
+			)
+	if not resolved_hit and controller.has_method("resolve_local_miss"):
+		controller.call("resolve_local_miss")
 	if effects and effects.has_method("show_tracer"):
 		effects.call("show_tracer", origin, endpoint)

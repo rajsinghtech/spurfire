@@ -3,10 +3,11 @@
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
 use spurfire_protocol::{
-    effective_spread_millidegrees, CombatGait, CombatKernel, EntityId, HitZone, PlayerId,
-    QuantizedDirection, QuantizedOrigin, ReloadStartError, RidingState, ShotOutcome,
-    ShotRejectionReason, ShotResult, ShotTelemetry, SimulationTick, WeaponAmmo, WeaponId,
-    WeaponStats, DIRECTION_UNITS, ORIGIN_LEASH_MM,
+    effective_spread_millidegrees, CombatGait, CombatKernel, DiveContextError, DiveFireRejection,
+    DiveId, EntityId, FireRejection, HitZone, PlayerId, QuantizedDirection, QuantizedOrigin,
+    ReloadStartError, RiderStance, RidingState, ShotOutcome, ShotRejectionReason, ShotResult,
+    ShotTelemetry, SimulationTick, WeaponAmmo, WeaponId, WeaponStats, DIRECTION_UNITS,
+    ORIGIN_LEASH_MM,
 };
 
 const DEFAULT_TICK_RATE: u32 = 60;
@@ -34,24 +35,19 @@ pub struct MountedWeaponController {
     #[export]
     shooter_peer_id: GString,
 
-    // Rewound handling inputs supplied by the horse/scene integration.
-    #[export]
-    mounted: bool,
-    #[export]
+    // Rewound handling inputs supplied atomically by the shared scene tick.
+    #[var(no_set)]
+    stance_id: i64,
+    #[var(no_set)]
+    stance_known: bool,
+    #[var(no_set)]
+    dive_id: i64,
     gait: i64,
-    #[export]
     speed_mps: f64,
-    #[export]
     gait_top_speed_mps: f64,
-    #[export]
     yaw_rate_degrees: f64,
-    #[export]
-    airborne: bool,
-    #[export]
     stumbling: bool,
-    #[export]
     ads: bool,
-    #[export]
     sprint_gallop: bool,
 
     // Read-only HUD/effect state; no seed or credential is exposed.
@@ -81,7 +77,7 @@ pub struct MountedWeaponController {
     last_telemetry: VarDictionary,
 
     kernel: CombatKernel,
-    tick_accumulator: f64,
+    riding: RidingState,
     pending_local_shot: Option<PendingLocalShot>,
 }
 
@@ -99,9 +95,196 @@ impl MountedWeaponController {
     #[signal]
     fn shot_fired(tick: i64, weapon_id: i64);
 
+    /// Authority acceptance metadata used by M2 instrumentation.
+    #[signal]
+    fn shot_accepted(tick: i64, weapon_id: i64, accepted_shot_index: i64, dive_id: i64);
+
+    /// Local-authority result evidence used by deterministic attribution.
+    #[signal]
+    fn shot_resolved(
+        tick: i64,
+        outcome: GString,
+        hit_zone: GString,
+        damage: i64,
+        resolved_direction: Vector3,
+    );
+
+    /// Stable rejection reason; M2 internal cap reasons remain precise here.
+    #[signal]
+    fn fire_rejected(tick: i64, reason: GString);
+
     /// Emitted when an authority result confirms a target hit.
     #[signal]
     fn hit_confirmed(target_id: i64, hit_zone: GString, damage: i64);
+
+    /// Atomically install the authoritative rider handling row for one shared tick.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_rider_context(
+        &mut self,
+        tick: i64,
+        stance_id: i64,
+        dive_id: i64,
+        gait: i64,
+        speed_mps: f64,
+        gait_top_speed_mps: f64,
+        yaw_rate_degrees: f64,
+        stumbling: bool,
+        ads: bool,
+        sprint_gallop: bool,
+    ) -> bool {
+        let (Ok(tick_value), Ok(stance_value)) = (u64::try_from(tick), u8::try_from(stance_id))
+        else {
+            return false;
+        };
+        let stance = RiderStance::from_u8(stance_value);
+        let parsed_dive = if stance == RiderStance::SaddleDiveAirborne {
+            let Ok(value) = u64::try_from(dive_id) else {
+                return false;
+            };
+            let Some(value) = DiveId::new(value) else {
+                return false;
+            };
+            Some(value)
+        } else {
+            if dive_id != -1 {
+                return false;
+            }
+            None
+        };
+        let riding = RidingState {
+            stance,
+            dive_id: parsed_dive,
+            gait: gait_from_id(gait),
+            planar_speed_mmps: meters_per_second_to_mmps(speed_mps),
+            gait_top_speed_mmps: meters_per_second_to_mmps(gait_top_speed_mps).max(1),
+            yaw_rate_millidegrees_per_second: degrees_to_millidegrees(yaw_rate_degrees),
+            stumbling,
+            ads,
+            sprint_gallop,
+        };
+        if !stance.is_known() {
+            self.riding = riding;
+            self.assign_stance(stance, None);
+            self.advance_kernel_to(SimulationTick::new(tick_value));
+            return false;
+        }
+        if !riding.is_consistent() {
+            return false;
+        }
+        self.riding = riding;
+        self.gait = gait;
+        self.speed_mps = speed_mps;
+        self.gait_top_speed_mps = gait_top_speed_mps;
+        self.yaw_rate_degrees = yaw_rate_degrees;
+        self.stumbling = stumbling;
+        self.ads = ads;
+        self.sprint_gallop = sprint_gallop;
+        self.assign_stance(stance, parsed_dive);
+        let advanced = self.advance_kernel_to(SimulationTick::new(tick_value));
+        advanced && stance.is_known()
+    }
+
+    /// Advance reload/recoil using the injected absolute gameplay clock.
+    #[func]
+    pub fn advance_to_tick(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        self.advance_kernel_to(tick)
+    }
+
+    /// Open the authority-owned dive fire context before same-tick fire/reload.
+    #[func]
+    pub fn begin_saddle_dive(
+        &mut self,
+        dive_id: i64,
+        launch_tick: i64,
+        prelaunch_velocity_mps: Vector2,
+        nominal_airtime_ticks: i64,
+    ) -> bool {
+        let (Ok(dive_value), Ok(tick_value), Ok(nominal_ticks)) = (
+            u64::try_from(dive_id),
+            u64::try_from(launch_tick),
+            u64::try_from(nominal_airtime_ticks),
+        ) else {
+            return false;
+        };
+        let Some(dive_id) = DiveId::new(dive_value) else {
+            return false;
+        };
+        let prelaunch = [
+            meters_per_second_to_signed_mmps(f64::from(prelaunch_velocity_mps.x)),
+            meters_per_second_to_signed_mmps(f64::from(prelaunch_velocity_mps.y)),
+        ];
+        let tick = SimulationTick::new(tick_value);
+        let weapon = self.kernel.equipped_weapon();
+        match self
+            .kernel
+            .begin_saddle_dive(dive_id, tick, weapon, prelaunch, nominal_ticks)
+        {
+            Ok(()) => {
+                self.riding.stance = RiderStance::SaddleDiveAirborne;
+                self.riding.dive_id = Some(dive_id);
+                self.assign_stance(RiderStance::SaddleDiveAirborne, Some(dive_id));
+                self.current_tick = i64::try_from(tick_value).unwrap_or(i64::MAX);
+                self.update_runtime_properties();
+                true
+            }
+            Err(error) => {
+                self.last_reject_reason = GString::from(dive_context_error_name(error));
+                false
+            }
+        }
+    }
+
+    /// Close new dive fire at first post-move landing contact.
+    #[func]
+    pub fn finish_saddle_dive(&mut self, dive_id: i64, landing_tick: i64) -> bool {
+        let (Ok(dive_value), Ok(tick_value)) =
+            (u64::try_from(dive_id), u64::try_from(landing_tick))
+        else {
+            return false;
+        };
+        let Some(dive_id) = DiveId::new(dive_value) else {
+            return false;
+        };
+        match self
+            .kernel
+            .finish_saddle_dive(dive_id, SimulationTick::new(tick_value))
+        {
+            Ok(()) => {
+                self.riding.stance = RiderStance::LandingProne;
+                self.riding.dive_id = None;
+                self.assign_stance(RiderStance::LandingProne, None);
+                self.current_tick = i64::try_from(tick_value).unwrap_or(i64::MAX);
+                self.update_runtime_properties();
+                true
+            }
+            Err(error) => {
+                self.last_reject_reason = GString::from(dive_context_error_name(error));
+                false
+            }
+        }
+    }
+
+    /// Existing equipment path used after a range-checked remount.
+    #[func]
+    pub fn complete_remount(&mut self, tick: i64) -> bool {
+        let Ok(tick_value) = u64::try_from(tick) else {
+            return false;
+        };
+        self.riding.stance = RiderStance::Mounted;
+        self.riding.dive_id = None;
+        self.assign_stance(RiderStance::Mounted, None);
+        if !self.advance_kernel_to(SimulationTick::new(tick_value)) {
+            return false;
+        }
+        let weapon = self.kernel.equipped_weapon();
+        self.kernel.equip_weapon(weapon);
+        self.update_runtime_properties();
+        true
+    }
 
     /// Equip 0=Dustwalker, 1=Longspur, or 2=Rattler from the prototype loadout.
     #[func]
@@ -112,10 +295,17 @@ impl MountedWeaponController {
             );
             return false;
         };
-        if self.kernel.ammo(weapon_id).is_none() {
+        if self.kernel.ammo(weapon_id).is_none()
+            || self.riding.stance == RiderStance::SaddleDiveAirborne
+        {
             return false;
         }
+        let already_equipped =
+            self.kernel.equipped_weapon() == weapon_id && !self.kernel.is_holstered();
         let changed = self.kernel.equip_weapon(weapon_id);
+        if !changed && !already_equipped {
+            return false;
+        }
         self.update_runtime_properties();
         if changed {
             self.signals()
@@ -189,17 +379,22 @@ impl MountedWeaponController {
         }
 
         let riding = self.handling_state();
-        let prepared = match self.kernel.request_fire(tick, direction_quantized, riding) {
-            Ok(prepared) => prepared,
-            Err(reason) => {
-                self.current_tick = self
-                    .current_tick
-                    .max(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
-                self.record_local_rejection(tick, origin, direction, reason);
-                self.update_runtime_properties();
-                return false;
-            }
-        };
+        let seed = self.kernel.next_spread_seed();
+        let prepared =
+            match self
+                .kernel
+                .request_fire_detailed(tick, direction_quantized, riding, seed)
+            {
+                Ok(prepared) => prepared,
+                Err(rejection) => {
+                    self.current_tick = self
+                        .current_tick
+                        .max(i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
+                    self.record_detailed_rejection(tick, origin, direction, rejection);
+                    self.update_runtime_properties();
+                    return false;
+                }
+            };
 
         self.current_tick = self
             .current_tick
@@ -216,6 +411,7 @@ impl MountedWeaponController {
             spread_millidegrees: prepared.spread_millidegrees,
             sway_millidegrees: prepared.sway.magnitude_millidegrees(),
             gait: riding.gait,
+            stance: riding.stance,
             speed_mmps: riding.planar_speed_mmps,
             origin: origin_quantized,
             direction: prepared.resolved_direction,
@@ -239,6 +435,15 @@ impl MountedWeaponController {
         self.signals()
             .shot_fired()
             .emit(emitted_tick, i64::from(prepared.weapon_id.as_u8()));
+        self.signals().shot_accepted().emit(
+            emitted_tick,
+            i64::from(prepared.weapon_id.as_u8()),
+            i64::try_from(prepared.accepted_shot_index).unwrap_or(i64::MAX),
+            prepared
+                .dive_id
+                .and_then(|id| i64::try_from(id.get()).ok())
+                .unwrap_or(-1),
+        );
         self.emit_ammo_changed();
         true
     }
@@ -325,6 +530,29 @@ impl MountedWeaponController {
         self.apply_authority_result(&result);
         true
     }
+
+    /// Resolve the most recently accepted local shot as a miss.
+    #[func]
+    pub fn resolve_local_miss(&mut self) -> bool {
+        let Some(pending) = self.pending_local_shot.take() else {
+            return false;
+        };
+        let result = ShotResult {
+            tick: pending.tick,
+            shooter_peer_id: self.kernel.shooter_peer_id(),
+            weapon_id: pending.weapon_id,
+            outcome: ShotOutcome::Miss,
+            rejection_reason: None,
+            resolved_direction: Some(pending.direction),
+            target_id: None,
+            hit_zone: None,
+            damage: 0,
+            distance_mm: None,
+            eliminated: false,
+        };
+        self.apply_authority_result(&result);
+        true
+    }
 }
 
 #[godot_api]
@@ -339,12 +567,13 @@ impl INode3D for MountedWeaponController {
             tick_rate: i64::from(DEFAULT_TICK_RATE),
             lobby_seed: 0,
             shooter_peer_id: GString::from(DEFAULT_SHOOTER_ID),
-            mounted: true,
+            stance_id: i64::from(RiderStance::MOUNTED_ID),
+            stance_known: true,
+            dive_id: -1,
             gait: 0,
             speed_mps: 0.0,
             gait_top_speed_mps: 14.0,
             yaw_rate_degrees: 0.0,
-            airborne: false,
             stumbling: false,
             ads: false,
             sprint_gallop: false,
@@ -361,7 +590,7 @@ impl INode3D for MountedWeaponController {
             last_reject_reason: GString::new(),
             last_telemetry: VarDictionary::new(),
             kernel,
-            tick_accumulator: 0.0,
+            riding: RidingState::default(),
             pending_local_shot: None,
         }
     }
@@ -376,29 +605,9 @@ impl INode3D for MountedWeaponController {
         self.emit_ammo_changed();
     }
 
-    fn physics_process(&mut self, delta: f64) {
-        if !delta.is_finite() || delta <= 0.0 {
-            return;
-        }
-        self.tick_accumulator += delta * f64::from(self.kernel.tick_rate());
-        let steps = self.tick_accumulator.floor().clamp(0.0, 1_000.0) as u64;
-        if steps == 0 {
-            return;
-        }
-        self.tick_accumulator -= steps as f64;
-        let previous_ammo = self.kernel.equipped_ammo();
-        let riding = self.handling_state();
-        for _ in 0..steps {
-            self.current_tick = self.current_tick.saturating_add(1);
-            let tick = SimulationTick::new(self.current_tick.cast_unsigned());
-            if self.kernel.advance_to(tick, riding).is_err() {
-                break;
-            }
-        }
-        self.update_runtime_properties();
-        if self.kernel.equipped_ammo() != previous_ammo {
-            self.emit_ammo_changed();
-        }
+    fn physics_process(&mut self, _delta: f64) {
+        // The scene gameplay coordinator injects the one absolute simulation
+        // tick. A private delta accumulator would drift from movement/networking.
     }
 }
 
@@ -422,24 +631,36 @@ impl MountedWeaponController {
             CombatKernel::with_full_loadout(tick_rate, self.lobby_seed.cast_unsigned(), shooter)
                 .expect("validated tick rate");
         self.current_tick = 0;
-        self.tick_accumulator = 0.0;
+        self.riding = RidingState::default();
+        self.assign_stance(RiderStance::Mounted, None);
         self.last_reject_reason = GString::new();
         self.last_telemetry = VarDictionary::new();
         self.pending_local_shot = None;
     }
 
     fn handling_state(&self) -> RidingState {
-        RidingState {
-            mounted: self.mounted,
-            gait: gait_from_id(self.gait),
-            planar_speed_mmps: meters_per_second_to_mmps(self.speed_mps),
-            gait_top_speed_mmps: meters_per_second_to_mmps(self.gait_top_speed_mps).max(1),
-            yaw_rate_millidegrees_per_second: degrees_to_millidegrees(self.yaw_rate_degrees),
-            airborne: self.airborne,
-            stumbling: self.stumbling,
-            ads: self.ads,
-            sprint_gallop: self.sprint_gallop,
+        self.riding
+    }
+
+    fn assign_stance(&mut self, stance: RiderStance, dive_id: Option<DiveId>) {
+        self.stance_id = i64::from(stance.as_u8());
+        self.stance_known = stance.is_known();
+        self.dive_id = dive_id
+            .and_then(|id| i64::try_from(id.get()).ok())
+            .unwrap_or(-1);
+    }
+
+    fn advance_kernel_to(&mut self, tick: SimulationTick) -> bool {
+        let previous_ammo = self.kernel.equipped_ammo();
+        if self.kernel.advance_to(tick, self.riding).is_err() {
+            return false;
         }
+        self.current_tick = i64::try_from(tick.as_u64()).unwrap_or(i64::MAX);
+        self.update_runtime_properties();
+        if self.kernel.equipped_ammo() != previous_ammo {
+            self.emit_ammo_changed();
+        }
+        true
     }
 
     fn record_local_rejection(
@@ -448,6 +669,30 @@ impl MountedWeaponController {
         origin: Vector3,
         direction: Vector3,
         reason: ShotRejectionReason,
+    ) {
+        self.record_rejection(tick, origin, direction, reason, reason.as_str());
+    }
+
+    fn record_detailed_rejection(
+        &mut self,
+        tick: SimulationTick,
+        origin: Vector3,
+        direction: Vector3,
+        rejection: FireRejection,
+    ) {
+        let exact = rejection
+            .dive_reason
+            .map_or(rejection.wire_reason.as_str(), dive_rejection_name);
+        self.record_rejection(tick, origin, direction, rejection.wire_reason, exact);
+    }
+
+    fn record_rejection(
+        &mut self,
+        tick: SimulationTick,
+        origin: Vector3,
+        direction: Vector3,
+        wire_reason: ShotRejectionReason,
+        exact_reason: &'static str,
     ) {
         let riding = self.handling_state();
         let weapon_id = self.kernel.equipped_weapon();
@@ -474,11 +719,12 @@ impl MountedWeaponController {
             spread_millidegrees: effective_spread_millidegrees(*weapon_id.stats(), riding),
             sway_millidegrees: sway.magnitude_millidegrees(),
             gait: riding.gait,
+            stance: riding.stance,
             speed_mmps: riding.planar_speed_mmps,
             origin: origin_quantized,
             direction: direction_quantized,
             result: ShotOutcome::Reject,
-            reject_reason: Some(reason),
+            reject_reason: Some(wire_reason),
             target_id: None,
             hit_zone: None,
             damage: 0,
@@ -486,9 +732,16 @@ impl MountedWeaponController {
         };
         self.last_shot_origin = finite_vector_or_zero(origin);
         self.last_shot_direction = finite_vector_or_zero(direction);
-        self.last_reject_reason = GString::from(reason.as_str());
+        self.last_reject_reason = GString::from(exact_reason);
         self.last_telemetry = telemetry_dictionary(&telemetry);
+        self.last_telemetry
+            .set("internal_reject_reason", exact_reason);
         self.pending_local_shot = None;
+        let signal_reason = GString::from(exact_reason);
+        self.signals().fire_rejected().emit(
+            i64::try_from(tick.as_u64()).unwrap_or(i64::MAX),
+            &signal_reason,
+        );
     }
 
     fn update_runtime_properties(&mut self) {
@@ -552,6 +805,18 @@ impl MountedWeaponController {
                 .distance_mm
                 .map_or(-1.0, |distance| f64::from(distance) / 1_000.0),
         );
+        let outcome = GString::from(result.outcome.as_str());
+        let hit_zone = GString::from(result.hit_zone.map_or("", HitZone::as_str));
+        let resolved_direction = result
+            .resolved_direction
+            .map_or(Vector3::ZERO, to_godot_direction);
+        self.signals().shot_resolved().emit(
+            i64::try_from(result.tick.as_u64()).unwrap_or(i64::MAX),
+            &outcome,
+            &hit_zone,
+            i64::from(result.damage),
+            resolved_direction,
+        );
     }
 }
 
@@ -576,6 +841,16 @@ fn meters_per_second_to_mmps(value: f64) -> u32 {
         0
     } else {
         (value * 1_000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32
+    }
+}
+
+fn meters_per_second_to_signed_mmps(value: f64) -> i32 {
+    if !value.is_finite() {
+        0
+    } else {
+        (value * 1_000.0)
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
     }
 }
 
@@ -609,10 +884,29 @@ fn reload_error_name(error: ReloadStartError) -> &'static str {
     match error {
         ReloadStartError::TickReplay => "tick_replay",
         ReloadStartError::Holstered => "holstered",
+        ReloadStartError::Airborne => "airborne",
         ReloadStartError::Dismounted => "dismounted",
         ReloadStartError::AlreadyReloading => "reloading",
         ReloadStartError::MagazineFull => "magazine_full",
         ReloadStartError::NoReserve => "no_reserve",
+    }
+}
+
+fn dive_context_error_name(error: DiveContextError) -> &'static str {
+    match error {
+        DiveContextError::TickReplay => "tick_replay",
+        DiveContextError::WeaponMismatch => "weapon_mismatch",
+        DiveContextError::DiveAlreadyOpen => "dive_already_open",
+        DiveContextError::ContextMismatch => "dive_context_mismatch",
+    }
+}
+
+fn dive_rejection_name(reason: DiveFireRejection) -> &'static str {
+    match reason {
+        DiveFireRejection::ContextMismatch => "dive_context_mismatch",
+        DiveFireRejection::WeaponMismatch => "dive_weapon_mismatch",
+        DiveFireRejection::Closed => "dive_closed",
+        DiveFireRejection::ShotCap => "dive_shot_cap",
     }
 }
 
@@ -711,6 +1005,8 @@ fn telemetry_dictionary(telemetry: &ShotTelemetry) -> VarDictionary {
     );
     payload.set("sway_deg", f64::from(telemetry.sway_millidegrees) / 1_000.0);
     payload.set("gait", telemetry.gait.as_str());
+    payload.set("stance_id", i64::from(telemetry.stance.as_u8()));
+    payload.set("stance", telemetry.stance.as_str());
     payload.set("speed_mps", f64::from(telemetry.speed_mmps) / 1_000.0);
     payload.set(
         "origin",

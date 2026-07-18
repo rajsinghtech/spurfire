@@ -9,7 +9,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::PlayerId;
+use crate::{PlayerId, RiderStance};
 
 mod kernel;
 
@@ -709,6 +709,8 @@ pub struct ShotTelemetry {
     pub sway_millidegrees: u32,
     /// Rewound gait.
     pub gait: CombatGait,
+    /// Rewound logical stance.
+    pub stance: RiderStance,
     /// Rewound planar speed in millimetres per second.
     pub speed_mmps: u32,
     /// Submitted origin.
@@ -884,6 +886,7 @@ mod tests {
             spread_millidegrees: 450,
             sway_millidegrees: 0,
             gait: CombatGait::Idle,
+            stance: RiderStance::Mounted,
             speed_mmps: 0,
             origin: command.origin,
             direction: command.direction,
