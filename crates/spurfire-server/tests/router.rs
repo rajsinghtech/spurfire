@@ -442,6 +442,18 @@ async fn get(app: &Router, lobby_id: &str) -> (StatusCode, Value) {
     .await
 }
 
+async fn get_authorized(app: &Router, lobby_id: &str, capability: &str) -> (StatusCode, Value) {
+    let authorization = format!("Spurfire-Capability {capability}");
+    json_request(
+        app,
+        Method::GET,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("authorization", authorization.as_str())],
+    )
+    .await
+}
+
 async fn make_ready(app: &Router, lobby_id: &str, players: &[(&str, u32)]) {
     let peer_count = u32::try_from(players.len() - 1).unwrap();
     for (player, _) in players {
@@ -638,6 +650,18 @@ async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_re
     let lobby_id = created["lobby_id"].as_str().unwrap();
     let capability = created["creator_capability"].as_str().unwrap();
     assert_eq!(URL_SAFE_NO_PAD.decode(capability).unwrap().len(), 32);
+    let (_, anonymous_lobby) = get(&app, lobby_id).await;
+    assert_eq!(anonymous_lobby["provisioning_mode"], "dry_run");
+    assert_eq!(anonymous_lobby["roster_count"], 0);
+    for omitted in [
+        "display_name",
+        "state_reason",
+        "roster",
+        "map_seed",
+        "authority",
+    ] {
+        assert!(anonymous_lobby.get(omitted).is_none(), "exposed {omitted}");
+    }
 
     let unauthorized_response = app
         .clone()
@@ -1088,9 +1112,11 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock.clone(), blocked);
     let (_, created) = create(&app, "create-blocked", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
     assert_eq!(capabilities["modes"]["shared_tailnet"], "blocked_scopes");
-    let (_, lobby) = get(&app, lobby_id).await;
+    assert_eq!(get(&app, lobby_id).await.0, StatusCode::NOT_FOUND);
+    let (_, lobby) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(lobby["state"], "FAILED");
     assert_eq!(lobby["state_reason"], "provisioning_blocked_auth_keys_403");
 
@@ -1098,12 +1124,16 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock, failing.clone());
     let (_, created) = create(&app, "create-mint-fail", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (status, error) = join(&app, lobby_id, PLAYER_1, "mint-fail").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error["state_reason"], "provisioning_blocked_auth_keys_403");
     assert!(!error.to_string().contains("synthetic-auth-key"));
     assert_eq!(failing.mint_count(), 1);
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FAILED");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FAILED"
+    );
 }
 
 #[tokio::test]
@@ -1115,6 +1145,7 @@ async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
     let (status, created) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::CREATED);
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     let (status, replay) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["lobby_id"], created["lobby_id"]);
@@ -1123,10 +1154,13 @@ async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
     let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
     assert_eq!(capabilities["modes"]["tailnet_per_lobby"], "available");
     assert_eq!(capabilities["can_manage_organization_tailnets"], true);
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FORMING"
+    );
 
     provider.lose_child_secrets();
-    let (_, failed) = get(&app, lobby_id).await;
+    let (_, failed) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(failed["state"], "FAILED");
     assert_eq!(
         failed["state_reason"],
@@ -1143,6 +1177,7 @@ async fn creator_authorization_and_request_dry_run_cannot_mutate_live_lobby() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-authz", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
 
     let (status, error) = json_request(
         &app,
@@ -1169,7 +1204,10 @@ async fn creator_authorization_and_request_dry_run_cannot_mutate_live_lobby() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error["code"], "dry_run_mode_mismatch");
-    assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "FORMING"
+    );
     assert_eq!(provider.cleanup_count(), 0);
 
     let (status, deleted) = json_request(
@@ -1231,6 +1269,7 @@ async fn leave_revokes_key_and_removes_roster_entry() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-leave", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     join(&app, lobby_id, PLAYER_2, "leave-join").await;
 
     let (status, left) = json_request(
@@ -1243,7 +1282,10 @@ async fn leave_revokes_key_and_removes_roster_entry() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(left["left"], true);
-    assert_eq!(get(&app, lobby_id).await.1["roster"], json!([]));
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["roster"],
+        json!([])
+    );
     let requests = provider.cleanup_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].credentials.len(), 1);
@@ -1257,6 +1299,7 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
     let (app, state, _) = dry_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-time", "dry_run", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     make_ready(&app, lobby_id, &[(PLAYER_1, 10), (PLAYER_2, 20)]).await;
     assert_eq!(get(&app, lobby_id).await.1["state"], "READY");
     clock.advance(59_999);
@@ -1291,7 +1334,7 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
     clock.advance(119_999);
     assert_eq!(get(&app, lobby_id).await.1["state"], "STARTING");
     clock.advance(1);
-    let (_, failed) = get(&app, lobby_id).await;
+    let (_, failed) = get_authorized(&app, lobby_id, capability).await;
     assert_eq!(failed["state"], "FAILED");
     assert_eq!(failed["state_reason"], "start_timeout");
     assert!(!state.cleanup_expired_now().await.is_empty() || failed["state"] == "FAILED");
@@ -1304,9 +1347,13 @@ async fn idle_ttl_expires_and_mixed_formula_or_major_wire_cannot_start() {
     let (app, state, _) = live_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-expiry", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     clock.advance(10 * 60 * 1_000);
     assert!(!state.cleanup_expired_now().await.is_empty());
-    assert_eq!(get(&app, lobby_id).await.1["state"], "EXPIRED");
+    assert_eq!(
+        get_authorized(&app, lobby_id, capability).await.1["state"],
+        "EXPIRED"
+    );
 
     let clock = Arc::new(ManualClock::new(UnixMillis::new(300_000)));
     let provider = Arc::new(RecordingProvider::available());

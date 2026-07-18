@@ -459,6 +459,40 @@ async fn inspect_shell() -> impl IntoResponse {
 }
 
 #[derive(Serialize)]
+struct AnonymousDryLobbyResponse {
+    lobby_id: LobbyId,
+    state: LobbyState,
+    max_players: u8,
+    ttl: LobbyTtl,
+    wire_version: spurfire_protocol::WireVersion,
+    provisioning_mode: ProvisioningMode,
+    created_at: UnixMillis,
+    cleanup_pending: bool,
+    roster_count: u32,
+    dry_run: bool,
+    planned_actions: Vec<spurfire_protocol::PlannedAction>,
+}
+
+impl From<LobbyResponse> for AnonymousDryLobbyResponse {
+    fn from(response: LobbyResponse) -> Self {
+        Self {
+            lobby_id: response.lobby.lobby_id,
+            state: response.lobby.state,
+            max_players: response.lobby.max_players,
+            ttl: response.lobby.ttl,
+            wire_version: response.lobby.wire_version,
+            provisioning_mode: ProvisioningMode::DryRun,
+            created_at: response.lobby.created_at,
+            cleanup_pending: response.lobby.cleanup_pending,
+            roster_count: u32::try_from(response.lobby.roster.len())
+                .expect("validated roster is bounded by MAX_PLAYERS"),
+            dry_run: true,
+            planned_actions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
     provisioning_ready: bool,
@@ -706,17 +740,45 @@ async fn get_lobby(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<LobbyResponse>, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
+) -> Response {
+    let protected = !state.config.force_dry_run || headers.contains_key(AUTHORIZATION_HEADER);
+    let result = get_lobby_inner(&state, &lobby_id, &headers, protected).await;
+    match result {
+        Ok(response) if protected => sensitive_json_response(StatusCode::OK, &response),
+        Ok(response) => Json(AnonymousDryLobbyResponse::from(response)).into_response(),
+        Err(error) if protected => sensitive_response_headers(error.into_response()),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_lobby_inner(
+    state: &AppState,
+    lobby_id: &str,
+    headers: &HeaderMap,
+    protected: bool,
+) -> Result<LobbyResponse, ApiError> {
+    let header_dry_run = parse_dry_run_header(headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = if protected {
+        LobbyId::parse(lobby_id).map_err(|_| lobby_not_found(false))?
+    } else {
+        parse_lobby_id(lobby_id, dry_hint)?
+    };
+    if protected {
+        let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+        state
+            .store
+            .get_authorized_network_view(lobby_id, verifier, state.clock.now())
+            .await
+            .ok_or_else(|| lobby_not_found(false))?;
+    }
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
-    let stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
-    Ok(Json(LobbyResponse {
+    let stored = load_maintained_lobby(state, lobby_id, now, dry_hint).await?;
+    Ok(LobbyResponse {
         lobby: stored.snapshot(),
         metadata: metadata_for(stored.dry_run || dry_hint),
-    }))
+    })
 }
 
 async fn get_lobby_network(
