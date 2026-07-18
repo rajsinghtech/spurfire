@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
