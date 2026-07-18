@@ -7,9 +7,17 @@ metadata:
 data:
   SPURFIRE_BIND_ADDR: "0.0.0.0:8080"
   SPURFIRE_DRY_RUN: {{ ternary "1" "0" .Values.config.dryRun | quote }}
+  SPURFIRE_REAL_MUTATIONS_ENABLED: {{ ternary "1" "0" .Values.config.realMutationsEnabled | quote }}
+  SPURFIRE_MAX_ACTIVE_REAL_LOBBIES: {{ .Values.config.maxActiveRealLobbies | quote }}
   SPURFIRE_DRY_RUN_TTL_SECS: {{ .Values.config.dryRunTtlSeconds | quote }}
   SPURFIRE_MAX_PLAYERS: {{ .Values.config.maxPlayers | quote }}
   SPURFIRE_PROVISIONING_MODE: {{ .Values.config.provisioningMode | quote }}
   SPURFIRE_SHARED_TAILNET: {{ .Values.config.sharedTailnet | quote }}
   SPURFIRE_STATE_PATH: {{ .Values.config.statePath | quote }}
+  SPURFIRE_NETWORK_DEVICE_INVENTORY_REFRESH_SECS: {{ .Values.networkSummary.deviceInventory.refreshSeconds | quote }}
+  SPURFIRE_NETWORK_DEVICE_INVENTORY_FRESH_FOR_SECS: {{ .Values.networkSummary.deviceInventory.freshForSeconds | quote }}
+  SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_REFRESH_SECS: {{ .Values.networkSummary.organizationPresence.refreshSeconds | quote }}
+  SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_FRESH_FOR_SECS: {{ .Values.networkSummary.organizationPresence.freshForSeconds | quote }}
+  SPURFIRE_NETWORK_PARTICIPANT_REPORT_FRESH_FOR_SECS: {{ .Values.networkSummary.participantReports.freshForSeconds | quote }}
+  SPURFIRE_NETWORK_PARTICIPANT_REPORT_RETENTION_SECS: {{ .Values.networkSummary.participantReports.retentionSeconds | quote }}
   TS_API_BASE: {{ .Values.tailscale.apiBase | quote }}
