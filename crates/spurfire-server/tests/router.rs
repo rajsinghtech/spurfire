@@ -575,7 +575,10 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
         Method::GET,
         &format!("/v1/lobbies/{lobby_id}/authority"),
         None,
-        &[],
+        &[(
+            "authorization",
+            &format!("Spurfire-Capability {network_capability}"),
+        )],
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -796,7 +799,7 @@ async fn legacy_measurements_supply_fresh_routes_but_never_application_rtt() {
     make_ready(&app, lobby_id, &[(PLAYER_1, 11), (PLAYER_2, 31)]).await;
 
     let (_, fresh) = network(&app, lobby_id, capability).await;
-    assert_eq!(fresh["counts"]["fresh_reporter_count"]["value"], 2);
+    assert_eq!(fresh["counts"]["fresh_reporter_count"]["value"], 0);
     assert_eq!(
         fresh["counts"]["fresh_directional_observation_count"]["value"],
         2
@@ -1003,7 +1006,7 @@ async fn identity_or_vault_cleanup_failure_retains_real_lease() {
 
     let vault_provider = Arc::new(RecordingProvider::available());
     vault_provider.fail_secret_erasure();
-    let (vault_app, _, vault_store) = live_app(clock, vault_provider);
+    let (vault_app, _, vault_store) = live_app(clock.clone(), vault_provider);
     let (_, created) = create(&vault_app, "create-vault-failure", "tailnet_per_lobby", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
     let capability = created["creator_capability"].as_str().unwrap();
@@ -1015,8 +1018,28 @@ async fn identity_or_vault_cleanup_failure_retains_real_lease() {
         &[("x-spurfire-player-id", PLAYER_1)],
     )
     .await;
+    // Delete acknowledgement retains the secret and enters exact-absence
+    // verification. Two retries obtain separated absence observations; the
+    // injected vault-erasure failure must still retain the lease.
+    json_request(
+        &vault_app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("x-spurfire-player-id", PLAYER_1)],
+    )
+    .await;
+    clock.advance(Duration::from_secs(5));
+    json_request(
+        &vault_app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("x-spurfire-player-id", PLAYER_1)],
+    )
+    .await;
     let (_, view) = network(&vault_app, lobby_id, capability).await;
-    assert_eq!(view["backing"]["network_lifecycle"], "CLEANUP_PENDING");
+    assert_eq!(view["backing"]["network_lifecycle"], "VERIFYING_ABSENCE");
     assert!(vault_store.real_lobby_lease_held().await);
 }
 
@@ -1332,7 +1355,10 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
         Method::GET,
         &format!("/v1/lobbies/{lobby_id}/authority"),
         None,
-        &[],
+        &[(
+            "authorization",
+            &format!("Spurfire-Capability {capability}"),
+        )],
     )
     .await;
     assert!(authority["input_hash"].is_string());
@@ -1423,6 +1449,7 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
     let (app, _, _) = dry_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-migration", "dry_run", 3).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
+    let capability = created["creator_capability"].as_str().unwrap();
     make_ready(
         &app,
         lobby_id,
@@ -1434,7 +1461,10 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
         Method::GET,
         &format!("/v1/lobbies/{lobby_id}/authority"),
         None,
-        &[],
+        &[(
+            "authorization",
+            &format!("Spurfire-Capability {capability}"),
+        )],
     )
     .await;
     assert_eq!(authority["winner_player_id"], PLAYER_1);
@@ -1465,7 +1495,10 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
         Method::GET,
         &format!("/v1/lobbies/{lobby_id}/authority"),
         None,
-        &[],
+        &[(
+            "authorization",
+            &format!("Spurfire-Capability {capability}"),
+        )],
     )
     .await;
     assert_eq!(migrated["winner_player_id"], PLAYER_2);
