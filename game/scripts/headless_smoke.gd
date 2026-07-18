@@ -608,7 +608,7 @@ func _exercise_bridge_caps(
 	await _reset_course_with_input()
 	await _wait_until_grounded(horse, 90)
 	Input.action_press(&"jump")
-	await get_tree().physics_frame
+	await _wait_physics_frames(2)
 	Input.action_release(&"jump")
 	for _frame in 30:
 		if not horse.is_on_floor() and int(rider.get("stance_id")) == STANCE_MOUNTED_AIRBORNE:
@@ -633,7 +633,9 @@ func _reset_course_with_input() -> void:
 
 func _press_action_one_tick(action: StringName) -> void:
 	Input.action_press(action)
-	await get_tree().physics_frame
+	# `physics_frame` is emitted before node physics callbacks. Waiting for the
+	# next two signals guarantees exactly one coordinator tick saw the pulse.
+	await _wait_physics_frames(2)
 	Input.action_release(action)
 
 func _pulse_action(action: StringName) -> void:
