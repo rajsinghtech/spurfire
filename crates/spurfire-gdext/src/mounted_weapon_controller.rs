@@ -428,22 +428,23 @@ impl MountedWeaponController {
             );
             return false;
         };
-        if !rider.bind().can_accept_authority_shot(
+        let authority_snapshot_matches = rider.bind().can_accept_authority_shot(
             tick,
             riding.stance,
             riding.dive_id,
             self.kernel.equipped_weapon(),
-        ) || self
+        );
+        let duplicate_tick = self
             .shot_ledger
             .accepted(self.kernel.shooter_peer_id(), tick)
-            .is_some()
-        {
-            self.record_local_rejection(
-                tick,
-                origin,
-                direction,
-                ShotRejectionReason::RiderSnapshot,
-            );
+            .is_some();
+        if !authority_snapshot_matches || duplicate_tick {
+            let reason = if !authority_snapshot_matches {
+                authority_snapshot_rejection(riding.stance)
+            } else {
+                ShotRejectionReason::RiderSnapshot
+            };
+            self.record_local_rejection(tick, origin, direction, reason);
             return false;
         }
         let seed = self.kernel.next_spread_seed();
@@ -1107,6 +1108,14 @@ fn to_godot_direction(value: QuantizedDirection) -> Vector3 {
     )
 }
 
+const fn authority_snapshot_rejection(stance: RiderStance) -> ShotRejectionReason {
+    if matches!(stance, RiderStance::MountedAirborne) {
+        ShotRejectionReason::Airborne
+    } else {
+        ShotRejectionReason::RiderSnapshot
+    }
+}
+
 fn reload_error_name(error: ReloadStartError) -> &'static str {
     match error {
         ReloadStartError::TickReplay => "tick_replay",
@@ -1301,6 +1310,22 @@ mod tests {
         assert_eq!(degrees_to_millidegrees(-60.5), Some(-60_500));
         assert_eq!(degrees_to_millidegrees(f64::INFINITY), None);
         assert_eq!(degrees_to_millidegrees(3_601.0), None);
+    }
+
+    #[test]
+    fn ordinary_jump_snapshot_rejection_stays_airborne() {
+        assert_eq!(
+            authority_snapshot_rejection(RiderStance::MountedAirborne),
+            ShotRejectionReason::Airborne
+        );
+        assert_eq!(
+            authority_snapshot_rejection(RiderStance::SaddleDiveAirborne),
+            ShotRejectionReason::RiderSnapshot
+        );
+        assert_eq!(
+            authority_snapshot_rejection(RiderStance::LandingProne),
+            ShotRejectionReason::RiderSnapshot
+        );
     }
 
     #[test]

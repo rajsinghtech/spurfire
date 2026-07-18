@@ -492,8 +492,14 @@ func _exercise_landing_boundaries(
 		await _wait_until_grounded(horse, 90)
 		horse.global_position = Vector3(float(fixture.x), 1.2, 20.0)
 		horse.rotation = Vector3.ZERO
-		horse.velocity = Vector3(0, 0, -9.0)
+		horse.velocity = Vector3.ZERO
+		# A direct fixture teleport invalidates CharacterBody3D's cached floor
+		# state. Process it once, then wait for genuine post-move floor contact.
 		await get_tree().physics_frame
+		await _wait_until_grounded(horse, 30)
+		if not horse.is_on_floor():
+			failures.append("landing fixture %.0f did not settle on its launch pad" % float(fixture.x))
+			continue
 		if bool(fixture.bad):
 			var damage_tick := int(rider.get("current_tick"))
 			if not bool(rider.call("apply_external_damage", damage_tick, 9001, 85)):

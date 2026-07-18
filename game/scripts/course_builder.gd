@@ -7,7 +7,7 @@ const COLOR_ORANGE := Color(0.95, 0.45, 0.08)
 
 func _ready() -> void:
 	# Broad ground and 8 x 60 m timing straight.
-	_box("BroadGround", Vector3(120, 0.5, 140), Vector3(0, -0.25, 25), COLOR_GROUND)
+	_box("BroadGround", Vector3(160, 0.5, 140), Vector3(0, -0.25, 25), COLOR_GROUND)
 	_box("FlatStraight", Vector3(8, 0.04, 60), Vector3(0, 0.02, -10), COLOR_LANE, false)
 	_gate("StartGate", Vector3(0, 0, 20))
 	_gate("FinishGate", Vector3(0, 0, -40))
@@ -31,8 +31,9 @@ func _ready() -> void:
 	_ramp("Face45", Vector3(7, 0.6, 10), Vector3(48, 3.55, 12), -45.0, Color(0.42, 0.25, 0.22))
 	# M2 authored landing fixtures pin the strict >30° bad-landing boundary in
 	# real CharacterBody3D collision smoke, not only protocol normal vectors.
-	_ramp("Landing30", Vector3(7, 0.5, 10), Vector3(58, 2.72, 12), -30.0, Color(0.34, 0.42, 0.34))
-	_ramp("Landing31", Vector3(7, 0.5, 10), Vector3(68, 2.81, 12), -31.0, Color(0.48, 0.28, 0.22))
+	# Their rising faces point into the fixture's canonical -Z dive path.
+	_ramp("Landing30", Vector3(7, 0.5, 10), Vector3(58, 2.72, 12), 30.0, Color(0.34, 0.42, 0.34))
+	_ramp("Landing31", Vector3(7, 0.5, 10), Vector3(68, 2.81, 12), 31.0, Color(0.48, 0.28, 0.22))
 	_ramp("Descent25", Vector3(7, 0.5, 14), Vector3(38, 3.15, -8), 25.0, Color(0.38, 0.34, 0.34))
 
 	# Jump lane: three 1 m fences, plus an elevated ledge/drop.
