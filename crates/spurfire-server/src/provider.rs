@@ -1658,7 +1658,7 @@ mod tests {
             .cleanup_lobby(CleanupLobbyRequest {
                 lobby_id,
                 network_generation: 1,
-                identity,
+                identity: identity.clone(),
                 mode: ProvisioningMode::TailnetPerLobby,
                 tailnet: prepared.tailnet,
                 tag: "tag:spurfire-lobby-test".to_owned(),
@@ -1672,8 +1672,19 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!outcome.cleanup_pending);
+        assert!(outcome.cleanup_pending);
+        assert!(outcome.delete_acknowledged);
+        assert!(!outcome.child_secret_erased);
         assert_eq!(outcome.revoked_credential_ids, ["key-receipt"]);
+        assert_eq!(provider.child_secret_count(), 1);
+        provider
+            .erase_child_secret(TailnetPresenceRequest {
+                lobby_id,
+                network_generation: 1,
+                identity: identity.unwrap(),
+            })
+            .await
+            .unwrap();
         assert_eq!(provider.child_secret_count(), 0);
 
         organization_token.assert_async().await;
