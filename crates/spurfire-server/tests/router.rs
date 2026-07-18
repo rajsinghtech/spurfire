@@ -1637,6 +1637,39 @@ fn test_ids_remain_distinct() {
 }
 
 #[tokio::test]
+async fn legacy_assertions_never_reach_real_provider_mutations() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(8_000_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let config = Config {
+        real_mutations_enabled: true,
+        allow_legacy_client_assertions: true,
+        provisioning_mode: ProvisioningMode::TailnetPerLobby,
+        ..Config::default()
+    };
+    let state =
+        AppState::new(config, Arc::new(InMemoryStore::new()), provider.clone()).with_clock(clock);
+    let app = build_router(state);
+    let (status, body) = json_request(
+        &app,
+        Method::POST,
+        "/v1/lobbies",
+        Some(json!({
+            "display_name": "Forbidden Legacy Real",
+            "max_players": 2,
+            "provisioning_mode": "tailnet_per_lobby"
+        })),
+        &[
+            ("idempotency-key", "forbidden-legacy-real"),
+            ("x-spurfire-player-id", PLAYER_1),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["code"], "legacy_real_mutations_forbidden");
+    assert_eq!(provider.mutations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let clock = Arc::new(ManualClock::new(UnixMillis::new(9_000_000)));
     let provider = Arc::new(RecordingProvider::available());
@@ -1785,6 +1818,84 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     assert_eq!(replay_join_status, StatusCode::OK);
     assert!(replay_join.get("participant_capability").is_none());
     assert!(replay_join["join_credential"].get("auth_key").is_none());
+
+    let (_, retry_invitation) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/invitations"),
+        Some(json!({})),
+        &[("authorization", creator_authorization.as_str())],
+    )
+    .await;
+    let retry_token = retry_invitation["invitation"]["token"].as_str().unwrap();
+    let retry_authorization = format!("Spurfire-Capability {retry_token}");
+    let invalid_join = json!({
+        "player_id":PLAYER_3,
+        "display_name":"Retry Rider",
+        "client_wire_version":"1.0",
+        "authority_formula_version":""
+    });
+    assert_eq!(
+        json_request(
+            &app,
+            Method::POST,
+            &format!("/v1/lobbies/{lobby_id}/join"),
+            Some(invalid_join),
+            &[
+                ("idempotency-key", "retry-invalid"),
+                ("authorization", retry_authorization.as_str()),
+            ],
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let valid_join = json!({
+        "player_id":PLAYER_3,
+        "display_name":"Retry Rider",
+        "client_wire_version":"1.0",
+        "authority_formula_version":"election_v1"
+    });
+    assert_eq!(
+        json_request(
+            &app,
+            Method::POST,
+            &format!("/v1/lobbies/{lobby_id}/join"),
+            Some(valid_join),
+            &[
+                ("idempotency-key", "retry-valid"),
+                ("authorization", retry_authorization.as_str()),
+            ],
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+
+    assert_eq!(
+        json_request(
+            &app,
+            Method::POST,
+            &format!("/v1/lobbies/{lobby_id}/leave"),
+            Some(json!({"player_id": PLAYER_2})),
+            &[("authorization", participant_authorization.as_str())],
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &app,
+            Method::GET,
+            &format!("/v1/lobbies/{lobby_id}"),
+            None,
+            &[("authorization", participant_authorization.as_str())],
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
 
     let (wrong_scope_status, wrong_scope) = json_request(
         &app,

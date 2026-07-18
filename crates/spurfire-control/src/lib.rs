@@ -932,6 +932,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_redirect_never_replays_credentials() {
+        let mut origin = Server::new_async().await;
+        let mut attacker = Server::new_async().await;
+        let sink = attacker
+            .mock("POST", "/stolen")
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+        let redirect = origin
+            .mock("POST", "/oauth/token")
+            .with_status(307)
+            .with_header("location", &format!("{}/stolen", attacker.url()))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(origin.url(), "client-canary", "secret-canary");
+        assert!(matches!(
+            client.probe_oauth_token().await,
+            Err(ControlError::Http { status: 307 })
+        ));
+        redirect.assert_async().await;
+        sink.assert_async().await;
+    }
+
+    #[test]
+    fn configured_provider_origin_is_exact_https_api_v2() {
+        assert!(validate_configured_api_base("https://api.tailscale.com/api/v2").is_ok());
+        for rejected in [
+            "http://api.tailscale.com/api/v2",
+            "https://user@api.tailscale.com/api/v2",
+            "https://api.tailscale.com/api/v2?redirect=1",
+            "https://api.tailscale.com/other",
+        ] {
+            assert!(matches!(
+                validate_configured_api_base(rejected),
+                Err(ControlError::InvalidProviderPath)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn caches_unexpired_token() {
         let mut server = Server::new_async().await;
         let token = token_mock(&mut server, 3600, 1).await;

@@ -192,6 +192,46 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_release_tag_binding_allows_only_metadata_child_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            subprocess.run(["git", "-C", repo, "config", "user.email", "qa@example.invalid"], check=True)
+            subprocess.run(["git", "-C", repo, "config", "user.name", "Release QA"], check=True)
+            (repo / "source.txt").write_text("qualified\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo, "add", "source.txt"], check=True)
+            subprocess.run(["git", "-C", repo, "commit", "-qm", "qualified source"], check=True)
+            source_sha = subprocess.check_output(
+                ["git", "-C", repo, "rev-parse", "HEAD"], text=True
+            ).strip()
+            evidence_dir = repo / "docs" / "release-evidence"
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / "0.2.0.json").write_text(
+                json.dumps({"source_sha": source_sha}), encoding="utf-8"
+            )
+            (repo / "docs" / "release-notes-0.2.0.md").write_text(
+                "# Evidence\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "-C", repo, "add", "docs"], check=True)
+            subprocess.run(["git", "-C", repo, "commit", "-qm", "release evidence"], check=True)
+            subprocess.run(
+                [ROOT / "scripts/check-release-tag-binding.sh", "0.2.0", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (repo / "source.txt").write_text("changed after qualification\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo, "commit", "-qam", "forbidden code change"], check=True)
+            failed = subprocess.run(
+                [ROOT / "scripts/check-release-tag-binding.sh", "0.2.0", "HEAD"],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+
     def test_smoke_marker_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "godot.log"
@@ -222,6 +262,11 @@ class CommandTests(unittest.TestCase):
         self.assertIn("environment: alpha-release", publisher)
         self.assertIn("refusing to overwrite it", publisher)
         self.assertIn("--expected-sha256", publisher)
+        self.assertNotIn(".head_branch == $tag", publisher)
+        self.assertNotIn('--source-sha "$GITHUB_SHA"', preflight)
+        self.assertNotIn('--source-sha "$GITHUB_SHA"', packages)
+        self.assertIn("check-release-tag-binding.sh", preflight)
+        self.assertIn("check-release-tag-binding.sh", publisher)
         self.assertIn("github.ref == 'refs/heads/main'", packages)
 
     def test_candidate_metadata_is_nonpublishing(self):
