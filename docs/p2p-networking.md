@@ -44,8 +44,8 @@ On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRA
 - Never pass organization or child OAuth credentials to Godot.
 - Never print auth keys. The live script writes them only to its private temporary directory and deletes that directory on every exit path.
 - Datagram size is checked before JSON parsing and before send.
-- Application identity is the validated lobby/player ID in the envelope, not an untrusted hostname.
-- Sequence rejection limits replay within a peer session; authority epochs prevent a disconnected old host from resuming authority.
+- The current prototype checks the envelope player against the exact roster and the datagram source against the capability-projected tailnet IP/port. That is not cryptographic application identity; an admitted/compromised member remains able to forge another rider until signed generation/session/roster binding lands.
+- Sequence rejection limits replay within one in-memory peer session only. Real product readiness is forced closed while cryptographic binding and coherent authority simulation remain incomplete.
 
 ## Remaining production work
 
@@ -64,7 +64,7 @@ Design for the first four items is settled in `docs/decisions.md` D6/D7 and
   capability-protected, memory-only endpoint projection bound to the exact roster/network
   generation/revision. Replace the remaining GDScript HTTP secret boundary with native
   zeroizing handoff and extend the projection with signed session-generation/public-key binding.
-- Add authenticated session-level packet tags if tailnet membership alone is not sufficient for the final threat model.
+- Add authenticated session-level signatures bound to lobby, network generation, session generation, roster hash, sender public key, and endpoint; this is mandatory before real readiness can open.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
 - Exercise forced DERP, route transitions, roaming, packet loss, and 16-peer churn.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.

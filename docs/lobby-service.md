@@ -39,14 +39,14 @@ Secure/default surface:
 - `X-Spurfire-Player-Id: <UUIDv4>` on create binds the resulting creator subject; it is an identifier, never authentication.
 - `X-Spurfire-Dry-Run: 1` remains a development simulation hint and cannot alter a real lobby.
 
-`SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS=1` restores the older asserted-player development surface only when real admission is off. The chart fixes it off. Hosted real admission must never rely on that compatibility mode.
+`SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS=1` restores the older asserted-player development surface for dry-run only. Configuration rejects combining it with any real provider mutation, and the handler independently fails closed before provider work. The chart fixes it off.
 
 ## Current routes (migration surface)
 
 | Method and path | Behavior |
 |---|---|
 | `GET /healthz` | Process health and cached provisioning readiness. A blocked provider reports `degraded` without exposing probe bodies. |
-| `GET /v1/capabilities` | Cached provider evidence plus explicit `real_lobby_creation_authorized` and `real_lobby_join_authorized` product gates. Provider probes alone never open the client. |
+| `GET /v1/capabilities` | Cached provider evidence plus explicit `real_lobby_creation_authorized` and `real_lobby_join_authorized` product gates. Provider probes alone never open the client. Both product gates remain false in production until native zeroizing client handoff, authenticated coherent P2P, restrictive policy, persistent abuse controls, and live qualification are complete. |
 | `POST /v1/lobbies` | Persists `PROVISIONING` before provider work. In tailnet-per-lobby mode it then creates one API-only child and keeps the one-time child OAuth pair only in memory. `max_players` defaults to 8 and is capped at 16. Same idempotency key/body/actor replays without a second create; a mismatch returns 409. |
 | `GET /v1/lobbies/{lobby_id}` | Currently unauthenticated, secret-free snapshot, including roster, TTLs, authority summary, and aggregate `cleanup_pending`. Secret-free is not authorization-safe: it must not expose real lobbies. The maintained read path can also advance expiry/cleanup/provider work, so it is not the target inspector. It never returns the tailnet FQDN. |
 | `POST /v1/lobbies/{lobby_id}/join` | Consumes a one-use invitation in `FORMING`/`READY`, validates wire major, rate limits mint attempts, and issues one ephemeral, preauthorized, non-reusable key plus participant capability. Secrets appear only in the first 201 response; replay returns receipts only. |

@@ -11,7 +11,7 @@ Linux Godot qualification must emit each marker exactly once:
 - `SPURFIRE_COMBAT_UI_SMOKE_OK`
 - `SPURFIRE_ALPHA_LOBBY_SMOKE_OK`
 
-`scripts/check-alpha-smoke-log.sh` rejects missing/duplicate markers and engine errors. The final marker is intentionally absent from the baseline graybox: the CI gate stays red until the integrated one-lobby Create/Join/roster/health/Leave/teardown smoke exists. Existing gameplay smoke remains the regression gate for M0–M2.
+`scripts/check-alpha-smoke-log.sh` rejects missing/duplicate markers and engine errors. The integrated source now emits the one-lobby contract marker, while that marker remains a fixture/source contract—not HTTP, provider, two-download, coherent multiplayer, cleanup, or human qualification evidence. Existing gameplay smoke remains the regression gate for M0–M2.
 
 Release/check tooling has credential-free unit tests under `scripts/tests/`. Tests cover deterministic playtest aggregation, secret canaries, simulated versus private-live lifecycle evidence, exact cleanup ordering, platform trust blockers, and no-overwrite candidate metadata.
 
@@ -63,6 +63,6 @@ Private-live validation additionally requires the control service to be absent f
 
 ## Terminal release gate
 
-A stable tag is not a way to discover readiness. Before tagging, a reviewed exact-SHA `docs/release-evidence/<version>.json` must pass `scripts/check-alpha-evidence.py`. The manifest binds CI/client/live run IDs, artifact hashes, launch smoke, SBOM/provenance, platform trust, activation, private-live cleanup, natural M2 playtest, telemetry, and independent approvals.
+A stable tag is not a way to discover readiness. First qualify source commit **S** and record S in a reviewed `docs/release-evidence/<version>.json`. Commit only that manifest and its release notes in metadata commit **T**, then `scripts/check-release-tag-binding.sh <version> T` must prove S is an ancestor and S..T changes only those two files. The tag may identify T; all CI/client/live run IDs and artifact evidence remain bound to S. The manifest also binds launch smoke, SBOM/provenance, platform trust, activation, private-live cleanup, natural M2 playtest, telemetry, and independent approvals.
 
 Tag-triggered package workflows validate but do not publish stable OCI aliases. Client publication is a separate protected-environment dispatch requiring the independently reviewed evidence-manifest SHA-256. It refuses any existing draft or published release rather than overwriting it. Current candidate manifests cannot publish because Apple Developer ID/notarization and Windows Authenticode are absent.

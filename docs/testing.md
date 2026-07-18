@@ -79,7 +79,7 @@ scripts/check-release-metadata.sh 0.2.0
 GitHub Actions then provides these credential-free gates:
 
 1. **CI:** `cargo check --locked --all-targets` and `just check` on Ubuntu, macOS, and Windows.
-2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite. `scripts/check-alpha-smoke-log.sh` additionally requires the integrated one-lobby Alpha marker; the baseline graybox intentionally does not pass that gate.
+2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite. `scripts/check-alpha-smoke-log.sh` additionally requires the integrated one-lobby contract marker. That fixture/source marker does not prove HTTP, provider, coherent multiplayer, cleanup, two-download, or human qualification.
 3. **Release QA tooling:** deterministic aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
 4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
