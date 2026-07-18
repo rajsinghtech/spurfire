@@ -14,6 +14,6 @@ First downloadable gameplay-client release and public control-plane landing page
 
 - Public landing and download page at `spurfire.rajsingh.info`.
 - Signed multi-architecture `spurfire-server` image and OCI Helm chart.
-- Safe public dry-run deployment in the Ottawa `spurfire` namespace.
+- Safe hosted control-plane preview with zero-mutation dry-run defaults.
 
 The hosted service intentionally remains in zero-mutation dry-run mode until API authentication, authorization, and rate limiting are deployed. Gameplay visuals and animation remain prototype quality.

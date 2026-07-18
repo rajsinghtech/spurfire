@@ -134,7 +134,7 @@ untrusted reports and never affect gameplay or cleanup truth.
 
 ## D11 — One real lobby and fail-closed activation
 
-**Status:** accepted for alpha safety; Ottawa activation not approved
+**Status:** accepted for alpha safety; hosted real activation not approved
 
 One singleton lease covers every real lobby in either dedicated or shared compatibility mode.
 Public real mode, when separately approved, accepts only server-selected `tailnet_per_lobby`.
@@ -147,7 +147,7 @@ independent default-off real-mutation kill switch, a dynamic encrypted child-OAu
 mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
 gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
 alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
-separate GitOps review. Ottawa remains `dryRun=true`, `provisioningMode=dry_run`,
+separate GitOps review. The hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`,
 `existingSecret=""`, and `persistence.enabled=false` until that review.
 
 ## Settled design questions (formerly open, 2026-07-17)

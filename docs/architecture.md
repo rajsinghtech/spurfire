@@ -2,7 +2,7 @@
 
 Spurfire separates a **control plane** from a peer-to-peer **gameplay data plane**. The control plane owns provider resources and lobby metadata; game clients own real-time traffic and match execution. A dedicated lobby tailnet is an isolation boundary, not a place for the control service to run.
 
-Public real-network activation is closed. The accepted target and exact gates are in [control-plane-network-view.md](control-plane-network-view.md); Ottawa remains forced dry-run.
+Public real-network activation is closed. The accepted target and exact gates are in [control-plane-network-view.md](control-plane-network-view.md); the hosted public deployment remains forced dry-run.
 
 ## Components
 
@@ -50,7 +50,7 @@ Dedicated `tailnet_per_lobby` is the selected real isolation path. For one lobby
 
 The main control plane **never joins**. Membership would add private node-state custody, peer-facing sockets, cross-tailnet compromise reach, observer-biased measurements, false device counts, and cleanup complexity. It would not reveal player-to-player application RTT or route truth. Speaking gameplay would also make the service a participant/witness and violate the peer-hosted boundary. This is accepted as D9, not an implementation convenience.
 
-A future break-glass observer is not part of this architecture. It requires a separate process, separate ADR, one selected lobby, a 120-second maximum, and non-authoritative output; it is not permitted in Ottawa.
+A future break-glass observer is not part of this architecture. It requires a separate process, separate ADR, one selected lobby, a 120-second maximum, and non-authoritative output; it is not permitted in the hosted public deployment.
 
 ## Provisioning modes
 
@@ -165,7 +165,7 @@ This control-plane groundwork does not reorder gameplay development. The strict 
 - Startup is mutation-closed until store, encrypted vault, lease, and exact upstream identities reconcile.
 - An orphan is quarantined. Automation never guesses a credential or deletes by display name.
 - Cleanup uses the matching child credential and validated FQDN, then proves exact stable-ID absence and erases encrypted custody before release.
-- Ottawa has no provider credential, no persistence, and forced dry-run. A separate reviewed GitOps change is required after every activation gate passes.
+- The hosted public deployment has no provider credential, no persistence, and forced dry-run. A separate reviewed GitOps change is required after every activation gate passes.
 
 ## Note on RustScale
 

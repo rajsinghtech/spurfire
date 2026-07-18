@@ -1,7 +1,7 @@
 # Control-plane network ownership and selected-lobby view
 
 - **Decision status:** accepted architecture and safe-groundwork contract.
-- **Public real activation:** **closed**. Ottawa remains public dry-run.
+- **Public real activation:** **closed**. The hosted public deployment remains dry-run.
 - **Gameplay boundary:** peer-to-peer; the control plane never joins a lobby tailnet.
 
 This document is the source of truth for dedicated lobby-network ownership, the capability-protected one-lobby inspector, telemetry provenance, cleanup proof, activation gates, and operator response. It does not authorize a public real deployment.
@@ -17,7 +17,7 @@ This document is the source of truth for dedicated lobby-network ownership, the 
 | Child OAuth custody | Process-local and zeroized today; restart fails closed and may require manual remediation |
 | Durable provider identity, selected-lobby DTO/cache, creator read capability, one-real-lobby lease, browser/CLI view, and default-off deployment switch | Safe groundwork; older revisions that discard stable ID or lack the switch are unsuitable, and this slice is not a basis for enabling public real mode |
 | Invitation/participant/report authorization, migration of every legacy route, encrypted vault, startup reconciler, private operator listener, and abuse controls | Activation work remains open |
-| Ottawa | Public, credential-free, non-persistent dry-run; no real provider mutation |
+| Hosted public deployment | Public, credential-free, non-persistent dry-run; no real provider mutation |
 
 The server can exercise real provider code only when deliberately configured past its independent default-off switch. That private integration ability is not production authorization. The chart fixes the switch off and rejects enabling it. Until every gate in [Activation gates](#activation-gates) is green, public deployments must have no credential path and must force `dry_run`.
 
@@ -44,7 +44,7 @@ Joining supplies no trustworthy player-to-player truth and creates material risk
 
 - A node must hold private node state, expose peer-facing sockets, and process untrusted traffic. Provider API access and authenticated participant reports do not require that attack surface.
 - One process joined to multiple dedicated tailnets becomes a cross-tailnet bridge in the compromise blast radius, even when it does not intentionally forward traffic.
-- An Ottawa node measures Ottawa-to-rider paths. It cannot infer player A-to-player B route class, application RTT, loss, or reachability.
+- A control-service node measures service-to-rider paths. It cannot infer player A-to-player B route class, application RTT, loss, or reachability.
 - The extra member distorts device counts and complicates exact cleanup and stale-device alerts.
 - Speaking the gameplay protocol would make the service a participant or witness and violate D1/D6.
 - Joining introduces a runtime dependency and lifecycle coupling to RustScale/Tailscale node state. Control-plane availability must not depend on data-plane enrollment.
@@ -60,7 +60,7 @@ CI must reject a `spurfire-server` dependency on RustScale, `spurfire-net`, a ga
 
 ### Optional observer boundary
 
-No observer is retained in the current architecture. A future diagnostic observer requires a separate security ADR and activation review, and only when a concrete question cannot be answered by provider observations or participant reports. It must be a separate, operator-triggered process for one selected lobby, run for at most 120 seconds with one-use enrollment, private temporary node state, and no organization/child OAuth or Kubernetes identity. It must not accept/advertise routes, act as exit node, use SSH/Serve/Funnel/LocalAPI, provide peer relay, or speak gameplay. Its output must be labeled `observer_path` and `non_authoritative`. It is not permitted in Ottawa under this decision.
+No observer is retained in the current architecture. A future diagnostic observer requires a separate security ADR and activation review, and only when a concrete question cannot be answered by provider observations or participant reports. It must be a separate, operator-triggered process for one selected lobby, run for at most 120 seconds with one-use enrollment, private temporary node state, and no organization/child OAuth or Kubernetes identity. It must not accept/advertise routes, act as exit node, use SSH/Serve/Funnel/LocalAPI, provide peer relay, or speak gameplay. Its output must be labeled `observer_path` and `non_authoritative`. It is not permitted in the hosted public deployment under this decision.
 
 ## Tailnet DNS name terminology and privacy
 
@@ -354,9 +354,9 @@ Dedicated cleanup order is exact and crash-safe:
 5. If an unmatched upstream child exists without either record, correlate audited create events manually. A Spurfire-like display name is not sufficient deletion evidence.
 6. Following authorized remediation, require the normal two-poll exact-ID absence proof. Erase any matching vault record, record the non-secret evidence, and only then release the slot.
 
-### Ottawa guardrail
+### Hosted deployment guardrail
 
-Ottawa's required GitOps values remain:
+The hosted public deployment's required GitOps values remain:
 
 ```yaml
 config:
@@ -368,7 +368,7 @@ persistence:
   enabled: false
 ```
 
-The public Gateway may serve the static inspector shell and dry-run APIs only. Operator routes are forbidden. This documentation change does not edit Ottawa, create/delete a tailnet, or authorize a future value flip.
+The public Gateway may serve the static inspector shell and dry-run APIs only. Operator routes are forbidden. This documentation change does not alter a hosted deployment, create/delete a tailnet, or authorize a future value flip.
 
 ## Activation gates
 
@@ -386,12 +386,12 @@ Every item is mandatory; order does not imply partial activation:
 - [ ] A restrictive child policy is applied and read back: rider tags reach only required gameplay UDP, with no SSH, Serve/Funnel, subnet/exit routes, unintended service, or control-plane membership. Direct, DERP, and Peer Relay paths are live-tested.
 - [ ] Child-scoped device-list scopes and field semantics are live-verified. Provider online remains unknown if no verified field exists.
 - [ ] Application-level lobby/player/session binding is deployed; tailnet membership, hostname, address, device count, and peer report never become identity.
-- [ ] The operator listener is private and unreachable through Ottawa's public Gateway.
+- [ ] The operator listener is private and unreachable through the hosted public Gateway.
 - [ ] Privacy approval covers FQDN, private addresses, participant reports, and tombstone retention; public small-cohort suppression is enabled.
 - [ ] Exact-ID cleanup, quota lock, vault, and reconciliation alerts plus this runbook are deployed and exercised.
 - [ ] Persistent non-secret state and an approved parent-credential path are deployed; no credential is copied to `raj-builder`.
 - [ ] Clean credential-free Linux checks pass on `ssh ubuntu@raj-builder`; cross-platform GitHub Actions pass. No Mac build is used for this activation.
-- [ ] A separate GitOps review attests every preceding gate and explicitly changes Ottawa. Until then Ottawa remains forced dry-run.
+- [ ] A separate GitOps review attests every preceding gate and explicitly changes the hosted deployment. Until then it remains forced dry-run.
 
 ## Required test plan
 
@@ -437,7 +437,7 @@ These are activation requirements, not claims that the current public service im
 
 - CI fails if `spurfire-server` gains a RustScale, `spurfire-net`, gameplay listener, relay, or observer-node dependency.
 - Rendered chart/default tests prove credential-free dry-run, one replica, no dynamic child secret in manifests, and no public operator route.
-- Ottawa policy tests assert `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false` until a separate approved activation change.
+- Hosted-deployment policy tests assert `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false` until a separate approved activation change.
 - Linux and GitHub Actions gates run without copying `.env` or credentials; no release tag or package publication is part of activation testing.
 
 ## Related decisions and docs
