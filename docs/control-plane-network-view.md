@@ -14,9 +14,9 @@ This document is the source of truth for dedicated lobby-network ownership, the 
 | Child-scoped one-use auth-key issuance | Implemented and mock-tested; live end-to-end verification remains required |
 | Dedicated `tailnet_per_lobby` isolation | Selected real-lobby path |
 | `shared_tailnet` | Separate compatibility path; never represented as dedicated isolation |
-| Child OAuth custody | Process-local and zeroized today; restart fails closed and may require manual remediation |
-| Durable provider identity, selected-lobby DTO/cache, creator read capability, one-real-lobby lease, browser/CLI view, and default-off deployment switch | Safe groundwork; older revisions that discard stable ID or lack the switch are unsuitable, and this slice is not a basis for enabling public real mode |
-| Invitation/participant/report authorization, migration of every legacy route, encrypted vault, startup reconciler, private operator listener, and abuse controls | Activation work remains open |
+| Child OAuth custody | Versioned ChaCha20-Poly1305 file vault with mounted key, exact tuple binding, restart recovery, CAS deletion, and secret canaries; setec/workload identity, external audit, backup/restore, and rotation remain required |
+| Durable provider identity, selected-lobby DTO/cache, capability-protected mutations, one-use grants/invitations, one-real-lobby lease, startup reconciliation, and default-off deployment switch | Integrated safe groundwork; not a basis for enabling public real mode |
+| Private operator listener, writer fencing, gateway-persistent limits/alerts, restrictive child policy, complete directional session reports, and separately authorized live proof | Activation work remains open |
 | Hosted public deployment | Public, credential-free, non-persistent dry-run; no real provider mutation |
 
 The server can exercise real provider code only when deliberately configured past its independent default-off switch. That private integration ability is not production authorization. The chart fixes the switch off and rejects enabling it. Until every gate in [Activation gates](#activation-gates) is green, public deployments must have no credential path and must force `dry_run`.
@@ -269,7 +269,7 @@ Lobby lifecycle and network lifecycle are separate dimensions:
 | `SHARED_RESOURCES_CLEAN` | Known lobby keys and tagged devices are clean; the shared tailnet still exists |
 | `MANUAL_REMEDIATION` | Identity, credential, or reconciliation evidence is insufficient for safe automation |
 
-The current process-local prototype cannot satisfy the production meaning of `ACTIVE` after restart. Do not infer a network state from a legacy lobby state.
+The encrypted file-vault prototype can recover an exact `ACTIVE` tuple after restart, but production `ACTIVE` still requires the approved workload-identity/audit/backup/rotation posture and complete startup matrix. Do not infer a network state from a legacy lobby state.
 
 ## One-real-lobby lease and idempotency
 

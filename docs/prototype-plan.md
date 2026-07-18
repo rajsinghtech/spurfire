@@ -346,11 +346,13 @@ authority-kill migration at the session level. What remains is completing the lo
 3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
    ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
    capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
-4. **Client join flow.** Godot client drives the lobby HTTP API end-to-end: create/join
-   (one-use key from the first 201 into `PeerSession`), measurement reporting, `/authority`
-   poll, creator start, authority heartbeats, results submission. Roster-driven peer
-   endpoints replace file-based demo discovery (clients report their tailnet address via an
-   additive measurements field). Per-lobby **join code** shared by the creator; no accounts.
+4. **Client join flow.** The gated Alpha shell now drives one-use create/invitation/join,
+   exact-roster endpoint projection, route/RTT election reports, creator start, peer Leave,
+   self-leave, and truthful teardown into `PeerSession`. Real activation remains dark because
+   the current Godot HTTP adapter copies first-response secrets through GDScript/GString; replace
+   it with native zeroizing HTTPS handoff, add session-generation/public-key signing, authority
+   heartbeats/results, and complete coherent remote authority simulation. Per-lobby join code;
+   no accounts.
 5. **Landing-page live stats.** Secret-free aggregate stats endpoint feeding
    spurfire.rajsingh.info: riders online, lobbies by state, direct-connection rate, median
    RTT. No lobby IDs, no join material.

@@ -190,8 +190,11 @@ impl PeerSession {
         authority_player_id: GString,
         now_ms: i64,
     ) -> bool {
-        let roster =
-            PackedStringArray::from([local_player_id.clone(), authority_player_id.clone()]);
+        let roster = if local_player_id == authority_player_id {
+            PackedStringArray::from([local_player_id.clone()])
+        } else {
+            PackedStringArray::from([local_player_id.clone(), authority_player_id.clone()])
+        };
         self.configure_roster_session(
             lobby_id,
             local_player_id,

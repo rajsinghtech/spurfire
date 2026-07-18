@@ -39,8 +39,11 @@ var _course: Node = null
 var _bridge: SpurfireLobbyPeerBridge = null
 var _creator_join_pending := false
 var _endpoint_registered := false
+var _registered_roster_revision := 0
 var _poll_elapsed := 0.0
+var _report_elapsed := 0.0
 var _quit_after_leave := false
+var _leaving := false
 
 func _ready() -> void:
 	get_tree().auto_accept_quit = false
@@ -58,11 +61,16 @@ func _process(delta: float) -> void:
 	if _screen not in [Screen.WAITING, Screen.TEARDOWN] or _lobby_id.is_empty():
 		return
 	_poll_elapsed += delta
-	if _poll_elapsed < 1.0 or not api.has_participant_access():
-		return
-	_poll_elapsed = 0.0
-	api.poll_lobby(_lobby_id)
-	api.poll_network(_lobby_id)
+	_report_elapsed += delta
+	if _poll_elapsed >= 1.0 and api.has_participant_access():
+		_poll_elapsed = 0.0
+		api.poll_lobby(_lobby_id)
+		api.poll_network(_lobby_id)
+	if _report_elapsed >= 3.0 and _bridge and api.has_participant_access():
+		var report := _bridge.measurement_report()
+		if not report.is_empty():
+			_report_elapsed = 0.0
+			api.submit_measurements(_lobby_id, report)
 
 func _notification(what: int) -> void:
 	if what != NOTIFICATION_WM_CLOSE_REQUEST:
@@ -81,6 +89,7 @@ func _connect_signals() -> void:
 	api.lobby_updated.connect(_on_lobby_updated)
 	api.network_updated.connect(_on_network_updated)
 	api.endpoint_registered.connect(_on_endpoint_registered)
+	api.report_completed.connect(_on_report_completed)
 	api.start_completed.connect(_on_started)
 	api.leave_completed.connect(_on_left)
 	api.end_completed.connect(_on_end_requested)
@@ -219,9 +228,15 @@ func _try_register_endpoint(address: String = "", port: int = 0) -> void:
 
 func _on_endpoint_registered(response: Dictionary) -> void:
 	_endpoint_registered = true
+	_registered_roster_revision = int(
+		(response.get("session", {}) as Dictionary).get("roster_revision", _roster_revision)
+	)
 	if _bridge:
 		_bridge.apply_projection(response)
-	waiting_status.text = "Network ready • waiting for the posse"
+	waiting_status.text = "Network ready • measuring the posse"
+
+func _on_report_completed(_response: Dictionary) -> void:
+	waiting_status.text = "Network measured • waiting for the posse"
 
 func _on_peer_failed(_message: String) -> void:
 	waiting_status.text = "Peer network failed. Leaving safely…"
@@ -231,9 +246,14 @@ func _on_lobby_updated(response: Dictionary) -> void:
 	var lobby_value = response.get("lobby", response)
 	if lobby_value is Dictionary:
 		_lobby = lobby_value as Dictionary
-	_roster_revision = int(response.get("roster_revision", _lobby.get("roster_revision", 0)))
+	_network_generation = int(response.get("network_generation", _network_generation))
+	var next_roster_revision := int(response.get("roster_revision", _lobby.get("roster_revision", 0)))
+	if next_roster_revision != _roster_revision:
+		_roster_revision = next_roster_revision
+		_endpoint_registered = _registered_roster_revision == _roster_revision
 	if _bridge:
 		_bridge.apply_projection(response)
+	_try_register_endpoint()
 	_render_waiting()
 	if str(_lobby.get("state", "")) in ["STARTING", "IN_MATCH"] and _screen == Screen.WAITING:
 		_start_match()
@@ -275,25 +295,37 @@ func _on_leave_pressed() -> void:
 	_begin_leave()
 
 func _begin_leave() -> void:
+	if _leaving:
+		return
+	_leaving = true
 	_show(Screen.TEARDOWN)
 	teardown_status.text = "Leaving peers and closing your lobby session…"
 	if _bridge:
 		_bridge.send_leave()
-	peer_session.shutdown()
+	await _stop_peer_transport()
 	api.leave_lobby(_lobby_id)
 	if _quit_after_leave:
 		_quit_after_budget()
+
+func _stop_peer_transport() -> void:
+	peer_session.shutdown()
+	var deadline := Time.get_ticks_msec() + 1000
+	while str(peer_session.get("connection_state")) != "offline" and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
 
 func _on_left(_response: Dictionary) -> void:
 	if not _quit_after_leave:
 		_reset_to_title()
 
 func _on_end_pressed() -> void:
+	if _leaving:
+		return
+	_leaving = true
 	_show(Screen.TEARDOWN)
 	teardown_status.text = "Closing the private lobby…"
 	if _bridge:
 		_bridge.send_leave()
-	peer_session.shutdown()
+	await _stop_peer_transport()
 	api.end_lobby(_lobby_id)
 
 func _on_end_requested(_response: Dictionary) -> void:
@@ -317,7 +349,10 @@ func _render_waiting() -> void:
 	lobby_name_label.text = str(_lobby.get("display_name", "PRIVATE POSSE")).to_upper()
 	start_button.visible = api.has_creator_control()
 	end_button.visible = api.has_creator_control()
-	start_button.disabled = (_lobby.get("roster", []) as Array).size() < 2
+	start_button.disabled = (
+		(_lobby.get("roster", []) as Array).size() < 2
+		or str(_lobby.get("state", "")) != "READY"
+	)
 	for child in roster_box.get_children():
 		child.queue_free()
 	var health := _bridge.peer_health() if _bridge else {}
@@ -373,6 +408,8 @@ func _reset_to_title() -> void:
 	_network_view.clear()
 	share_code_edit.clear()
 	_endpoint_registered = false
+	_registered_roster_revision = 0
+	_leaving = false
 	_network_generation = 0
 	_roster_revision = 0
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE

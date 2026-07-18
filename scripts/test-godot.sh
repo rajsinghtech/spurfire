@@ -125,7 +125,7 @@ run_bounded "$timeout_seconds" "$godot_bin" \
   --path "$project_dir" \
   --scene "$smoke_scene"
 
-for extra_scene in res://ui/tests/polish_smoke.tscn res://combat/tests/combat_smoke.tscn; do
+for extra_scene in res://ui/tests/polish_smoke.tscn res://combat/tests/combat_smoke.tscn res://lobby/tests/lobby_contract_test.tscn; do
   printf 'Running %s...\n' "$extra_scene"
   run_bounded "$timeout_seconds" "$godot_bin" \
     --headless \

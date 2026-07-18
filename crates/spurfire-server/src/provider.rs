@@ -318,6 +318,7 @@ impl ProviderCapabilities {
     pub fn response(self, metadata: ResponseMetadata) -> CapabilitiesResponse {
         CapabilitiesResponse {
             real_lobby_creation_authorized: false,
+            real_lobby_join_authorized: false,
             oauth_token_ok: self.oauth_token_ok,
             can_manage_organization_tailnets: self.can_manage_organization_tailnets,
             can_mint_auth_keys: self.can_mint_auth_keys,

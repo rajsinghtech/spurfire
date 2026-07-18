@@ -8,6 +8,7 @@ signal join_completed(response: Dictionary, enrollment_key: String)
 signal lobby_updated(response: Dictionary)
 signal network_updated(response: Dictionary)
 signal endpoint_registered(response: Dictionary)
+signal report_completed(response: Dictionary)
 signal start_completed(response: Dictionary)
 signal leave_completed(response: Dictionary)
 signal end_completed(response: Dictionary)
@@ -108,8 +109,23 @@ func register_endpoint(lobby_id: String, network_generation: int, roster_revisio
 		_participant_capability, true
 	)
 
+func submit_measurements(lobby_id: String, report: Dictionary) -> void:
+	if _participant_capability.is_empty() or report.is_empty():
+		return
+	var body := report.duplicate(true)
+	body["player_id"] = _player_id
+	_request(
+		"report", HTTPClient.METHOD_POST,
+		"/v1/lobbies/%s/network/reports" % lobby_id,
+		body, _participant_capability
+	)
+	body.clear()
+
 func start_lobby(lobby_id: String) -> void:
-	_request("start", HTTPClient.METHOD_POST, "/v1/lobbies/%s/start" % lobby_id, {}, _creator_capability, true)
+	_request(
+		"start", HTTPClient.METHOD_POST, "/v1/lobbies/%s/start" % lobby_id,
+		{"creator_player_id": _player_id}, _creator_capability, true
+	)
 
 func leave_lobby(lobby_id: String) -> void:
 	_request(
@@ -156,6 +172,10 @@ func _request(operation: String, method: HTTPClient.Method, path: String, body: 
 		payload = JSON.stringify(body)
 	if not capability.is_empty():
 		headers.append("Authorization: Spurfire-Capability %s" % capability)
+	# The real-create grant authorizes the mutation; this UUID only binds the
+	# resulting creator subject and is never treated as authentication.
+	if operation == "create":
+		headers.append("X-Spurfire-Player-Id: %s" % _player_id)
 	if idempotent:
 		headers.append("Idempotency-Key: %s" % SpurfireLobbyContract.new_idempotency_key())
 	var result := request.request(_origin + path, headers, method, payload)
@@ -226,6 +246,8 @@ func _on_request_completed(result: int, response_code: int, response_headers: Pa
 			network_updated.emit(_without_secrets(response))
 		"endpoint":
 			endpoint_registered.emit(_without_secrets(response))
+		"report":
+			report_completed.emit(_without_secrets(response))
 		"start":
 			start_completed.emit(_without_secrets(response))
 		"leave":

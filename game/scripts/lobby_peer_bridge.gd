@@ -123,6 +123,44 @@ func send_leave() -> void:
 	if not packet.is_empty():
 		_send_to_all(packet)
 
+func measurement_report() -> Dictionary:
+	if _peers.is_empty():
+		return {}
+	var direct := 0
+	var peer_relay := 0
+	var derp := 0
+	var rtts: Array[int] = []
+	for peer: Dictionary in _peers.values():
+		var route := _route_name(str(peer.route))
+		var rtt_value = peer.get("rtt_ms", null)
+		if route == "unknown" or rtt_value == null:
+			return {}
+		match route:
+			"direct": direct += 1
+			"peer_relay": peer_relay += 1
+			"derp_relay": derp += 1
+			_: return {}
+		rtts.append(maxi(0, int(rtt_value)))
+	rtts.sort()
+	var median := rtts[int(rtts.size() / 2)]
+	return {
+		"route_summary": {
+			"direct_count": direct,
+			"peer_relay_count": peer_relay,
+			"derp_count": derp,
+		},
+		"rtt_ms_median": median,
+		"rtt_ms_worst": rtts.back(),
+		"jitter_ms": 0,
+		"loss_pct_milli": 0,
+		# Throughput/performance are not measured by this smallest Alpha slice;
+		# conservative neutral values affect election only and are never shown as
+		# player-visible network facts.
+		"upload_mbps_sustained": 1,
+		"device_perf_score": 500,
+		"observed_peer_count": _peers.size(),
+	}
+
 func peer_health() -> Dictionary:
 	var result := {}
 	var now := Time.get_ticks_msec()

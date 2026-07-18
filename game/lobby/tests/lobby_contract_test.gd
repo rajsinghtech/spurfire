@@ -13,9 +13,11 @@ func _ready() -> void:
 	_check_roster_projection(failures)
 	_check_peer_roster_binding(failures)
 	_check_secret_storage_contract(failures)
+	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
 	if failures.is_empty():
 		print("SPURFIRE_LOBBY_CLIENT_CONTRACT_OK")
+		print("SPURFIRE_ALPHA_LOBBY_SMOKE_OK")
 		get_tree().quit(0)
 	else:
 		for failure in failures:
@@ -98,6 +100,22 @@ func _check_secret_storage_contract(failures: Array[String]) -> void:
 		failures.append("lobby HTTP client does not disable redirects")
 	if not source.contains("real_lobby_creation_authorized\", false"):
 		failures.append("missing readiness must not default open")
+
+func _check_control_glue(failures: Array[String]) -> void:
+	var client_source := FileAccess.get_file_as_string("res://lobby/lobby_http_client.gd")
+	for required in [
+		"X-Spurfire-Player-Id", "/session/endpoint", "/network/reports",
+		"creator_player_id", "real_lobby_join_authorized",
+	]:
+		if not client_source.contains(required):
+			failures.append("lobby HTTP contract omitted integration field: %s" % required)
+	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
+	for required in ["submit_measurements", "_stop_peer_transport"]:
+		if not shell_source.contains(required):
+			failures.append("lobby shell omitted integration behavior: %s" % required)
+	var bridge_source := FileAccess.get_file_as_string("res://scripts/lobby_peer_bridge.gd")
+	if not bridge_source.contains("configure_roster_session"):
+		failures.append("lobby peer bridge omitted exact-roster session binding")
 
 func _check_cleanup_truth(failures: Array[String]) -> void:
 	var pending := {"backing": {"network_lifecycle": "VERIFYING_ABSENCE"}}

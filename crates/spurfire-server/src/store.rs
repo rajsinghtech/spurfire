@@ -39,6 +39,10 @@ const fn default_network_generation() -> u64 {
     1
 }
 
+const fn default_roster_revision() -> u64 {
+    1
+}
+
 const fn default_network_lifecycle() -> NetworkLifecycle {
     NetworkLifecycle::ManualRemediation
 }
@@ -241,6 +245,10 @@ pub struct StoredLobby {
     pub(crate) dry_run: bool,
     #[serde(default = "default_network_generation")]
     pub(crate) network_generation: u64,
+    #[serde(default = "default_roster_revision")]
+    pub(crate) roster_revision: u64,
+    #[serde(default)]
+    pub(crate) session_generation: u64,
     #[serde(default = "default_network_lifecycle")]
     pub(crate) network_lifecycle: NetworkLifecycle,
     #[serde(default)]
@@ -297,6 +305,8 @@ impl StoredLobby {
             tag: tag.into(),
             dry_run,
             network_generation: 1,
+            roster_revision: 1,
+            session_generation: 0,
             network_lifecycle: if dry_run {
                 NetworkLifecycle::Simulated
             } else {
@@ -434,6 +444,8 @@ impl fmt::Debug for StoredLobby {
             .field("tag", &self.tag)
             .field("dry_run", &self.dry_run)
             .field("network_generation", &self.network_generation)
+            .field("roster_revision", &self.roster_revision)
+            .field("session_generation", &self.session_generation)
             .field("network_lifecycle", &self.network_lifecycle)
             .field("network_identity_present", &self.network_identity.is_some())
             .field("capability_count", &self.capabilities.len())

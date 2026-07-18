@@ -60,8 +60,10 @@ Design for the first four items is settled in `docs/decisions.md` D6/D7 and
   hash.
 - Add lag compensation (D7): authority-side rewind over ~250 ms position + stance history,
   capped at 150 ms; stance must be in snapshots from M2 onward.
-- Drive `PeerSession` from the lobby join HTTP flow and distribute peer endpoints via the
-  roster (additive measurements field), replacing file-based demo discovery.
+- The Alpha shell now drives `PeerSession` from invitation join and consumes a
+  capability-protected, memory-only endpoint projection bound to the exact roster/network
+  generation/revision. Replace the remaining GDScript HTTP secret boundary with native
+  zeroizing handoff and extend the projection with signed session-generation/public-key binding.
 - Add authenticated session-level packet tags if tailnet membership alone is not sufficient for the final threat model.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
 - Exercise forced DERP, route transitions, roaming, packet loss, and 16-peer churn.

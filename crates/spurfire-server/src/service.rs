@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
+    net::IpAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -27,14 +28,15 @@ use spurfire_protocol::{
     DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore, Freshness,
     InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt, JoinLobbyReplayResponse,
     JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest, LeaveLobbyResponse, Lobby,
-    LobbyCapabilityScope, LobbyId, LobbyNetworkView, LobbyResponse, LobbyState, LobbyTtl,
-    NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
-    NetworkLifecycle, NetworkTruthLabel, OpaqueCapability, ParticipantCleanupReason, Player,
-    PlayerId, PlayerJoinState, ProvisioningMode, ResponseMetadata, RouteAggregate,
-    StartLobbyRequest, StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
-    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
-    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
-    MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
+    LobbyCapabilityScope, LobbyId, LobbyNetworkView, LobbyResponse, LobbySessionPeer,
+    LobbySessionProjection, LobbyState, LobbyTtl, NetworkAuthority, NetworkBacking, NetworkCleanup,
+    NetworkCounts, NetworkIsolation, NetworkLifecycle, NetworkTruthLabel, OpaqueCapability,
+    ParticipantCleanupReason, Player, PlayerId, PlayerJoinState, ProvisioningMode,
+    RegisterSessionEndpointRequest, RegisterSessionEndpointResponse, ResponseMetadata,
+    RouteAggregate, StartLobbyRequest, StartLobbyResponse, SubmitMeasurementsRequest,
+    SubmitMeasurementsResponse, SubmitResultsRequest, SubmitResultsResponse, UnixMillis,
+    UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS,
+    LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -79,6 +81,7 @@ const PROVIDER_DEVICE_FRESHNESS_MS: u64 = 30_000;
 const PROVIDER_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 const MAX_CACHED_PROVIDER_OBSERVATIONS: usize = 10_000;
+const SESSION_ENDPOINT_RETENTION_MS: u64 = 60_000;
 const ABUSE_WINDOW_MS: u64 = 60_000;
 const MAX_MUTATIONS_GLOBAL_PER_MINUTE: usize = 600;
 const MAX_MUTATIONS_PER_IP_PER_MINUTE: usize = 120;
@@ -142,6 +145,17 @@ impl CachedProviderObservation {
             last_failure: Some((failure, at)),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct SessionEndpointRecord {
+    player_id: PlayerId,
+    network_generation: u64,
+    roster_revision: u64,
+    sequence: u64,
+    tailnet_address: String,
+    application_port: u16,
+    received_at: UnixMillis,
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +223,7 @@ pub struct AppState {
     lobby_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     observation_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     provider_observations: Arc<RwLock<BTreeMap<LobbyId, CachedProviderObservation>>>,
+    session_endpoints: Arc<RwLock<BTreeMap<LobbyId, BTreeMap<PlayerId, SessionEndpointRecord>>>>,
     provider_limit: Arc<Semaphore>,
     abuse: Arc<Mutex<AbuseState>>,
     startup_reconciled: Arc<AtomicBool>,
@@ -231,6 +246,7 @@ impl AppState {
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             provider_observations: Arc::new(RwLock::new(BTreeMap::new())),
+            session_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
@@ -561,6 +577,7 @@ impl fmt::Debug for AppState {
             .field("provider", &"<network-provider>")
             .field("clock", &"<clock>")
             .field("provider_observations", &"<bounded-coarse-cache>")
+            .field("session_endpoints", &"<memory-only-selected-lobby-cache>")
             .finish()
     }
 }
@@ -584,6 +601,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/lobbies/{lobby_id}/join", post(join_lobby))
         .route("/v1/lobbies/{lobby_id}/leave", post(leave_lobby))
+        .route(
+            "/v1/lobbies/{lobby_id}/session/endpoint",
+            post(register_session_endpoint),
+        )
         .route(
             "/v1/lobbies/{lobby_id}/measurements",
             post(submit_measurements),
@@ -709,7 +730,9 @@ async fn get_capabilities(State(state): State<AppState>) -> Json<CapabilitiesRes
         .provider
         .cached_capabilities()
         .response(metadata_for(state.config.force_dry_run));
-    response.real_lobby_creation_authorized = real_creation_authorized(&state);
+    let authorized = real_creation_authorized(&state);
+    response.real_lobby_creation_authorized = authorized;
+    response.real_lobby_join_authorized = authorized;
     Json(response)
 }
 
@@ -1012,10 +1035,50 @@ async fn get_lobby_inner(
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let stored = load_maintained_lobby(state, lobby_id, now, dry_hint).await?;
+    let session = session_projection(state, &stored, now).await;
     Ok(LobbyResponse {
         lobby: stored.snapshot(),
+        network_generation: stored.network_generation,
+        roster_revision: stored.roster_revision,
+        session: Some(session),
         metadata: metadata_for(stored.dry_run || dry_hint),
     })
+}
+
+async fn session_projection(
+    state: &AppState,
+    stored: &StoredLobby,
+    now: UnixMillis,
+) -> LobbySessionProjection {
+    let endpoints = state.session_endpoints.read().await;
+    let peers = endpoints
+        .get(&stored.lobby.lobby_id)
+        .into_iter()
+        .flat_map(BTreeMap::values)
+        .filter(|record| {
+            record.network_generation == stored.network_generation
+                && record.roster_revision == stored.roster_revision
+                && stored
+                    .lobby
+                    .roster
+                    .iter()
+                    .any(|player| player.player_id == record.player_id)
+                && now
+                    .checked_duration_since(record.received_at)
+                    .is_some_and(|age| age <= SESSION_ENDPOINT_RETENTION_MS)
+        })
+        .map(|record| LobbySessionPeer {
+            player_id: record.player_id,
+            tailnet_address: record.tailnet_address.clone(),
+            application_port: record.application_port,
+            received_at: record.received_at,
+        })
+        .collect();
+    LobbySessionProjection {
+        network_generation: stored.network_generation,
+        roster_revision: stored.roster_revision,
+        peers,
+    }
 }
 
 async fn get_lobby_network(
@@ -1463,6 +1526,85 @@ async fn join_lobby(
     ))
 }
 
+async fn register_session_endpoint(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<RegisterSessionEndpointRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let lobby_id = secure_lobby_id(&lobby_id)?;
+    let request = parse_json(payload, false)?;
+    let player_id =
+        authorize_participant_scope(&state, lobby_id, &headers, LobbyCapabilityScope::LobbyPlay)
+            .await?;
+    let _lobby = state.lock_lobby(lobby_id).await;
+    let now = state.clock.now();
+    let stored = state
+        .store
+        .get(lobby_id)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    if request.network_generation != stored.network_generation
+        || request.roster_revision != stored.roster_revision
+        || !stored
+            .lobby
+            .roster
+            .iter()
+            .any(|player| player.player_id == player_id)
+        || !matches!(
+            stored.lobby.state,
+            LobbyState::Forming | LobbyState::Ready | LobbyState::Starting | LobbyState::InMatch
+        )
+        || !tailnet_address_is_valid(&request.tailnet_address)
+    {
+        return Err(lobby_not_found(false));
+    }
+
+    {
+        let mut cache = state.session_endpoints.write().await;
+        let lobby_endpoints = cache.entry(lobby_id).or_default();
+        if lobby_endpoints
+            .get(&player_id)
+            .is_some_and(|existing| request.sequence <= existing.sequence)
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "endpoint_sequence_replayed",
+                "endpoint registration sequence must increase",
+            ));
+        }
+        lobby_endpoints.insert(
+            player_id,
+            SessionEndpointRecord {
+                player_id,
+                network_generation: request.network_generation,
+                roster_revision: request.roster_revision,
+                sequence: request.sequence,
+                tailnet_address: request.tailnet_address,
+                application_port: request.application_port,
+                received_at: now,
+            },
+        );
+    }
+
+    let response = RegisterSessionEndpointResponse {
+        lobby: stored.snapshot(),
+        session: session_projection(&state, &stored, now).await,
+    };
+    Ok(sensitive_json_response(StatusCode::OK, &response))
+}
+
+fn tailnet_address_is_valid(value: &str) -> bool {
+    match value.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            let octets = address.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        Ok(IpAddr::V6(address)) => address.octets()[0] & 0xfe == 0xfc,
+        Err(_) => false,
+    }
+}
+
 async fn leave_lobby(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
@@ -1527,6 +1669,13 @@ async fn leave_lobby(
         .lobby
         .roster
         .retain(|player| player.player_id != request.player_id);
+    stored.roster_revision = stored.roster_revision.saturating_add(1);
+    state
+        .session_endpoints
+        .write()
+        .await
+        .entry(lobby_id)
+        .and_modify(|endpoints| endpoints.clear());
     stored.measurements.clear();
     stored.authenticated_reporters.clear();
     stored.pending_issuances.remove(&request.player_id);
@@ -1854,6 +2003,7 @@ async fn start_lobby(
     }
 
     stored.lobby.map_seed = Some(request.map_seed.unwrap_or_else(random_map_seed));
+    stored.session_generation = stored.session_generation.saturating_add(1).max(1);
     transition(&mut stored.lobby, LobbyState::Starting, dry_run)?;
     stored.started_at = Some(now);
     stored.last_authority_heartbeat_at = None;
@@ -2080,6 +2230,7 @@ async fn delete_lobby(
             metadata: metadata_for(dry_run),
         }));
     }
+    state.session_endpoints.write().await.remove(&lobby_id);
     if !matches!(
         stored.lobby.state,
         LobbyState::Closing | LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
@@ -2250,6 +2401,28 @@ fn secure_lobby_id(value: &str) -> Result<LobbyId, ApiError> {
 /// available only behind an explicit development switch that conflicts with
 /// real admission. The returned player is the legacy actor, never a secure
 /// capability subject.
+async fn authorize_participant_scope(
+    state: &AppState,
+    lobby_id: LobbyId,
+    headers: &HeaderMap,
+    required: LobbyCapabilityScope,
+) -> Result<PlayerId, ApiError> {
+    enforce_mutation_budget(state, headers).await?;
+    if state.config.allow_legacy_client_assertions {
+        return require_actor(headers, state.config.force_dry_run);
+    }
+    let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+    let stored = state
+        .store
+        .get(lobby_id)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    stored
+        .authorize(&verifier, required, None, state.clock.now())
+        .flatten()
+        .ok_or_else(|| lobby_not_found(false))
+}
+
 async fn authorize_scope(
     state: &AppState,
     lobby_id: LobbyId,
@@ -3018,6 +3191,7 @@ fn refresh_idle_expiry(stored: &mut StoredLobby, now: UnixMillis) {
 }
 
 fn roster_changed(stored: &mut StoredLobby, dry_run: bool) -> Result<(), ApiError> {
+    stored.roster_revision = stored.roster_revision.saturating_add(1);
     if stored.lobby.state == LobbyState::Ready {
         transition(&mut stored.lobby, LobbyState::Forming, dry_run)?;
     }

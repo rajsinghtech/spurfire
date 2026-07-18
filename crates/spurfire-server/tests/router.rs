@@ -1656,8 +1656,7 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let grant_authorization = format!("Spurfire-Capability {}", grant.expose_token());
     let create_body = json!({
         "display_name":"Secure High Noon",
-        "max_players":2,
-        "provisioning_mode":"tailnet_per_lobby"
+        "max_players":2
     });
     let (created_status, created) = json_request(
         &app,
@@ -1722,6 +1721,52 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     assert_eq!(join_status, StatusCode::CREATED);
     let participant_token = joined["participant_capability"]["token"].as_str().unwrap();
     let participant_authorization = format!("Spurfire-Capability {participant_token}");
+
+    let (lobby_status, selected) = json_request(
+        &app,
+        Method::GET,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(lobby_status, StatusCode::OK);
+    assert_eq!(selected["network_generation"], 1);
+    assert!(selected["roster_revision"].as_u64().unwrap() >= 2);
+    assert_eq!(selected["session"]["peers"], json!([]));
+
+    let endpoint_body = json!({
+        "network_generation": selected["network_generation"],
+        "roster_revision": selected["roster_revision"],
+        "sequence": 1,
+        "tailnet_address": "100.64.0.10",
+        "application_port": 41643
+    });
+    let (endpoint_status, endpoint) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
+        Some(endpoint_body.clone()),
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(endpoint_status, StatusCode::OK);
+    assert_eq!(endpoint["session"]["peers"][0]["player_id"], PLAYER_2);
+    assert_eq!(
+        endpoint["session"]["peers"][0]["tailnet_address"],
+        "100.64.0.10"
+    );
+
+    let (endpoint_replay_status, endpoint_replay) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
+        Some(endpoint_body),
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(endpoint_replay_status, StatusCode::CONFLICT);
+    assert_eq!(endpoint_replay["code"], "endpoint_sequence_replayed");
 
     let (replay_join_status, replay_join) = json_request(
         &app,

@@ -27,6 +27,10 @@ fn default_authority_formula_version() -> String {
     AUTHORITY_FORMULA_VERSION.to_owned()
 }
 
+const fn default_public_provisioning_mode() -> ProvisioningMode {
+    ProvisioningMode::TailnetPerLobby
+}
+
 /// Non-secret description of a mutating call suppressed or planned by dry-run mode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedAction {
@@ -58,7 +62,11 @@ pub struct CreateLobbyRequest {
     /// Roster capacity; defaults to 8 and may not exceed 16.
     #[serde(default = "default_max_players")]
     pub max_players: u8,
-    /// Shared-tailnet, dedicated child-tailnet, or dry-run behavior.
+    /// Dedicated child-tailnet behavior for public real clients. The field is
+    /// retained for dry-run/development compatibility; omission defaults to the
+    /// server-selected dedicated mode and secure real admission rejects any
+    /// other value.
+    #[serde(default = "default_public_provisioning_mode")]
     pub provisioning_mode: ProvisioningMode,
     /// Optional placement hint; it does not affect election behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,9 +121,66 @@ pub struct LobbyResponse {
     /// Public snapshot with no secret material.
     #[serde(flatten)]
     pub lobby: Lobby,
+    /// Exact backing generation used by participant capabilities and endpoints.
+    pub network_generation: u64,
+    /// Monotonic roster revision. Endpoint registrations are bound to it.
+    pub roster_revision: u64,
+    /// Capability-protected, memory-only gameplay endpoint projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<LobbySessionProjection>,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
+}
+
+/// One current participant application endpoint. This topology metadata is
+/// capability-protected, retained only in server memory, and never rendered in
+/// the ordinary roster UI or persisted to telemetry/support artifacts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbySessionPeer {
+    /// Capability-bound roster subject.
+    pub player_id: PlayerId,
+    /// Validated RustScale tailnet address, never a physical/public endpoint.
+    pub tailnet_address: String,
+    /// Application UDP port inside the selected lobby tailnet.
+    pub application_port: u16,
+    /// Service receipt time used for expiry/freshness.
+    pub received_at: UnixMillis,
+}
+
+/// Exact selected-lobby endpoint projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbySessionProjection {
+    /// Exact lobby network generation.
+    pub network_generation: u64,
+    /// Exact roster revision to which every row is bound.
+    pub roster_revision: u64,
+    /// Fresh current-roster endpoints, sorted by player ID.
+    pub peers: Vec<LobbySessionPeer>,
+}
+
+/// `POST /v1/lobbies/{id}/session/endpoint` request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterSessionEndpointRequest {
+    /// Must equal the selected lobby generation.
+    pub network_generation: u64,
+    /// Must equal the current roster revision.
+    pub roster_revision: u64,
+    /// Strictly increasing per-participant registration sequence.
+    pub sequence: u64,
+    /// RustScale CGNAT or applicable ULA address only.
+    pub tailnet_address: String,
+    /// Bounded application UDP port.
+    pub application_port: u16,
+}
+
+/// Successful endpoint registration and refreshed exact-lobby projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterSessionEndpointResponse {
+    /// Current public lobby snapshot.
+    pub lobby: Lobby,
+    /// Memory-only endpoint projection for the selected lobby.
+    pub session: LobbySessionProjection,
 }
 
 /// Conventional route-specific alias for [`LobbyResponse`].
@@ -632,6 +697,10 @@ pub struct CapabilitiesResponse {
     /// Product-level admission decision. Provider probes alone never open Create Lobby.
     #[serde(default)]
     pub real_lobby_creation_authorized: bool,
+    /// Product-level join decision. It remains false unless startup reconciliation
+    /// and every real admission gate are ready; provider probes alone never open Join.
+    #[serde(default)]
+    pub real_lobby_join_authorized: bool,
     /// OAuth token exchange succeeded.
     pub oauth_token_ok: bool,
     /// Organization tailnet listing is permitted.

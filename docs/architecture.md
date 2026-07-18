@@ -9,9 +9,9 @@ Public real-network activation is closed. The accepted target and exact gates ar
 ### Control plane (this repository)
 
 - **`spurfire-control`** — typed Tailscale API client for organization child-tailnet creation/listing, narrow auth-key operations, coarse device inventory, and exact child-scoped deletion.
-- **`spurfire-server`** — Axum lobby service for durable control intent, idempotency, credential issuance receipts, deterministic election records, and cleanup. Safe groundwork adds exact provider identity, a singleton real-lobby lease, cached provider observations, and a creator-capability selected-lobby view; complete route authorization/reconciliation remains gated. It is not in the gameplay path.
+- **`spurfire-server`** — Axum lobby service for durable control intent, idempotency, capability-protected invitation/join/mutation routes, credential issuance receipts, deterministic election records, memory-only participant endpoints, startup reconciliation, and exact cleanup. It retains a singleton real-lobby lease and cached provider observations and is not in the gameplay path. Hosted activation remains gated by the open operational controls below.
 - **`spurfire-ctl`** — development/operator HTTP client. It does not persist child OAuth material and must not enroll as a lobby peer.
-- **Dynamic encrypted vault (activation requirement)** — holds one-time child OAuth material under workload identity and audit. The prototype has only a process-local, zeroizing vault, so restart recovery is fail-closed and public real activation is blocked.
+- **Dynamic encrypted vault** — the integrated prototype has a versioned ChaCha20-Poly1305 file vault keyed by a mounted key file, with exact tuple binding, atomic replacement, restart recovery, CAS deletion, and verified absence. Production activation still requires the accepted setec/workload-identity path, external audit, backup/restore proof, and key rotation.
 
 ### Gameplay data plane
 
@@ -67,7 +67,7 @@ The alpha real-lobby quota is one across both real modes. Shared compatibility c
 ### Credentials and capabilities
 
 - Parent organization OAuth credentials exist only in `spurfire-control`/`spurfire-server` through an approved secret path.
-- Child OAuth credentials are control-plane-only. The current process-local vault is not production custody; activation requires a dynamic encrypted vault and startup reconciliation.
+- Child OAuth credentials are control-plane-only. The encrypted file vault and startup reconciliation provide recoverable prototype custody, but public activation still requires the approved workload-identity/audit/backup/key-rotation posture.
 - Clients receive only narrowly scoped, one-use, short-lived enrollment keys. A key is returned once; durable state keeps only a non-secret receipt.
 - Tailnet membership grants data-plane connectivity, not provider API access or player identity.
 - Lobby capabilities are opaque, expiring, exact-lobby grants. Durable state stores only domain-separated verifiers and bindings. A lobby ID or client-asserted player ID is not a capability.

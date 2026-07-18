@@ -49,7 +49,13 @@ Expected markers include:
 SPURFIRE_GODOT_SMOKE_OK
 SPURFIRE_POLISH_SMOKE_OK
 SPURFIRE_COMBAT_UI_SMOKE_OK
+SPURFIRE_ALPHA_LOBBY_SMOKE_OK
 ```
+
+The Alpha lobby marker is a credential-free contract smoke for strict origin/join-code handling,
+capability route glue, exact-roster binding, endpoint/report calls, and truthful leave/cleanup UI.
+It is not a live provider lifecycle, two-download, coherent remote-authority gameplay, or human-feel
+qualification.
 
 ### Godot 4.7 UID sidecars
 

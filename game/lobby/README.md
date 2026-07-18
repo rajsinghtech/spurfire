@@ -3,31 +3,32 @@
 This directory contains the smallest accountless one-lobby shell: Create Lobby, Join Lobby,
 selected-lobby waiting room, peer enrollment/setup, Leave/End, truthful teardown, and an offline
 Practice Range. It intentionally remains **closed** unless the service returns explicit
-`real_lobby_creation_authorized` / `real_lobby_join_authorized` product fields. Provider probe
-booleans from the current `/v1/capabilities` DTO never enable either action.
+`real_lobby_creation_authorized` and `real_lobby_join_authorized` product fields. Provider probe
+booleans never enable either action.
 
-## Control-contract mismatches at `origin/main` 7868860
+## Integrated control contract
 
-The client consumes the current additive JSON shapes where they exist, but these missing server /
-protocol interfaces prevent an end-to-end managed lobby at this revision:
+The integration branch aligns the shell with the capability-protected control surface:
 
-1. `CapabilitiesResponse` has provider evidence only and no product-readiness fields. The shell
-   therefore displays both actions but keeps them disabled.
-2. `CreateLobbyRequest` requires client-selected `provisioning_mode`; the accepted public contract
-   requires the server to select `tailnet_per_lobby`. This client omits the field and cannot call the
-   current create route successfully.
-3. `CreateLobbyResponse` does not model the server's one-time creator capability wrapper.
-4. Invitation preview/issue/consume DTOs and `POST .../invitations` are absent.
-5. `JoinLobbyResponse` has an enrollment key but no participant capability, roster/session
-   generation, or peer endpoint/public-key projection.
-6. No endpoint registration/session projection or participant network-report DTO/route exists.
-7. `LobbyNetworkView` is aggregate-only. It cannot provide a per-roster directional route/RTT row;
-   the UI uses local peer probes for per-rider values and leaves missing values `unknown`.
-8. Current start/leave/destroy mutations still use asserted player headers rather than the target
-   manage/leave-self/destroy capabilities.
+1. Public real create consumes an operator-issued one-use grant, sends the client UUID only as the
+   creator subject, omits `provisioning_mode`, and receives a first-response-only creator capability.
+2. The creator issues a one-use invitation. Every rider, including the creator, consumes an
+   invitation and receives a first-response-only participant capability plus enrollment key.
+3. Lobby reads return exact `network_generation`, monotonic `roster_revision`, and a
+   capability-protected memory-only session endpoint projection. The peer bridge binds
+   `PeerSession` to that exact roster and ignores unknown senders.
+4. Each participant registers only a validated tailnet application endpoint and submits bounded
+   route/RTT election measurements after actual peer probes. Raw endpoints are never rendered in
+   the waiting-room roster.
+5. Start carries the creator identifier but is authorized by `lobby.manage`; self-leave is
+   authorized by the participant capability. Leave sends a peer Leave, waits up to one second for
+   RustScale shutdown, then calls the control API. End Lobby reports cleanup as confirmed only when
+   the exact network lifecycle says the resource is absent.
 
-The HTTP adapter accepts the additive target fields so integration can proceed once protocol and
-control owners land them, without editing server/control-owned files in this workstream.
+`res://lobby/tests/lobby_contract_test.tscn` is a credential-free contract smoke. It proves strict
+origin and join-code parsing, exact-roster sender rejection, required HTTP glue, no secret sink in
+the adapter, unknown health behavior, and truthful cleanup copy. It is not a live provider,
+two-download, or human-play qualification.
 
 ## Activation blocker: native secret handoff
 
@@ -37,7 +38,10 @@ GDScript `String` / `GString` copies before `PeerSession.connect_rustscale` move
 into zeroizing Rust memory. This does **not** satisfy the final direct native secret-handoff design.
 Before real readiness can ever return true, replace `lobby_http_client.gd` with the planned native
 `lobby_client.rs` fixed-origin HTTPS worker and feed the key directly into the RustScale worker.
-Until then the explicit product-readiness gate must remain false.
+Until then the explicit product-readiness gates must remain false.
 
-No code here authorizes hosted real mutations, adds control-service gameplay membership, publishes
-an artifact, or changes the `v0.2.0` release gate.
+The smallest bridge distributes endpoints and authoritative snapshots, but it does not yet
+simulate distinct remote horses from rider inputs or network authoritative combat results. It
+therefore cannot qualify one coherent peer-authoritative M2 match. No code here authorizes hosted
+real mutations, adds control-service gameplay membership, publishes an artifact, or changes the
+`v0.2.0` release gate.
