@@ -14,6 +14,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use spurfire_control::ChildOAuthCredentials;
 use spurfire_protocol::{LobbyId, TailnetDnsName};
@@ -82,6 +83,8 @@ pub struct EncryptedChildVault {
     key: Arc<Zeroizing<[u8; 32]>>,
     image: Arc<RwLock<VaultImage>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Lifetime-held OS advisory lock fencing every writer of this vault image.
+    _writer_lock: Arc<std::fs::File>,
 }
 
 impl std::fmt::Debug for EncryptedChildVault {
@@ -100,6 +103,15 @@ impl EncryptedChildVault {
         key_path: impl AsRef<Path>,
     ) -> Result<Self, VaultError> {
         let path = path.into();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| VaultError::Io)?;
+        }
+        let writer_lock = open_writer_lock(&path).map_err(|_| VaultError::Io)?;
         let key = read_key_file(key_path.as_ref()).await?;
         let image = match tokio::fs::read(&path).await {
             Ok(bytes) => {
@@ -121,6 +133,7 @@ impl EncryptedChildVault {
             key: Arc::new(Zeroizing::new(key)),
             image: Arc::new(RwLock::new(image)),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _writer_lock: Arc::new(writer_lock),
         })
     }
 
@@ -262,13 +275,14 @@ impl EncryptedChildVault {
         }
         let bytes = serde_json::to_vec(image).map_err(|_| VaultError::Invalid)?;
         let temporary = self.path.with_extension("tmp");
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)
-            .await
-            .map_err(|_| VaultError::Io)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).await.map_err(|_| VaultError::Io)?;
         file.write_all(&bytes).await.map_err(|_| VaultError::Io)?;
         file.sync_all().await.map_err(|_| VaultError::Io)?;
         drop(file);
@@ -286,6 +300,20 @@ impl EncryptedChildVault {
             .map_err(|_| VaultError::Io)?;
         Ok(())
     }
+}
+
+fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(lock_path)?;
+    file.try_lock_exclusive()?;
+    Ok(file)
 }
 
 async fn read_key_file(path: &Path) -> Result<[u8; 32], VaultError> {

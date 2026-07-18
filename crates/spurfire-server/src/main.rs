@@ -116,9 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && reconciled
                 && capabilities.mode_available(config.provisioning_mode))
     );
-    let result = axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
     reaper.abort();
     result?;
     Ok(())

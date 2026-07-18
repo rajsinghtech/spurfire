@@ -125,6 +125,9 @@ pub struct LobbyResponse {
     pub network_generation: u64,
     /// Monotonic roster revision. Endpoint registrations are bound to it.
     pub roster_revision: u64,
+    /// Current election input hash used by the authority heartbeat, when elected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_input_hash: Option<InputHash>,
     /// Capability-protected, memory-only gameplay endpoint projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<LobbySessionProjection>,
@@ -579,6 +582,8 @@ pub struct StartLobbyResponse {
     pub map_seed: u64,
     /// Elected authority.
     pub authority: AuthoritySummary,
+    /// Exact deterministic election input bound to authority heartbeats.
+    pub input_hash: InputHash,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
@@ -978,6 +983,7 @@ mod tests {
             state: LobbyState::Starting,
             map_seed: 42,
             authority,
+            input_hash: InputHash::from_bytes([7; 32]),
             metadata: ResponseMetadata::default(),
         };
         let value = serde_json::to_value(response).unwrap();

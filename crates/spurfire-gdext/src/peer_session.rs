@@ -542,7 +542,8 @@ impl PeerSession {
             .is_some_and(|sender| sender.send(WorkerCommand::QueryRoute { peer_ip }).is_ok())
     }
 
-    /// Build a signed, sequenced peer Leave packet before transport shutdown.
+    /// Build a sequenced peer Leave packet before transport shutdown.
+    /// Real admission remains closed until envelopes are cryptographically bound.
     #[func]
     fn make_leave(&mut self, tick: i64) -> PackedByteArray {
         self.make_packet(tick, PeerPayload::Leave)

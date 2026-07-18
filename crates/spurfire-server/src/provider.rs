@@ -1249,40 +1249,48 @@ impl NetworkProvider for TailscaleProvider {
                 .ok_or(ProviderError::IdentityMismatch)?,
             tailnet_dns_name: request.identity.tailnet_dns_name.clone(),
         };
-        if let Some(durable) = &self.durable_child_vault {
-            let (_, version) = durable
-                .get_exact(&durable_identity)
-                .map_err(map_vault_error)?;
-            durable
-                .delete_cas(&durable_identity, version)
-                .await
-                .map_err(map_vault_error)?;
+        // Validate every in-memory custody layer before the irreversible durable
+        // CAS deletion. A durable tombstone (record missing for this exact tuple)
+        // is restart-idempotent proof that a prior erase completed before the
+        // non-secret cleanup state commit.
+        {
+            let vault = self
+                .child_vault
+                .read()
+                .map_err(|_| ProviderError::Unavailable {
+                    operation: "child_secret_vault",
+                })?;
+            if let Some(access) = vault.get(&request.lobby_id) {
+                if request.network_generation == 0
+                    || access.network_generation != request.network_generation
+                    || access.provider_tailnet_id != durable_identity.provider_tailnet_id
+                    || access.dns_name != durable_identity.tailnet_dns_name
+                {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+            } else if self.durable_child_vault.is_none() {
+                return Err(ProviderError::ChildSecretUnavailable);
+            }
         }
-        let mut vault = self
-            .child_vault
+        if let Some(durable) = &self.durable_child_vault {
+            match durable.get_exact(&durable_identity) {
+                Ok((credentials, version)) => {
+                    drop(credentials);
+                    durable
+                        .delete_cas(&durable_identity, version)
+                        .await
+                        .map_err(map_vault_error)?;
+                }
+                Err(VaultError::Missing) => {}
+                Err(error) => return Err(map_vault_error(error)),
+            }
+        }
+        self.child_vault
             .write()
             .map_err(|_| ProviderError::Unavailable {
                 operation: "child_secret_vault",
-            })?;
-        let Some(access) = vault.get(&request.lobby_id) else {
-            if self.durable_child_vault.is_some() {
-                return Ok(());
-            }
-            return Err(ProviderError::ChildSecretUnavailable);
-        };
-        if request.network_generation == 0
-            || access.network_generation != request.network_generation
-            || access.provider_tailnet_id
-                != request
-                    .identity
-                    .provider_tailnet_id
-                    .as_deref()
-                    .ok_or(ProviderError::IdentityMismatch)?
-            || access.dns_name != request.identity.tailnet_dns_name
-        {
-            return Err(ProviderError::IdentityMismatch);
-        }
-        vault.remove(&request.lobby_id);
+            })?
+            .remove(&request.lobby_id);
         Ok(())
     }
 

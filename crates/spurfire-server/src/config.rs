@@ -33,7 +33,18 @@ pub struct Config {
     /// Explicit development-only compatibility for legacy asserted-player mutations.
     pub allow_legacy_client_assertions: bool,
     /// Trust `X-Forwarded-For` only when the deployment has a known gateway boundary.
+    /// This remains unsupported until an explicit proxy allowlist is configured.
     pub trust_forwarded_for: bool,
+    /// Test-harness escape hatch for provider fault tests only. This is never
+    /// loaded from the environment and must remain false in the server binary.
+    #[doc(hidden)]
+    pub test_only_allow_legacy_real_mutations: bool,
+    /// Test-harness escape hatch for exercising the future real Alpha contract.
+    /// Production readiness remains closed until the native secret handoff,
+    /// authenticated coherent P2P runtime, restrictive policy, persistent abuse
+    /// controls, and live qualification are implemented.
+    #[doc(hidden)]
+    pub test_only_alpha_runtime_qualified: bool,
     /// Encrypted dynamic child-vault file (required when real mutations are enabled).
     pub child_vault_path: PathBuf,
     /// File containing exactly 32 raw bytes or 64 hex characters; never an env value.
@@ -58,6 +69,8 @@ impl Default for Config {
             real_admission_enabled: false,
             allow_legacy_client_assertions: false,
             trust_forwarded_for: false,
+            test_only_allow_legacy_real_mutations: false,
+            test_only_alpha_runtime_qualified: false,
             child_vault_path: PathBuf::from(".spurfire/child-vault.json"),
             child_vault_key_path: PathBuf::from(".spurfire/child-vault.key"),
             shared_tailnet: DEFAULT_SHARED_TAILNET.to_owned(),
@@ -82,6 +95,8 @@ impl fmt::Debug for Config {
                 &self.allow_legacy_client_assertions,
             )
             .field("trust_forwarded_for", &self.trust_forwarded_for)
+            .field("test_only_allow_legacy_real_mutations", &false)
+            .field("test_only_alpha_runtime_qualified", &false)
             .field("child_vault_path", &self.child_vault_path)
             .field("child_vault_key_path", &"<configured-key-file>")
             .field("shared_tailnet", &"<configured>")
@@ -172,8 +187,11 @@ impl Config {
         if config.real_admission_enabled && !config.real_mutations_enabled {
             return Err(ConfigError::AdmissionRequiresMutationGate);
         }
-        if config.allow_legacy_client_assertions && config.real_admission_enabled {
-            return Err(ConfigError::LegacyAssertionsConflictWithAdmission);
+        if config.allow_legacy_client_assertions && config.real_mutations_enabled {
+            return Err(ConfigError::LegacyAssertionsConflictWithRealMutations);
+        }
+        if config.trust_forwarded_for {
+            return Err(ConfigError::TrustedProxyAllowlistRequired);
         }
         if config.force_dry_run && config.real_mutations_enabled {
             return Err(ConfigError::ConflictingMutationSwitches);
@@ -260,9 +278,12 @@ pub enum ConfigError {
     /// Admission cannot open while provider mutation remains disabled.
     #[error("real admission requires SPURFIRE_REAL_MUTATIONS_ENABLED=1")]
     AdmissionRequiresMutationGate,
-    /// Legacy assertions are forbidden whenever real admission is open.
-    #[error("legacy client assertions conflict with real admission")]
-    LegacyAssertionsConflictWithAdmission,
+    /// Legacy assertions are forbidden whenever any real provider mutation is enabled.
+    #[error("legacy client assertions conflict with real mutations")]
+    LegacyAssertionsConflictWithRealMutations,
+    /// Forwarded addresses are rejected until the deployment configures a verified proxy chain.
+    #[error("SPURFIRE_TRUST_FORWARDED_FOR=1 requires an explicit trusted-proxy allowlist")]
+    TrustedProxyAllowlistRequired,
     /// Child vault path was empty.
     #[error("SPURFIRE_CHILD_VAULT_PATH must not be empty")]
     InvalidChildVaultPath,

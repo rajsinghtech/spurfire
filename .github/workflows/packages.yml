@@ -89,8 +89,8 @@ jobs:
             }
             evidence="docs/release-evidence/${version}.json"
             scripts/check-alpha-evidence.py "$evidence" \
-              --version "$version" \
-              --source-sha "$GITHUB_SHA"
+              --version "$version"
+            scripts/check-release-tag-binding.sh "$version" "$GITHUB_SHA" >/dev/null
 
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {

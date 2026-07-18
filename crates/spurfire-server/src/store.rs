@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use spurfire_protocol::{
     AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby,
@@ -407,6 +408,15 @@ impl StoredLobby {
         })
     }
 
+    /// Revokes every participant capability bound to a player who has left.
+    pub(crate) fn revoke_player_capabilities(&mut self, player_id: PlayerId) {
+        for capability in &mut self.capabilities {
+            if capability.player_id() == Some(player_id) {
+                capability.revoked = true;
+            }
+        }
+    }
+
     /// Revokes all creator control capabilities.
     pub fn revoke_creator_capability(&mut self) {
         for capability in &mut self.capabilities {
@@ -707,12 +717,23 @@ impl LobbyStore for InMemoryStore {
 pub struct JsonFileStore {
     path: Arc<PathBuf>,
     inner: Arc<RwLock<StoreData>>,
+    /// Lifetime-held OS advisory lock fencing every writer of this state image.
+    _writer_lock: Arc<std::fs::File>,
 }
 
 impl JsonFileStore {
     /// Opens existing state or creates an empty in-memory image when absent.
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| StoreError::Io)?;
+        }
+        let writer_lock = open_writer_lock(&path).map_err(|_| StoreError::Io)?;
         let (mut data, existed) = match tokio::fs::read(&path).await {
             Ok(bytes) => (
                 serde_json::from_slice(&bytes).map_err(|_| StoreError::Decode)?,
@@ -730,6 +751,7 @@ impl JsonFileStore {
         Ok(Self {
             path: Arc::new(path),
             inner: Arc::new(RwLock::new(data)),
+            _writer_lock: Arc::new(writer_lock),
         })
     }
 
@@ -1238,6 +1260,20 @@ fn age_at_least(now: UnixMillis, earlier: UnixMillis, duration: u64) -> bool {
         .is_some_and(|age| age >= duration)
 }
 
+fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(lock_path)?;
+    file.try_lock_exclusive()?;
+    Ok(file)
+}
+
 async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     if let Some(parent) = path
         .parent()
@@ -1249,13 +1285,14 @@ async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     }
     let bytes = serde_json::to_vec(data).map_err(|_| StoreError::Decode)?;
     let temporary = path.with_extension("tmp");
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .await
-        .map_err(|_| StoreError::Io)?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).await.map_err(|_| StoreError::Io)?;
     file.write_all(&bytes).await.map_err(|_| StoreError::Io)?;
     file.sync_all().await.map_err(|_| StoreError::Io)?;
     drop(file);

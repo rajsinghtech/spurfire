@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      source_sha: ${{ steps.meta.outputs.source_sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -40,10 +41,12 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             test "$GITHUB_REF_NAME" = "v$version"
             scripts/check-alpha-evidence.py "docs/release-evidence/${version}.json" \
-              --version "$version" \
-              --source-sha "$GITHUB_SHA"
+              --version "$version"
+            source_sha="$(scripts/check-release-tag-binding.sh "$version" "$GITHUB_SHA")"
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          else
+            source_sha="$GITHUB_SHA"
           fi
           bash -n scripts/check-alpha-smoke-log.sh scripts/run-alpha-two-client.sh
           python3 -m py_compile \
@@ -53,6 +56,7 @@ jobs:
             scripts/make-alpha-candidate-metadata.py
           python3 -m unittest discover -s scripts/tests -v
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
   linux:
     name: Linux x86_64 client
@@ -327,7 +331,7 @@ jobs:
           python3 scripts/make-alpha-candidate-metadata.py \
             --input-dir candidate \
             --output-dir candidate-metadata \
-            --source-sha "$GITHUB_SHA" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME"
@@ -352,7 +356,7 @@ jobs:
           python3 scripts/make-alpha-candidate-metadata.py \
             --input-dir candidate \
             --output-dir candidate-metadata \
-            --source-sha "$GITHUB_SHA" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME" \
@@ -376,7 +380,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: alpha-candidate-${{ github.sha }}
+          name: alpha-candidate-${{ needs.metadata.outputs.source_sha }}
           path: candidate
           if-no-files-found: error
           retention-days: 14

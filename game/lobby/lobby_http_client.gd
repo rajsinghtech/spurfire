@@ -10,6 +10,7 @@ signal network_updated(response: Dictionary)
 signal endpoint_registered(response: Dictionary)
 signal report_completed(response: Dictionary)
 signal start_completed(response: Dictionary)
+signal heartbeat_completed(response: Dictionary)
 signal leave_completed(response: Dictionary)
 signal end_completed(response: Dictionary)
 signal request_failed(operation: String, safe_message: String)
@@ -125,6 +126,16 @@ func start_lobby(lobby_id: String) -> void:
 	_request(
 		"start", HTTPClient.METHOD_POST, "/v1/lobbies/%s/start" % lobby_id,
 		{"creator_player_id": _player_id}, _creator_capability, true
+	)
+
+func authority_heartbeat(lobby_id: String, input_hash: String) -> void:
+	if _participant_capability.is_empty() or input_hash.length() != 64:
+		return
+	_request(
+		"heartbeat", HTTPClient.METHOD_POST,
+		"/v1/lobbies/%s/heartbeat" % lobby_id,
+		{"player_id": _player_id, "input_hash": input_hash},
+		_participant_capability
 	)
 
 func leave_lobby(lobby_id: String) -> void:
@@ -250,6 +261,8 @@ func _on_request_completed(result: int, response_code: int, response_headers: Pa
 			report_completed.emit(_without_secrets(response))
 		"start":
 			start_completed.emit(_without_secrets(response))
+		"heartbeat":
+			heartbeat_completed.emit(_without_secrets(response))
 		"leave":
 			leave_completed.emit(_without_secrets(response))
 		"end":

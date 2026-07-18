@@ -42,6 +42,9 @@ var _endpoint_registered := false
 var _registered_roster_revision := 0
 var _poll_elapsed := 0.0
 var _report_elapsed := 0.0
+var _heartbeat_elapsed := 0.0
+var _endpoint_renew_elapsed := 0.0
+var _authority_input_hash := ""
 var _quit_after_leave := false
 var _leaving := false
 
@@ -58,10 +61,12 @@ func _ready() -> void:
 	_show(Screen.TITLE)
 
 func _process(delta: float) -> void:
-	if _screen not in [Screen.WAITING, Screen.TEARDOWN] or _lobby_id.is_empty():
+	if _screen not in [Screen.WAITING, Screen.TEARDOWN, Screen.MATCH] or _lobby_id.is_empty():
 		return
 	_poll_elapsed += delta
 	_report_elapsed += delta
+	_heartbeat_elapsed += delta
+	_endpoint_renew_elapsed += delta
 	if _poll_elapsed >= 1.0 and api.has_participant_access():
 		_poll_elapsed = 0.0
 		api.poll_lobby(_lobby_id)
@@ -71,6 +76,18 @@ func _process(delta: float) -> void:
 		if not report.is_empty():
 			_report_elapsed = 0.0
 			api.submit_measurements(_lobby_id, report)
+	if _endpoint_renew_elapsed >= 30.0 and api.has_participant_access():
+		_endpoint_renew_elapsed = 0.0
+		_try_register_endpoint("", 0, true)
+	if (
+		_screen == Screen.MATCH
+		and _heartbeat_elapsed >= 1.0
+		and _bridge
+		and _bridge.local_is_authority
+		and not _authority_input_hash.is_empty()
+	):
+		_heartbeat_elapsed = 0.0
+		api.authority_heartbeat(_lobby_id, _authority_input_hash)
 
 func _notification(what: int) -> void:
 	if what != NOTIFICATION_WM_CLOSE_REQUEST:
@@ -91,6 +108,7 @@ func _connect_signals() -> void:
 	api.endpoint_registered.connect(_on_endpoint_registered)
 	api.report_completed.connect(_on_report_completed)
 	api.start_completed.connect(_on_started)
+	api.heartbeat_completed.connect(_on_heartbeat)
 	api.leave_completed.connect(_on_left)
 	api.end_completed.connect(_on_end_requested)
 	api.request_failed.connect(_on_request_failed)
@@ -201,6 +219,7 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	_bridge = SpurfireLobbyPeerBridge.new()
 	_bridge.name = "LobbyPeerBridge"
 	_course.add_child(_bridge)
+	_bridge.authority_departed.connect(_on_authority_departed)
 	if not _bridge.configure({"peer_session": peer_session, "local_rider": rider, "remote_rider": remote}, _player_id):
 		return false
 	m2.set("replication", _bridge)
@@ -217,8 +236,8 @@ func _on_peer_connected(address: String, port: int) -> void:
 	waiting_status.text = "Rider network online • registering this session…"
 	_try_register_endpoint(address, port)
 
-func _try_register_endpoint(address: String = "", port: int = 0) -> void:
-	if _endpoint_registered or _network_generation <= 0:
+func _try_register_endpoint(address: String = "", port: int = 0, force: bool = false) -> void:
+	if (_endpoint_registered and not force) or _network_generation <= 0:
 		return
 	if address.is_empty():
 		address = str(peer_session.get("tailnet_ip"))
@@ -242,11 +261,17 @@ func _on_peer_failed(_message: String) -> void:
 	waiting_status.text = "Peer network failed. Leaving safely…"
 	api.leave_lobby(_lobby_id)
 
+func _on_authority_departed() -> void:
+	if _screen == Screen.MATCH and not _leaving:
+		_begin_leave()
+		teardown_status.text = "Host left • ending this Alpha match safely…"
+
 func _on_lobby_updated(response: Dictionary) -> void:
 	var lobby_value = response.get("lobby", response)
 	if lobby_value is Dictionary:
 		_lobby = lobby_value as Dictionary
 	_network_generation = int(response.get("network_generation", _network_generation))
+	_authority_input_hash = str(response.get("authority_input_hash", _authority_input_hash))
 	var next_roster_revision := int(response.get("roster_revision", _lobby.get("roster_revision", 0)))
 	if next_roster_revision != _roster_revision:
 		_roster_revision = next_roster_revision
@@ -275,9 +300,13 @@ func _on_start_pressed() -> void:
 	api.start_lobby(_lobby_id)
 
 func _on_started(response: Dictionary) -> void:
+	_authority_input_hash = str(response.get("input_hash", ""))
 	if _bridge:
 		_bridge.apply_projection(response)
 	_start_match()
+
+func _on_heartbeat(response: Dictionary) -> void:
+	_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
 
 func _start_match() -> void:
 	if _course is Node3D:
@@ -412,6 +441,9 @@ func _reset_to_title() -> void:
 	_leaving = false
 	_network_generation = 0
 	_roster_revision = 0
+	_authority_input_hash = ""
+	_heartbeat_elapsed = 0.0
+	_endpoint_renew_elapsed = 0.0
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_show(Screen.TITLE)
 	title_status.text = "Restart the client to enter another private lobby."

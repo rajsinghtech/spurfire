@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -12,8 +12,9 @@ use std::{
 };
 
 use axum::{
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Path, State},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{from_fn, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -72,6 +73,7 @@ const PROVIDER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FINAL_SCORE_ABS: i64 = 1_000_000;
 const MAX_MATCH_DURATION_S: u32 = 60 * 60;
 const AUTHORIZATION_HEADER: &str = "authorization";
+const VERIFIED_PEER_IP_HEADER: &str = "x-spurfire-internal-peer-ip";
 const CAPABILITY_SCHEME: &str = "Spurfire-Capability";
 const CAPABILITY_HASH_DOMAIN: &[u8] = b"spurfire-capability-v2\0";
 const INVITATION_TTL_MS: u64 = 10 * 60 * 1_000;
@@ -627,7 +629,21 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(64 * 1_024))
+        .layer(from_fn(capture_verified_peer_ip))
         .with_state(state)
+}
+
+async fn capture_verified_peer_ip(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    // Never trust a client-supplied internal attribution header. Axum inserts
+    // ConnectInfo only from the accepted socket when the binary uses
+    // into_make_service_with_connect_info.
+    request.headers_mut().remove(VERIFIED_PEER_IP_HEADER);
+    if let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        if let Ok(value) = HeaderValue::from_str(&peer.ip().to_string()) {
+            request.headers_mut().insert(VERIFIED_PEER_IP_HEADER, value);
+        }
+    }
+    next.run(request).await
 }
 
 /// Alias that reads naturally in embedders.
@@ -762,9 +778,19 @@ async fn create_lobby(
         .dry_run(effective_dry_run));
     }
 
+    let legacy_real_test_mode = state.config.allow_legacy_client_assertions
+        && state.config.test_only_allow_legacy_real_mutations;
+    if !effective_dry_run && state.config.allow_legacy_client_assertions && !legacy_real_test_mode {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "legacy_real_mutations_forbidden",
+            "legacy asserted-player mode cannot perform real provider mutations",
+        )
+        .dry_run(false));
+    }
     let effective_mode = if effective_dry_run {
         ProvisioningMode::DryRun
-    } else if state.config.allow_legacy_client_assertions {
+    } else if legacy_real_test_mode {
         request.provisioning_mode
     } else {
         if !real_creation_authorized(&state) {
@@ -790,7 +816,7 @@ async fn create_lobby(
     let now = state.clock.now();
     let real_create_grant = if effective_dry_run {
         None
-    } else if state.config.allow_legacy_client_assertions {
+    } else if legacy_real_test_mode {
         let generated = GeneratedCapability::generate();
         state
             .store
@@ -1040,6 +1066,10 @@ async fn get_lobby_inner(
         lobby: stored.snapshot(),
         network_generation: stored.network_generation,
         roster_revision: stored.roster_revision,
+        authority_input_hash: stored
+            .last_election
+            .as_ref()
+            .map(|election| election.input_hash),
         session: Some(session),
         metadata: metadata_for(stored.dry_run || dry_hint),
     })
@@ -1136,11 +1166,10 @@ async fn create_invitation(
     .await?;
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
-    let mut stored = state
-        .store
-        .get(lobby_id)
-        .await
-        .ok_or_else(|| lobby_not_found(false))?;
+    let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
+    let dry_run = stored.dry_run;
+    ensure_new_lobby_work_authorized(&state, &stored)?;
+    ensure_joinable(stored.lobby.state, dry_run)?;
     if let Some(actor) = legacy_actor {
         ensure_creator(&stored, actor, stored.dry_run)?;
     }
@@ -1232,17 +1261,7 @@ async fn join_lobby(
         ));
     }
 
-    if let Some(verifier) = invitation_verifier {
-        if !stored.consume_invitation(&verifier, now) {
-            return Err(lobby_not_found(false));
-        }
-        state
-            .store
-            .replace(stored.clone())
-            .await
-            .map_err(|error| store_api_error(&error, dry_run))?;
-    }
-
+    ensure_new_lobby_work_authorized(&state, &stored)?;
     request
         .validate(WIRE_VERSION)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
@@ -1346,6 +1365,14 @@ async fn join_lobby(
             .dry_run(dry_run)
         })?;
 
+    // Consume the one-use invitation in the same durable reservation update,
+    // only after validation, state/capacity checks, abuse budgets, and provider
+    // concurrency have succeeded. Pre-mint failures therefore remain retryable.
+    if let Some(verifier) = invitation_verifier {
+        if !stored.consume_invitation(&verifier, now) {
+            return Err(lobby_not_found(false));
+        }
+    }
     let expires_at = now.saturating_add(JOIN_CREDENTIAL_TTL_MS);
     stored.pending_issuances.insert(
         request.player_id,
@@ -1679,6 +1706,7 @@ async fn leave_lobby(
     stored.measurements.clear();
     stored.authenticated_reporters.clear();
     stored.pending_issuances.remove(&request.player_id);
+    stored.revoke_player_capabilities(request.player_id);
     stored
         .join_replays
         .retain(|_, replay| replay.player_id != request.player_id);
@@ -2267,18 +2295,7 @@ struct AuthorityEnvelope {
 
 async fn enforce_mutation_budget(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let now = state.clock.now();
-    let ip = if state.config.trust_forwarded_for {
-        headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("unattributed")
-            .to_owned()
-    } else {
-        "unattributed".to_owned()
-    };
+    let ip = verified_client_ip(headers);
     let actor_bytes = headers.get(AUTHORIZATION_HEADER).map_or_else(
         || {
             headers
@@ -2325,18 +2342,7 @@ async fn enforce_route_budget(
     create: bool,
 ) -> Result<(), ApiError> {
     let now = state.clock.now();
-    let ip = if state.config.trust_forwarded_for {
-        headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("unattributed")
-            .to_owned()
-    } else {
-        "unattributed".to_owned()
-    };
+    let ip = verified_client_ip(headers);
     let actor_digest = sha256(
         headers
             .get(AUTHORIZATION_HEADER)
@@ -2381,16 +2387,49 @@ async fn enforce_route_budget(
     Ok(())
 }
 
+fn verified_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get(VERIFIED_PEER_IP_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unattributed")
+        .to_owned()
+}
+
 fn real_creation_authorized(state: &AppState) -> bool {
     state.config.real_mutations_enabled
         && state.config.real_admission_enabled
         && !state.config.allow_legacy_client_assertions
         && state.config.provisioning_mode == ProvisioningMode::TailnetPerLobby
         && state.startup_reconciled.load(Ordering::Acquire)
+        && state.config.test_only_alpha_runtime_qualified
         && state
             .provider
             .cached_capabilities()
             .tailnet_per_lobby_available()
+}
+
+/// Admission predicate for any new real work (invitation issuance, invitation
+/// consumption, and enrollment-key minting). Cleanup deliberately does not use
+/// this predicate so operators can close admission while cleanup remains live.
+fn ensure_new_lobby_work_authorized(
+    state: &AppState,
+    stored: &StoredLobby,
+) -> Result<(), ApiError> {
+    if stored.dry_run
+        || real_creation_authorized(state)
+        || (state.config.allow_legacy_client_assertions
+            && state.config.test_only_allow_legacy_real_mutations)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "real_admission_closed",
+            "real lobby admission is closed",
+        )
+        .dry_run(false))
+    }
 }
 
 fn secure_lobby_id(value: &str) -> Result<LobbyId, ApiError> {
@@ -2955,6 +2994,11 @@ fn start_response(stored: &StoredLobby, dry_run: bool) -> Result<StartLobbyRespo
             .lobby
             .authority
             .clone()
+            .ok_or_else(|| internal_error(dry_run))?,
+        input_hash: stored
+            .last_election
+            .as_ref()
+            .map(|election| election.input_hash)
             .ok_or_else(|| internal_error(dry_run))?,
         metadata: metadata_for(dry_run),
     })

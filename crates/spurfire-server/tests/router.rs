@@ -316,6 +316,7 @@ fn live_app(
     let config = Config {
         real_mutations_enabled: true,
         allow_legacy_client_assertions: true,
+        test_only_allow_legacy_real_mutations: true,
         shared_tailnet: "shared-test.ts.net".to_owned(),
         ..Config::default()
     };
@@ -1122,6 +1123,7 @@ async fn durable_capability_is_hash_only_and_survives_reopen() {
     let durable = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(!durable.contains(&capability));
     assert!(!durable.contains("creator_capability\":\""));
+    drop(app);
 
     let reopened = Arc::new(JsonFileStore::open(&path).await.unwrap());
     let app = build_router(
@@ -1642,6 +1644,7 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let config = Config {
         real_mutations_enabled: true,
         real_admission_enabled: true,
+        test_only_alpha_runtime_qualified: true,
         provisioning_mode: ProvisioningMode::TailnetPerLobby,
         shared_tailnet: "shared-test.ts.net".to_owned(),
         ..Config::default()

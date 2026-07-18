@@ -1,6 +1,8 @@
 class_name SpurfireLobbyPeerBridge
 extends Node
 
+signal authority_departed
+
 var peer_session: Node
 var local_rider: CharacterBody3D
 var remote_rider_template: Node3D
@@ -11,6 +13,8 @@ var simulation_tick := 0
 var _peers: Dictionary = {}
 var _remote_riders: Dictionary = {}
 var _last_route_query_ms := 0
+var _session_binding_key := ""
+var _authority_player_id := ""
 
 func configure(nodes: Dictionary, player_id: String) -> bool:
 	peer_session = nodes.get("peer_session") as Node
@@ -43,10 +47,16 @@ func apply_projection(response: Dictionary) -> bool:
 	for value in roster_value:
 		if value is Dictionary:
 			roster_ids.append(str((value as Dictionary).get("player_id", "")))
-	if not peer_session.configure_roster_session(
-		lobby_id, local_player_id, authority_id, roster_ids, Time.get_ticks_msec()
-	):
-		return false
+	var sorted_roster := Array(roster_ids)
+	sorted_roster.sort()
+	var binding_key := "%s|%s|%s" % [lobby_id, authority_id, ",".join(sorted_roster)]
+	if binding_key != _session_binding_key:
+		if not peer_session.configure_roster_session(
+			lobby_id, local_player_id, authority_id, roster_ids, Time.get_ticks_msec()
+		):
+			return false
+		_session_binding_key = binding_key
+	_authority_player_id = authority_id
 	local_is_authority = authority_id == local_player_id
 	var projection_value = response.get("session", response.get("session_projection", {}))
 	if not projection_value is Dictionary:
@@ -161,6 +171,9 @@ func measurement_report() -> Dictionary:
 		"observed_peer_count": _peers.size(),
 	}
 
+func get_peer_status() -> Dictionary:
+	return peer_health()
+
 func peer_health() -> Dictionary:
 	var result := {}
 	var now := Time.get_ticks_msec()
@@ -179,14 +192,18 @@ func _send_to_all(packet: PackedByteArray) -> void:
 		peer_session.send_packet(packet, str(peer.address), int(peer.port))
 
 func _on_packet_received(packet: PackedByteArray, source_ip: String, source_port: int) -> void:
-	var outcome := int(peer_session.accept_packet(packet, Time.get_ticks_msec()))
-	if outcome != 0:
-		return
+	# Decode only enough to select the exact control-plane endpoint. Do not let a
+	# packet mutate replay/session state until sender and source both match.
 	var payload := peer_session.decode_packet(packet) as Dictionary
 	var sender := str(payload.get("sender", ""))
 	if not _peers.has(sender):
 		return
 	var peer := _peers[sender] as Dictionary
+	if str(peer.address) != source_ip or int(peer.port) != source_port:
+		return
+	var outcome := int(peer_session.accept_packet(packet, Time.get_ticks_msec()))
+	if outcome != 0:
+		return
 	peer.last_seen_ms = Time.get_ticks_msec()
 	match str(payload.get("type", "")):
 		"probe":
@@ -205,6 +222,10 @@ func _on_packet_received(packet: PackedByteArray, source_ip: String, source_port
 					payload.get("velocity", Vector3.ZERO), float(payload.get("yaw_degrees", 0.0)),
 					int(payload.get("stance_id", 1))
 				)
+		"leave":
+			_peers.erase(sender)
+			if sender == _authority_player_id:
+				authority_departed.emit()
 
 func _on_route_updated(peer_ip: String, route: String) -> void:
 	for peer: Dictionary in _peers.values():

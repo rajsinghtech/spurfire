@@ -61,8 +61,8 @@ jobs:
           evidence="docs/release-evidence/${version}.json"
           scripts/check-alpha-evidence.py "$evidence" \
             --version "$version" \
-            --source-sha "$tag_sha" \
             --expected-sha256 "$EVIDENCE_SHA256"
+          source_sha="$(scripts/check-release-tag-binding.sh "$version" "$tag_sha")"
           git cat-file -e "$RELEASE_TAG:$notes"
           git show "$RELEASE_TAG:$notes" > "$RUNNER_TEMP/release-notes.md"
           test -s "$RUNNER_TEMP/release-notes.md"
@@ -79,8 +79,7 @@ jobs:
           jq -e \
             --arg repository "$expected_repository" \
             --arg workflow "$expected_workflow" \
-            --arg tag "$RELEASE_TAG" \
-            --arg sha "$tag_sha" \
+            --arg sha "$source_sha" \
             --argjson workflow_id "$workflow_id" \
             '(.name == "Client Preflight") and
              (.path == $workflow) and
@@ -88,7 +87,6 @@ jobs:
              (.event == "push") and
              (.status == "completed") and
              (.conclusion == "success") and
-             (.head_branch == $tag) and
              (.head_sha == $sha) and
              (.repository.full_name == $repository) and
              (.head_repository.full_name == $repository)' \
@@ -108,19 +106,17 @@ jobs:
             ] | sort_by(.name))' <<< "$jobs_json" > /dev/null
 
           ci_runs_json="$(
-            gh api "/repos/$expected_repository/actions/workflows/ci.yml/runs?head_sha=$tag_sha&event=push&status=completed&per_page=100"
+            gh api "/repos/$expected_repository/actions/workflows/ci.yml/runs?head_sha=$source_sha&event=push&status=completed&per_page=100"
           )"
           ci_run_id="$(
             jq -er \
               --arg repository "$expected_repository" \
-              --arg tag "$RELEASE_TAG" \
-              --arg sha "$tag_sha" '
+              --arg sha "$source_sha" '
                 [.workflow_runs[] |
                   select(
                     (.name == "CI") and
                     (.path == ".github/workflows/ci.yml") and
                     (.event == "push") and
-                    (.head_branch == $tag) and
                     (.head_sha == $sha) and
                     (.conclusion == "success") and
                     (.repository.full_name == $repository) and
@@ -131,6 +127,8 @@ jobs:
               <<< "$ci_runs_json"
           )"
           [[ "$ci_run_id" =~ ^[0-9]+$ ]]
+          test "$(jq -r '.runs.client_preflight.id' "$evidence")" = "$SOURCE_RUN_ID"
+          test "$(jq -r '.runs.ci.id' "$evidence")" = "$ci_run_id"
 
           ci_jobs_json="$(
             gh api "/repos/$expected_repository/actions/runs/$ci_run_id/jobs?per_page=100"
@@ -150,7 +148,7 @@ jobs:
           artifacts_json="$(
             gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"
           )"
-          jq -e --arg candidate "alpha-candidate-$tag_sha" '
+          jq -e --arg candidate "alpha-candidate-$source_sha" '
             (.total_count == 4) and
             (([.artifacts[].name] | sort) ==
              (["client-linux", "client-macos", "client-windows", $candidate] | sort)) and
@@ -232,6 +230,8 @@ jobs:
             echo "release $RELEASE_TAG appeared during validation; refusing overwrite" >&2
             exit 1
           }
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$tag_sha"
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

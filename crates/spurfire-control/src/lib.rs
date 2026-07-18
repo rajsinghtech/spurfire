@@ -533,8 +533,8 @@ impl OAuthSession {
                 status: status.as_u16(),
             });
         }
-        let bytes = response.bytes().await?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let bytes = Zeroizing::new(response.bytes().await?.to_vec());
+        Ok(serde_json::from_slice(bytes.as_slice())?)
     }
 
     async fn http_error(response: reqwest::Response) -> ControlError {
@@ -635,8 +635,25 @@ impl OAuthSession {
     }
 }
 
+fn validate_configured_api_base(value: &str) -> Result<(), ControlError> {
+    let url = Url::parse(value).map_err(|_| ControlError::InvalidProviderPath)?;
+    let exact_origin = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host_str().is_some()
+        && url.path().trim_end_matches('/') == "/api/v2";
+    if exact_origin {
+        Ok(())
+    } else {
+        Err(ControlError::InvalidProviderPath)
+    }
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
@@ -653,8 +670,10 @@ impl TailscaleClient {
     /// Build from env: `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TS_API_BASE`.
     pub async fn from_env() -> Result<Self, ControlError> {
         let get = |name: &str| std::env::var(name).map_err(|_| ControlError::Env(name.into()));
+        let api_base = get("TS_API_BASE")?;
+        validate_configured_api_base(&api_base)?;
         Ok(Self::new(
-            get("TS_API_BASE")?,
+            api_base,
             get("TS_CLIENT_ID")?,
             get("TS_CLIENT_SECRET")?,
         ))
