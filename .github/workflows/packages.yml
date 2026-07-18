@@ -87,6 +87,10 @@ jobs:
               echo "missing release notes: $notes" >&2
               exit 1
             }
+            evidence="docs/release-evidence/${version}.json"
+            scripts/check-alpha-evidence.py "$evidence" \
+              --version "$version" \
+              --source-sha "$GITHUB_SHA"
 
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
@@ -137,8 +141,24 @@ jobs:
           echo "${ACTIONLINT_LINUX_AMD64_SHA256}  $archive" | sha256sum --check
           tar -xzf "$archive" actionlint
           ./actionlint
-          bash -n scripts/check-packaging.sh scripts/check-release-metadata.sh scripts/install-just-ci.sh
-          shellcheck scripts/check-packaging.sh scripts/check-release-metadata.sh scripts/install-just-ci.sh
+          bash -n \
+            scripts/check-alpha-smoke-log.sh \
+            scripts/check-packaging.sh \
+            scripts/check-release-metadata.sh \
+            scripts/install-just-ci.sh \
+            scripts/run-alpha-two-client.sh
+          shellcheck \
+            scripts/check-alpha-smoke-log.sh \
+            scripts/check-packaging.sh \
+            scripts/check-release-metadata.sh \
+            scripts/install-just-ci.sh \
+            scripts/run-alpha-two-client.sh
+          python3 -m py_compile \
+            scripts/aggregate-playtest.py \
+            scripts/check-alpha-evidence.py \
+            scripts/check-alpha-lifecycle-evidence.py \
+            scripts/make-alpha-candidate-metadata.py
+          python3 -m unittest discover -s scripts/tests -v
           scripts/check-release-metadata.sh
 
       - name: Install Rust 1.91
@@ -280,8 +300,10 @@ jobs:
           exit-code: '1'
 
   publish:
-    name: Publish signed OCI artifacts
-    if: github.event_name == 'push' && github.repository == 'rajsinghtech/spurfire'
+    name: Publish signed OCI main/SHA artifacts
+    # Version tags validate above but never publish aliases. Stable publication is a
+    # separate, protected release action after exact-SHA Alpha evidence is approved.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'rajsinghtech/spurfire'
     needs: [metadata, validate, container]
     runs-on: ubuntu-latest
     timeout-minutes: 60
