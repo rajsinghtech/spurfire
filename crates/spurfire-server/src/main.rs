@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.dry_run {
         config.force_dry_run = true;
         config.provisioning_mode = ProvisioningMode::DryRun;
+        config.real_mutations_enabled = false;
     }
 
     let provider: Arc<dyn NetworkProvider> = if config.force_dry_run {

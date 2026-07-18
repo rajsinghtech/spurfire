@@ -14,7 +14,7 @@ use spurfire_protocol::{
     LobbyState, NetworkLifecycle, PlayerId, TailnetDnsName, UnixMillis,
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::{io::AsyncWriteExt, sync::RwLock};
 
 use crate::crypto::{constant_time_eq, sha256};
 
@@ -430,6 +430,9 @@ pub trait LobbyStore: Send + Sync {
         allow_new_real: bool,
     ) -> Result<CreateStoreOutcome, StoreError>;
 
+    /// Lists retained IDs for internal maintenance without mutating records.
+    async fn lobby_ids(&self) -> Vec<LobbyId>;
+
     /// Reads one complete non-secret record.
     async fn get(&self, lobby_id: LobbyId) -> Option<StoredLobby>;
 
@@ -510,6 +513,10 @@ impl LobbyStore for InMemoryStore {
             lobby,
             allow_new_real,
         )
+    }
+
+    async fn lobby_ids(&self) -> Vec<LobbyId> {
+        self.inner.read().await.lobbies.keys().copied().collect()
     }
 
     async fn get(&self, lobby_id: LobbyId) -> Option<StoredLobby> {
@@ -623,6 +630,10 @@ impl LobbyStore for JsonFileStore {
         self.commit(&next).await?;
         *data = next;
         Ok(outcome)
+    }
+
+    async fn lobby_ids(&self) -> Vec<LobbyId> {
+        self.inner.read().await.lobbies.keys().copied().collect()
     }
 
     async fn get(&self, lobby_id: LobbyId) -> Option<StoredLobby> {
@@ -885,7 +896,8 @@ fn normalize_loaded_store(data: &mut StoreData) -> bool {
             changed = true;
         }
         (Some(lease), holders)
-            if holders.contains(&lease.holder_lobby_id)
+            if holders.len() == 1
+                && holders[0] == lease.holder_lobby_id
                 && data
                     .lobbies
                     .get(&lease.holder_lobby_id)
@@ -1028,9 +1040,16 @@ async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     }
     let bytes = serde_json::to_vec(data).map_err(|_| StoreError::Decode)?;
     let temporary = path.with_extension("tmp");
-    tokio::fs::write(&temporary, bytes)
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
         .await
         .map_err(|_| StoreError::Io)?;
+    file.write_all(&bytes).await.map_err(|_| StoreError::Io)?;
+    file.sync_all().await.map_err(|_| StoreError::Io)?;
+    drop(file);
     #[cfg(windows)]
     if tokio::fs::try_exists(path)
         .await
@@ -1045,7 +1064,18 @@ async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     }
     tokio::fs::rename(&temporary, path)
         .await
-        .map_err(|_| StoreError::Io)
+        .map_err(|_| StoreError::Io)?;
+    #[cfg(unix)]
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let directory = tokio::fs::File::open(parent)
+            .await
+            .map_err(|_| StoreError::Io)?;
+        directory.sync_all().await.map_err(|_| StoreError::Io)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

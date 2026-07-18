@@ -2,7 +2,7 @@
 
 Spurfire publishes the lobby control service as a multi-architecture OCI image and the deployment chart as an OCI Helm artifact. Gameplay traffic remains peer-to-peer, and the control-plane workload never joins a lobby tailnet.
 
-> **Public real activation is closed.** Safe deployment groundwork adds an independent kill switch fixed off, one-real-lobby configuration, and fixed inspection freshness values. The chart deliberately rejects enabling real mutations and still does not supply complete lobby-route capability/abuse controls, a dynamic encrypted child vault, startup reconciliation, or a private operator listener. Ottawa remains public dry-run. See [control-plane-network-view.md](control-plane-network-view.md) for the authoritative gates and runbook.
+> **Public real activation is closed.** Safe deployment groundwork adds an independent kill switch fixed off and a singleton real-lobby policy. Inspection timing values remain deferred and are not rendered until a production scheduler consumes them. The chart deliberately rejects enabling real mutations and still does not supply complete lobby-route capability/abuse controls, a dynamic encrypted child vault, startup reconciliation, or a private operator listener. Ottawa remains public dry-run. See [control-plane-network-view.md](control-plane-network-view.md) for the authoritative gates and runbook.
 
 ## Artifact coordinates
 
@@ -70,7 +70,7 @@ The runtime image is Alpine-based, runs as UID/GID `10001`, and contains only CA
 
 ## Install the Helm chart
 
-The defaults are intentionally safe: one replica, `Recreate`, dry-run, `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, one real-lobby slot, fixed inspection freshness values, `emptyDir`, ClusterIP, and no public HTTPRoute. This chart revision rejects setting the real-mutation switch to true.
+The defaults are intentionally safe: one replica, `Recreate`, dry-run, `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, a schema-locked one-real-lobby policy, deferred (non-rendered) inspection timing values, `emptyDir`, ClusterIP, and no public HTTPRoute. This chart revision rejects setting the real-mutation switch to true.
 
 ```sh
 helm upgrade --install spurfire \

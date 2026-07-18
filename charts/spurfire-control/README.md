@@ -38,7 +38,7 @@ A later, separately reviewed activation change must first provide all of the fol
 - a private authenticated operator listener and exact-ID cleanup alerts; and
 - a separate GitOps review that keeps public routes from reaching real or operator APIs.
 
-The chart fixes `config.maxActiveRealLobbies` at `1`. The server must apply that single lease across both dedicated `tailnet_per_lobby` and shared-tailnet compatibility modes; ambiguity and cleanup failure retain the lease. The cap is not a substitute for authorization.
+The chart schema fixes `config.maxActiveRealLobbies` at `1` as an activation policy check. It is intentionally not rendered as an environment variable because the server's singleton lease is currently fixed in code across dedicated and shared compatibility modes. Ambiguity and cleanup failure retain the lease. The cap is not a substitute for authorization.
 
 `config.dryRun=false` remains renderable only as activation-closed plumbing for private, controlled integration work. It requires a pre-existing parent OAuth Secret and persistent non-secret state, continues to emit `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, and cannot be combined with the chart's public `HTTPRoute`. Do not deploy that staging combination as real service activation.
 
@@ -46,18 +46,9 @@ The chart accepts only an existing parent OAuth Secret name and key names; it ne
 
 ## Cached network-summary contract
 
-The chart emits the inspection timing contract below. These settings are fixed in this revision so a deployment cannot silently weaken freshness or retention semantics.
+The `networkSummary` values document fixed future timing bounds but are not rendered into the pod: the server does not yet parse them and no production observation/report scheduler exists. This avoids promising runtime behavior that is not wired. A future scheduler change must add parsing, boundary tests, cadence/shutdown tests, and then render the settings.
 
-| Value | Environment variable | Seconds |
-|---|---|---:|
-| `networkSummary.deviceInventory.refreshSeconds` | `SPURFIRE_NETWORK_DEVICE_INVENTORY_REFRESH_SECS` | 15 |
-| `networkSummary.deviceInventory.freshForSeconds` | `SPURFIRE_NETWORK_DEVICE_INVENTORY_FRESH_FOR_SECS` | 30 |
-| `networkSummary.organizationPresence.refreshSeconds` | `SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_REFRESH_SECS` | 60 |
-| `networkSummary.organizationPresence.freshForSeconds` | `SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_FRESH_FOR_SECS` | 120 |
-| `networkSummary.participantReports.freshForSeconds` | `SPURFIRE_NETWORK_PARTICIPANT_REPORT_FRESH_FOR_SECS` | 15 |
-| `networkSummary.participantReports.retentionSeconds` | `SPURFIRE_NETWORK_PARTICIPANT_REPORT_RETENTION_SECS` | 60 |
-
-Background workers own collection. A selected-lobby inspection GET reads cached state only and must never trigger provider I/O, mutation, cleanup, or a user-driven poll. Source failures preserve the last good value as stale; they do not synthesize offline, zero, unavailable, or absent facts. Dry-run has no provider and must report a simulated network with no tailnet DNS name/FQDN.
+The implemented selected-lobby inspection GET reads cached state only and never triggers provider I/O, mutation, cleanup, or a user-driven poll. Explicit internal refresh calls preserve a last good value as stale after source failure; they do not synthesize offline, zero, unavailable, or absent facts. Dry-run has no provider and reports a simulated network with no tailnet DNS name/FQDN.
 
 ## Gateway API
 

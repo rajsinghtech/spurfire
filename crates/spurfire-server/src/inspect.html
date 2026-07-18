@@ -23,6 +23,7 @@
 (() => {
   'use strict';
   let selectedCapability = '';
+  let selectedLobby = '';
   const form = document.getElementById('selection');
   const status = document.getElementById('status');
   const view = document.getElementById('view');
@@ -40,18 +41,19 @@
     return card(title, item ? item.value : null, item ? `${item.source} · ${item.assurance} · ${item.freshness}${item.unknown_reason ? ` · ${item.unknown_reason}` : ''}` : 'unknown');
   };
   form.addEventListener('submit', async (event) => {
-    event.preventDefault(); view.replaceChildren(); status.className = ''; status.textContent = 'Loading cached network state…';
-    const lobby = document.getElementById('lobby').value.trim();
+    event.preventDefault(); status.className = ''; status.textContent = 'Loading cached network state…';
+    const lobby = document.getElementById('lobby').value.trim(); selectedLobby = lobby;
     const input = document.getElementById('capability'); selectedCapability = input.value; input.value = '';
     try {
       const response = await fetch(`/v1/lobbies/${encodeURIComponent(lobby)}/network`, {
-        method: 'GET', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+        method: 'GET', cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer',
         headers: {'Authorization': `Spurfire-Capability ${selectedCapability}`, 'Accept': 'application/json'}
       });
       selectedCapability = '';
       const body = await response.json();
       if (!response.ok) throw new Error(body && body.code === 'lobby_not_found' ? 'Lobby not found or capability not accepted.' : 'Inspection failed.');
-      status.textContent = body.truth_label;
+      if (!body || body.schema_version !== 1 || body.lobby_id !== selectedLobby) throw new Error('Inspection response did not match the selected lobby.');
+      view.replaceChildren(); status.textContent = body.truth_label;
       const authority = fact(body.authority.control_election);
       const winner = authority && authority.value ? authority.value.winner_player_id : null;
       view.append(
@@ -69,8 +71,14 @@
         card('Cleanup', body.cleanup.participant_safe_reason, body.cleanup.network_lifecycle)
       );
     } catch (error) {
-      selectedCapability = ''; status.className = 'error'; status.textContent = error instanceof Error ? error.message : 'Inspection failed.';
+      selectedCapability = ''; status.className = 'error'; status.textContent = `${error instanceof Error ? error.message : 'Inspection failed.'}${view.childElementCount ? ' Previous snapshot retained as stale.' : ''}`;
     }
+  });
+  window.addEventListener('pagehide', () => {
+    selectedCapability = ''; selectedLobby = '';
+    document.getElementById('lobby').value = '';
+    document.getElementById('capability').value = '';
+    status.textContent = ''; view.replaceChildren();
   });
 })();
 </script>

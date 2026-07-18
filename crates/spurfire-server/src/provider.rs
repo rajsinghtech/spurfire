@@ -340,6 +340,9 @@ impl ProviderCapabilities {
 /// Safe provider failure classification. Upstream bodies are always discarded.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ProviderError {
+    /// The deployment-wide default-off gate rejected a real provider mutation.
+    #[error("real provider mutations are disabled")]
+    RealMutationsDisabled,
     /// Durable lobby/generation/stable-ID/FQDN and provider custody disagree.
     #[error("provider identity tuple mismatch; manual remediation is required")]
     IdentityMismatch,
@@ -373,6 +376,7 @@ impl ProviderError {
     #[must_use]
     pub fn state_reason(&self) -> &'static str {
         match self {
+            Self::RealMutationsDisabled => "real_mutations_disabled",
             Self::IdentityMismatch => "provider_identity_mismatch_manual_remediation",
             Self::ChildSecretUnavailable => "child_secret_unavailable_manual_remediation",
             Self::InsufficientScopes {
@@ -448,6 +452,16 @@ pub trait NetworkProvider: Send + Sync {
         })
     }
 
+    /// Erases the exact generation-bound child secret only after absence proof.
+    async fn erase_child_secret(
+        &self,
+        _request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable {
+            operation: "child_secret_erasure",
+        })
+    }
+
     /// Checks exact stable-ID presence through the parent organization listing.
     async fn tailnet_present(
         &self,
@@ -456,6 +470,112 @@ pub trait NetworkProvider: Send + Sync {
         Err(ProviderError::Unavailable {
             operation: "organization_tailnet_presence",
         })
+    }
+}
+
+/// Central provider facade enforcing the deployment-wide mutation gate.
+///
+/// Every provider mutation crosses this boundary. Read-only capability and
+/// observation calls remain available for reconciliation evidence, while
+/// simulated requests continue to work with the real gate disabled.
+pub struct MutationGatedProvider {
+    inner: Arc<dyn NetworkProvider>,
+    real_mutations_enabled: bool,
+}
+
+impl MutationGatedProvider {
+    /// Wraps a provider with the immutable process-wide mutation decision.
+    #[must_use]
+    pub fn new(inner: Arc<dyn NetworkProvider>, real_mutations_enabled: bool) -> Self {
+        Self { inner, real_mutations_enabled }
+    }
+
+    fn require_allowed(&self, dry_run: bool) -> Result<(), ProviderError> {
+        if dry_run || self.real_mutations_enabled {
+            Ok(())
+        } else {
+            Err(ProviderError::RealMutationsDisabled)
+        }
+    }
+}
+
+impl fmt::Debug for MutationGatedProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MutationGatedProvider")
+            .field("real_mutations_enabled", &self.real_mutations_enabled)
+            .field("inner", &"<network-provider>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl NetworkProvider for MutationGatedProvider {
+    fn cached_capabilities(&self) -> ProviderCapabilities {
+        self.inner.cached_capabilities()
+    }
+
+    async fn refresh_capabilities(&self) -> ProviderCapabilities {
+        self.inner.refresh_capabilities().await
+    }
+
+    fn lobby_access_error(
+        &self,
+        lobby_id: LobbyId,
+        mode: ProvisioningMode,
+        network_lifecycle: NetworkLifecycle,
+        dry_run: bool,
+    ) -> Option<ProviderError> {
+        self.require_allowed(dry_run).err().or_else(|| {
+            self.inner
+                .lobby_access_error(lobby_id, mode, network_lifecycle, dry_run)
+        })
+    }
+
+    async fn prepare_lobby(
+        &self,
+        request: PrepareLobbyRequest,
+    ) -> Result<PreparedNetwork, ProviderError> {
+        self.require_allowed(request.dry_run)?;
+        self.inner.prepare_lobby(request).await
+    }
+
+    async fn mint_credential(
+        &self,
+        request: MintCredentialRequest,
+    ) -> Result<MintedCredential, ProviderError> {
+        self.require_allowed(request.dry_run)?;
+        self.inner.mint_credential(request).await
+    }
+
+    async fn cleanup_lobby(
+        &self,
+        request: CleanupLobbyRequest,
+    ) -> Result<CleanupOutcome, ProviderError> {
+        self.require_allowed(request.dry_run)?;
+        self.inner.cleanup_lobby(request).await
+    }
+
+    async fn observe_network(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        self.inner.observe_network(request).await
+    }
+
+    async fn erase_child_secret(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        self.require_allowed(false)?;
+        self.inner.erase_child_secret(request).await
+    }
+
+    async fn tailnet_present(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        self.inner.tailnet_present(request).await
     }
 }
 
@@ -895,6 +1015,38 @@ impl NetworkProvider for TailscaleProvider {
         })
     }
 
+    async fn erase_child_secret(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        request
+            .identity
+            .validate_for_mode(ProvisioningMode::TailnetPerLobby)?;
+        let mut vault = self
+            .child_vault
+            .write()
+            .map_err(|_| ProviderError::Unavailable {
+                operation: "child_secret_vault",
+            })?;
+        let access = vault
+            .get(&request.lobby_id)
+            .ok_or(ProviderError::ChildSecretUnavailable)?;
+        if request.network_generation == 0
+            || access.network_generation != request.network_generation
+            || access.provider_tailnet_id
+                != request
+                    .identity
+                    .provider_tailnet_id
+                    .as_deref()
+                    .ok_or(ProviderError::IdentityMismatch)?
+            || access.dns_name != request.identity.tailnet_dns_name
+        {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        vault.remove(&request.lobby_id);
+        Ok(())
+    }
+
     async fn tailnet_present(
         &self,
         request: TailnetPresenceRequest,
@@ -947,28 +1099,10 @@ impl TailscaleProvider {
                 .delete_tailnet(identity.tailnet_dns_name.as_str())
                 .await
                 .map_err(|error| map_control_error(error, "child_tailnet_delete"))?;
-            let removed = self
-                .child_vault
-                .write()
-                .map_err(|_| ProviderError::Unavailable {
-                    operation: "child_secret_vault",
-                })?
-                .remove(&request.lobby_id)
-                .ok_or(ProviderError::IdentityMismatch)?;
-            if removed.network_generation != request.network_generation
-                || removed.provider_tailnet_id
-                    != identity
-                        .provider_tailnet_id
-                        .as_deref()
-                        .ok_or(ProviderError::IdentityMismatch)?
-                || removed.dns_name != identity.tailnet_dns_name
-            {
-                return Err(ProviderError::IdentityMismatch);
-            }
             return Ok(CleanupOutcome {
-                cleanup_pending: false,
+                cleanup_pending: true,
                 delete_acknowledged: true,
-                child_secret_erased: true,
+                child_secret_erased: false,
                 revoked_credential_ids: request
                     .credentials
                     .into_iter()
@@ -1171,6 +1305,90 @@ mod tests {
         let secret = SecretString::new("synthetic-auth-key-canary-secret");
         assert_eq!(format!("{secret:?}"), "<redacted>");
         assert!(!format!("{secret:?}").contains("canary"));
+    }
+
+    #[tokio::test]
+    async fn central_gate_blocks_every_real_mutation_and_allows_simulation() {
+        let inner = Arc::new(DryRunProvider::new());
+        let provider = MutationGatedProvider::new(inner.clone(), false);
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let player_id = PlayerId::parse("00000000-0000-4000-8000-000000000002").unwrap();
+
+        assert_eq!(
+            provider
+                .prepare_lobby(PrepareLobbyRequest {
+                    lobby_id,
+                    network_generation: 1,
+                    mode: ProvisioningMode::TailnetPerLobby,
+                    dry_run: false,
+                })
+                .await
+                .unwrap_err(),
+            ProviderError::RealMutationsDisabled
+        );
+        assert_eq!(
+            provider
+                .mint_credential(MintCredentialRequest {
+                    lobby_id,
+                    network_generation: 1,
+                    identity: None,
+                    mode: ProvisioningMode::SharedTailnet,
+                    player_id,
+                    tailnet: "-".to_owned(),
+                    tag: "tag:spurfire-lobby-test".to_owned(),
+                    expires_at: UnixMillis::new(300_000),
+                    dry_run: false,
+                })
+                .await
+                .unwrap_err(),
+            ProviderError::RealMutationsDisabled
+        );
+        assert_eq!(
+            provider
+                .cleanup_lobby(CleanupLobbyRequest {
+                    lobby_id,
+                    network_generation: 1,
+                    identity: None,
+                    mode: ProvisioningMode::SharedTailnet,
+                    tailnet: "-".to_owned(),
+                    tag: "tag:spurfire-lobby-test".to_owned(),
+                    credentials: Vec::new(),
+                    include_devices: true,
+                    now: UnixMillis::new(0),
+                    dry_run: false,
+                })
+                .await
+                .unwrap_err(),
+            ProviderError::RealMutationsDisabled
+        );
+        assert_eq!(inner.mint_count(), 0);
+        assert_eq!(inner.cleanup_count(), 0);
+
+        provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 1,
+                mode: ProvisioningMode::DryRun,
+                dry_run: true,
+            })
+            .await
+            .unwrap();
+        provider
+            .mint_credential(MintCredentialRequest {
+                lobby_id,
+                network_generation: 1,
+                identity: None,
+                mode: ProvisioningMode::DryRun,
+                player_id,
+                tailnet: "-".to_owned(),
+                tag: "tag:spurfire-lobby-test".to_owned(),
+                expires_at: UnixMillis::new(300_000),
+                dry_run: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(inner.mint_count(), 1);
+        assert_eq!(inner.mutating_call_count(), 0);
     }
 
     #[test]

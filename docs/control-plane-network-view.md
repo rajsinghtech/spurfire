@@ -237,7 +237,7 @@ An authenticated participant can still lie. Show reporter and disagreement count
 
 ### Refresh and failure model
 
-Background workers refresh caches; request handlers never call the provider.
+The target architecture uses background workers to refresh caches; this groundwork exposes only explicit bounded internal refresh calls and does not start a production scheduler. Request handlers never call the provider.
 
 | Source | Collection | Freshness/retention |
 |---|---|---|

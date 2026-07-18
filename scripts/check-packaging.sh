@@ -39,13 +39,10 @@ grep -q 'readOnlyRootFilesystem: true' "$tmp/default.yaml"
 grep -q 'automountServiceAccountToken: false' "$tmp/default.yaml"
 grep -q 'SPURFIRE_DRY_RUN: "1"' "$tmp/default.yaml"
 grep -q 'SPURFIRE_REAL_MUTATIONS_ENABLED: "0"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_MAX_ACTIVE_REAL_LOBBIES: "1"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_DEVICE_INVENTORY_REFRESH_SECS: "15"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_DEVICE_INVENTORY_FRESH_FOR_SECS: "30"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_REFRESH_SECS: "60"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_ORGANIZATION_PRESENCE_FRESH_FOR_SECS: "120"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_PARTICIPANT_REPORT_FRESH_FOR_SECS: "15"' "$tmp/default.yaml"
-grep -q 'SPURFIRE_NETWORK_PARTICIPANT_REPORT_RETENTION_SECS: "60"' "$tmp/default.yaml"
+if grep -q 'SPURFIRE_MAX_ACTIVE_REAL_LOBBIES\|SPURFIRE_NETWORK_' "$tmp/default.yaml"; then
+  echo "error: chart rendered deferred runtime settings the server does not consume" >&2
+  exit 1
+fi
 grep -q 'emptyDir: {}' "$tmp/default.yaml"
 if grep -q '^kind: HTTPRoute$' "$tmp/default.yaml"; then
   echo "error: public HTTPRoute must be opt-in" >&2
@@ -63,7 +60,10 @@ fi
 grep -q '^kind: PersistentVolumeClaim$' "$tmp/staged.yaml"
 grep -q 'helm.sh/resource-policy: keep' "$tmp/staged.yaml"
 grep -q 'SPURFIRE_REAL_MUTATIONS_ENABLED: "0"' "$tmp/staged.yaml"
-grep -q 'SPURFIRE_MAX_ACTIVE_REAL_LOBBIES: "1"' "$tmp/staged.yaml"
+if grep -q 'SPURFIRE_MAX_ACTIVE_REAL_LOBBIES\|SPURFIRE_NETWORK_' "$tmp/staged.yaml"; then
+  echo "error: staged chart rendered deferred runtime settings" >&2
+  exit 1
+fi
 grep -q 'name: TS_CLIENT_ID' "$tmp/staged.yaml"
 grep -q 'name: TS_CLIENT_SECRET' "$tmp/staged.yaml"
 grep -q 'name: "fixture-parent-oauth"' "$tmp/staged.yaml"

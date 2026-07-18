@@ -43,7 +43,7 @@ use crate::{
     error::ApiError,
     provider::{
         CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
-        NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, ProviderError,
+        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, ProviderError,
         ProviderNetworkIdentity, TailnetPresenceRequest,
     },
     store::{
@@ -97,14 +97,20 @@ impl CachedObservationFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CachedProviderObservation {
+    network_generation: u64,
     enrolled_device_count: Option<u32>,
     successful_at: Option<UnixMillis>,
     last_failure: Option<(CachedObservationFailure, UnixMillis)>,
 }
 
 impl CachedProviderObservation {
-    const fn success(enrolled_device_count: u32, at: UnixMillis) -> Self {
+    const fn success(
+        network_generation: u64,
+        enrolled_device_count: u32,
+        at: UnixMillis,
+    ) -> Self {
         Self {
+            network_generation,
             enrolled_device_count: Some(enrolled_device_count),
             successful_at: Some(at),
             last_failure: None,
@@ -117,6 +123,7 @@ impl CachedProviderObservation {
         at: UnixMillis,
     ) -> Self {
         Self {
+            network_generation: previous.map_or(0, |value| value.network_generation),
             enrolled_device_count: match previous {
                 Some(previous) => previous.enrolled_device_count,
                 None => None,
@@ -191,10 +198,14 @@ impl AppState {
         store: Arc<dyn LobbyStore>,
         provider: Arc<dyn NetworkProvider>,
     ) -> Self {
+        let real_mutations_enabled = config.real_mutations_enabled;
         Self {
             config: Arc::new(config),
             store,
-            provider,
+            provider: Arc::new(MutationGatedProvider::new(
+                provider,
+                real_mutations_enabled,
+            )),
             clock: Arc::new(SystemClock),
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -276,6 +287,7 @@ impl AppState {
                 operation: "network_observation_inactive",
             });
         }
+        let network_generation = stored.network_generation;
         let request = observe_request(&stored)?;
         let outcome = tokio::time::timeout(
             PROVIDER_OBSERVATION_TIMEOUT,
@@ -283,11 +295,33 @@ impl AppState {
         )
         .await;
 
+        // Provider I/O may race cleanup or a future replacement generation.
+        // Revalidate before any result can enter the cache.
+        let current = self.store.get(lobby_id).await;
+        if current.as_ref().is_none_or(|value| {
+            value.network_generation != network_generation
+                || !matches!(
+                    value.network_lifecycle,
+                    NetworkLifecycle::Active
+                        | NetworkLifecycle::CleanupRequested
+                        | NetworkLifecycle::CleanupPending
+                        | NetworkLifecycle::VerifyingAbsence
+                )
+        }) {
+            return Err(ProviderError::Unavailable {
+                operation: "network_observation_generation_changed",
+            });
+        }
+
         match outcome {
             Ok(Ok(observation)) => {
                 self.cache_provider_observation(
                     lobby_id,
-                    CachedProviderObservation::success(observation.enrolled_device_count, now),
+                    CachedProviderObservation::success(
+                        network_generation,
+                        observation.enrolled_device_count,
+                        now,
+                    ),
                 )
                 .await;
                 Ok(())
@@ -348,19 +382,32 @@ impl AppState {
 
     /// Runs deterministic expiry/start-timeout transitions and teardown retries.
     pub async fn cleanup_expired_at(&self, now: UnixMillis) -> Vec<LobbyId> {
-        let Ok(lobby_ids) = self.store.cleanup_expired(now).await else {
-            return Vec::new();
-        };
-        for lobby_id in &lobby_ids {
-            let _lobby = self.lock_lobby(*lobby_id).await;
-            let Some(mut stored) = self.store.get(*lobby_id).await else {
+        let lobby_ids = self.store.lobby_ids().await;
+        let mut cleaned = Vec::new();
+        for lobby_id in lobby_ids {
+            // Candidate discovery is read-only. Transition and teardown happen
+            // only after acquiring the same lock as join/delete handlers.
+            let _lobby = self.lock_lobby(lobby_id).await;
+            let Some(mut stored) = self.store.get(lobby_id).await else {
                 continue;
             };
+            let transitioned = apply_time_transitions(&mut stored, now);
+            let needs_cleanup = transitioned
+                || stored.lobby.state == LobbyState::Closing
+                || (stored.cleanup_pending
+                    && matches!(
+                        stored.lobby.state,
+                        LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+                    ));
+            if !needs_cleanup {
+                continue;
+            }
             let finalize = stored.lobby.state == LobbyState::Closing;
             let _ = cleanup_resources(self, &mut stored, now, true, finalize).await;
             let _ = self.store.replace(stored).await;
+            cleaned.push(lobby_id);
         }
-        lobby_ids
+        cleaned
     }
 
     /// Runs expiry cleanup against the configured clock.
@@ -451,7 +498,7 @@ async fn inspect_shell() -> impl IntoResponse {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+            "default-src 'none'; style-src 'sha256-M+A8mqmnVAeKAZUaP1OIDiMgzOa3E/Q2fsItjMYClpM='; script-src 'sha256-3xl3dBD9h+2H3qL/B3ZS2tKPYh9LqF4Uicf6YQuZbmk='; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         ),
     );
     headers.insert(
@@ -818,7 +865,8 @@ async fn get_lobby_network_inner(
         .read()
         .await
         .get(&lobby_id)
-        .copied();
+        .copied()
+        .filter(|observation| observation.network_generation == stored.network_generation);
     build_network_view(&stored, observation, now).map_err(|_| internal_error(false))
 }
 
@@ -848,15 +896,14 @@ async fn join_lobby(
         if replay.fingerprint != request_fingerprint || replay.player_id != actor {
             return Err(idempotency_conflict(dry_run));
         }
-        return Ok((
+        return Ok(sensitive_json_response(
             StatusCode::OK,
-            Json(JoinLobbyReplayResponse {
+            &JoinLobbyReplayResponse {
                 join_credential: replay.receipt.clone(),
                 lobby: stored.snapshot(),
                 metadata: metadata_for(dry_run),
-            }),
-        )
-            .into_response());
+            },
+        ));
     }
 
     request
@@ -907,15 +954,14 @@ async fn join_lobby(
                     .replace(stored.clone())
                     .await
                     .map_err(|error| store_api_error(&error, dry_run))?;
-                return Ok((
+                return Ok(sensitive_json_response(
                     StatusCode::OK,
-                    Json(JoinLobbyReplayResponse {
+                    &JoinLobbyReplayResponse {
                         join_credential: receipt,
                         lobby: stored.snapshot(),
                         metadata: metadata_for(dry_run),
-                    }),
-                )
-                    .into_response());
+                    },
+                ));
             }
         }
     } else {
@@ -1018,11 +1064,17 @@ async fn join_lobby(
             ) {
                 stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
             }
-            stored.cleanup_pending = !stored.credentials.is_empty()
+            stored.cleanup_pending = !dry_run
+                || !stored.credentials.is_empty()
                 || matches!(
                     error,
                     ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch
                 );
+            if stored.cleanup_pending
+                && stored.network_lifecycle != NetworkLifecycle::ManualRemediation
+            {
+                stored.network_lifecycle = NetworkLifecycle::CleanupPending;
+            }
             state
                 .store
                 .replace(stored)
@@ -1108,15 +1160,14 @@ async fn join_lobby(
         .await
         .map_err(|error| store_api_error(&error, dry_run))?;
 
-    Ok((
+    Ok(sensitive_json_response(
         StatusCode::CREATED,
-        Json(JoinLobbyResponse {
+        &JoinLobbyResponse {
             join_credential: credential,
             lobby: stored.snapshot(),
             metadata: minted.metadata,
-        }),
-    )
-        .into_response())
+        },
+    ))
 }
 
 async fn leave_lobby(
@@ -1300,8 +1351,26 @@ async fn get_lobby_authority(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<AuthorityEnvelope>, ApiError> {
-    authority_handler(state, lobby_id, headers).await
+) -> Result<Response, ApiError> {
+    let lobby_id = LobbyId::parse(&lobby_id).map_err(|_| lobby_not_found(false))?;
+    let verifier = capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?;
+    let now = state.clock.now();
+    let stored = state
+        .store
+        .get_authorized_network_view(lobby_id, verifier, now)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    let election = stored
+        .last_election
+        .as_ref()
+        .ok_or_else(|| lobby_not_found(false))?;
+    Ok(sensitive_json_response(
+        StatusCode::OK,
+        &AuthorityEnvelope {
+            authority: AuthorityResponse::from(election),
+            metadata: metadata_for(stored.dry_run),
+        },
+    ))
 }
 
 async fn authority_handler(
@@ -1777,6 +1846,7 @@ fn observe_request(stored: &StoredLobby) -> Result<ObserveNetworkRequest, Provid
 
 const fn observation_failure(error: &ProviderError) -> CachedObservationFailure {
     match error {
+        ProviderError::RealMutationsDisabled => CachedObservationFailure::SourceError,
         ProviderError::InsufficientScopes { .. } => CachedObservationFailure::PermissionDenied,
         ProviderError::IdentityMismatch => CachedObservationFailure::Conflict,
         ProviderError::ChildSecretUnavailable
@@ -1918,7 +1988,9 @@ fn build_network_view(
         };
         let tailnet_dns_name = if matches!(
             lifecycle,
-            NetworkLifecycle::CreateRejected | NetworkLifecycle::DedicatedAbsent
+            NetworkLifecycle::CreateRejected
+                | NetworkLifecycle::DedicatedAbsent
+                | NetworkLifecycle::SharedResourcesClean
         ) {
             Fact::not_applicable()
         } else if let (Some(identity), Some(stored_identity)) =
@@ -1971,7 +2043,10 @@ fn build_network_view(
         })
         .map(|(_, sample)| sample)
         .collect();
-    let fresh_reporter_count = u32::try_from(fresh_measurements.len()).map_err(|_| ())?;
+    // The current measurement route uses client-asserted player identifiers;
+    // it is not the generation/session-bound participant-report contract.
+    // Do not relabel those rows as authenticated fresh reporters.
+    let fresh_reporter_count = 0;
     let (direct_count, peer_relay_count, derp_relay_count, fresh_directions) = fresh_measurements
         .iter()
         .try_fold((0_u32, 0_u32, 0_u32, 0_u32), |counts, sample| {
@@ -2749,6 +2824,9 @@ async fn cleanup_resources(
     include_devices: bool,
     finalize: bool,
 ) -> ResponseMetadata {
+    // Serialize invalidation with provider observation refresh so a poll that
+    // started before teardown cannot repopulate the cache afterward.
+    let _observation = state.lock_observation(stored.lobby.lobby_id).await;
     let dry_run = stored.dry_run;
     if stored.cleanup_requested_at.is_none() {
         stored.measurements.clear();
@@ -2838,12 +2916,6 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
         stored.lobby.state_reason = Some("provider_identity_missing_manual_remediation".to_owned());
         return;
     };
-    if stored.child_secret_erased_at.is_none() {
-        stored.network_lifecycle = NetworkLifecycle::CleanupPending;
-        stored.cleanup_pending = true;
-        stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
-        return;
-    }
     let request = TailnetPresenceRequest {
         lobby_id: stored.lobby.lobby_id,
         network_generation: stored.network_generation,
@@ -2851,7 +2923,7 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
     };
     let present = tokio::time::timeout(
         PROVIDER_OBSERVATION_TIMEOUT,
-        state.provider.tailnet_present(request),
+        state.provider.tailnet_present(request.clone()),
     )
     .await;
     match present {
@@ -2869,10 +2941,31 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
                     .checked_duration_since(first)
                     .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS) =>
             {
-                stored.absence_confirmed_at = Some(now);
-                stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
-                stored.cleanup_pending = false;
-                stored.lobby.state_reason = None;
+                // Absence evidence is complete; only now may the exact
+                // generation-bound vault tuple be erased. Failure remains
+                // fail-closed and retains the singleton lease.
+                match tokio::time::timeout(
+                    PROVIDER_OPERATION_TIMEOUT,
+                    state.provider.erase_child_secret(request),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        stored.child_secret_erased_at = Some(now);
+                        stored.absence_confirmed_at = Some(now);
+                        stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+                        stored.cleanup_pending = false;
+                        stored.lobby.state_reason = None;
+                    }
+                    Ok(Err(error)) => {
+                        stored.cleanup_pending = true;
+                        stored.lobby.state_reason = Some(error.state_reason().to_owned());
+                    }
+                    Err(_) => {
+                        stored.cleanup_pending = true;
+                        stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
+                    }
+                }
             }
             Some(_) => {
                 stored.cleanup_pending = true;
@@ -2937,7 +3030,7 @@ fn apply_cleanup_result(
     if full_cleanup && !stored.dry_run {
         match stored.lobby.provisioning_mode {
             ProvisioningMode::TailnetPerLobby => match &result {
-                Ok(outcome) if outcome.delete_acknowledged && outcome.child_secret_erased => {
+                Ok(outcome) if outcome.delete_acknowledged => {
                     stored.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
                     stored.cleanup_pending = true;
                 }
@@ -3043,6 +3136,11 @@ fn invalid_results(message: &str, dry_run: bool) -> ApiError {
 
 fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
     let (status, code, message) = match error {
+        ProviderError::RealMutationsDisabled => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "real_mutations_disabled",
+            "real provider mutations are disabled by the independent safety switch",
+        ),
         ProviderError::IdentityMismatch => (
             StatusCode::SERVICE_UNAVAILABLE,
             "manual_remediation_required",

@@ -649,7 +649,7 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
     );
     line!();
     line!(
-        "Sources are scoped: provider observations are coarse metadata; participant reports are authenticated but untrusted claims."
+        "Sources are scoped: provider observations are coarse metadata; current legacy measurements are client-asserted and untrusted (participant-report authorization is not implemented)."
     );
     line!(
         "No packet capture is used. The control plane owns network lifecycle and does not join the lobby tailnet."

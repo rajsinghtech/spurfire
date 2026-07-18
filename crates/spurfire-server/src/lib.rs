@@ -18,8 +18,9 @@ pub use config::{Config, ConfigError};
 pub use error::ApiError;
 pub use provider::{
     CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest,
-    MintedCredential, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
-    ProviderCapabilities, ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity,
+    MintedCredential, MutationGatedProvider, NetworkProvider, ObserveNetworkRequest,
+    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
+    ProviderError, ProviderNetworkIdentity,
     SecretString, TailnetPresenceRequest, TailscaleProvider,
 };
 pub use service::{build_router, router, AppState};

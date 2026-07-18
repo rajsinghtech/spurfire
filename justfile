@@ -48,6 +48,7 @@ check:
     cargo fmt --check
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked
+    bash scripts/check-control-plane-deps.sh
 
 # Live Tailscale API smoke test (skips cleanly without .env)
 e2e:

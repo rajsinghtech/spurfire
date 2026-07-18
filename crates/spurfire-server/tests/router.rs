@@ -240,9 +240,7 @@ impl NetworkProvider for RecordingProvider {
         Ok(CleanupOutcome {
             delete_acknowledged: request.mode == ProvisioningMode::TailnetPerLobby
                 && request.include_devices,
-            child_secret_erased: request.mode == ProvisioningMode::TailnetPerLobby
-                && request.include_devices
-                && !self.fail_secret_erasure.load(Ordering::SeqCst),
+            child_secret_erased: false,
             revoked_credential_ids: request
                 .credentials
                 .iter()
@@ -271,6 +269,19 @@ impl NetworkProvider for RecordingProvider {
             enrolled_device_count: u32::try_from(self.observed_device_count.load(Ordering::SeqCst))
                 .unwrap(),
         })
+    }
+
+    async fn erase_child_secret(
+        &self,
+        _request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        if self.fail_secret_erasure.load(Ordering::SeqCst) {
+            return Err(ProviderError::Unavailable {
+                operation: "child_secret_vault",
+            });
+        }
+        self.mutations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn tailnet_present(
@@ -511,10 +522,14 @@ async fn inspector_shell_is_no_store_exact_selection_and_has_no_embedded_secret(
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "private, no-store");
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
-    assert!(response.headers()["content-security-policy"]
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; style-src 'sha256-M+A8mqmnVAeKAZUaP1OIDiMgzOa3E/Q2fsItjMYClpM='; script-src 'sha256-3xl3dBD9h+2H3qL/B3ZS2tKPYh9LqF4Uicf6YQuZbmk='; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+    );
+    assert!(!response.headers()["content-security-policy"]
         .to_str()
         .unwrap()
-        .contains("default-src 'none'"));
+        .contains("unsafe-inline"));
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("Selected lobby network"));
