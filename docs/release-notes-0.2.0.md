@@ -37,4 +37,4 @@ Top feel risks remain dive spam versus non-use (recovery is the first tuning dia
 
 M3 on-foot combat and Tactical Roll, M4 Spur, M5 Bounty Run scoring, and the remaining M6 migration/keyframe/rewind/join-flow work are not part of 0.2.0. The public control service remains a prototype: it has no user accounts, ranked-result trust model, or production child-OAuth vault/reconciler, and its hosted deployment remains zero-mutation dry-run.
 
-Do not tag or publish 0.2.0 until the M2 implementation branches are integrated and all required CI and client-preflight jobs are green. Tagging and publication are separate, explicit operations.
+Do not tag or publish 0.2.0 until the M2 implementation branches are integrated and all required CI and client-preflight jobs are green. A version-tag push automatically runs the gated OCI server/chart publication; publishing the GitHub client release remains a separate explicit dispatch.

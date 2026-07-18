@@ -76,7 +76,7 @@ GitHub Actions then provides these credential-free gates:
 2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite.
 3. **Client Preflight:** pull requests, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. These are short-lived workflow artifacts only; preflight never creates a release or publishes a package.
 
-The macOS preflight uses ad-hoc signing for native test libraries and does not require Apple notarization secrets. Notarization is not an ordinary-CI gate. Do not create `v0.2.0` until implementation integration and all required checks are green; publication remains a separate explicit action.
+The macOS preflight uses ad-hoc signing for native test libraries and does not require Apple notarization secrets. Notarization is not an ordinary-CI gate. Do not create `v0.2.0` until implementation integration and all required checks are green. A version-tag push automatically runs gated OCI server/chart publication; publishing the GitHub client release remains a separate explicit dispatch.
 
 ## 5. Manual gameplay check
 
