@@ -113,7 +113,7 @@ impl CachedProviderObservation {
         }
     }
 
-    const fn failed(
+    fn failed(
         previous: Option<Self>,
         failure: CachedObservationFailure,
         at: UnixMillis,
