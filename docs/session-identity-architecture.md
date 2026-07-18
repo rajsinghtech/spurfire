@@ -135,16 +135,25 @@ manifest_public_key 32B || canonical_roster_bytes
    `WrongGeneration`. 10. `roster_hash` == local manifest hash → else `RosterMismatch`
    (asymmetric-view detection). 11. `verify_strict(signature, manifest session_pubkey[sender],
    envelope digest)` → else `BadSignature`. 12. `authority_epoch` ≥ current. 13. `sequence`
-   strictly increasing per sender.
+   strictly increasing per sender. 14. Authority claims (`Authority`/`MigrationSnapshot`)
+   are coherent → else `InvalidAuthorityClaim`: the claim must be a self-nomination
+   (`authority` == `sender`), and either an exact one-epoch advance accepted only while the
+   current authority is silent in the receiver's own view (the local player always counts
+   as fresh, so a live authority fails closed against remote usurpation), or a same-epoch
+   claim converging split elections toward the lowest `PlayerId`. Epoch jumps such as
+   `u64::MAX` and third-party installs are inert and mutate nothing.
 
-**Every identity and source check runs before replay, epoch, or authority state can mutate.**
-Counters reset only when session generation/roster hash changes, never on epoch change.
+**Every identity, source, and authority-claim check runs before replay, epoch, or authority
+state can mutate.** Counters reset only when session generation/roster hash changes, never
+on epoch change.
 
 ### 3.6 Rotation, one-player-per-node, fail-closed restart
 
 - **Session-key rotation:** new keypair per `session_generation`; re-registration uses the
-  existing increasing `sequence` plus the 30 s renew/re-register paths. Old-generation
-  signatures fail step 9.
+  increasing wall-clock-millisecond `sequence` (client restarts/re-keys stay ahead of the
+  server's cached value, and the server evicts registrations past the 60 s projection
+  retention so a stale cache can never permanently fence out a restarted client) plus the
+  30 s renew/re-register paths. Old-generation signatures fail step 9.
 - **Node-key rotation:** the primary binding (session key ↔ IP) is unaffected; the WireGuard
   layer drops stale-key ciphertext (authorization generations); a changed node key must be
   re-registered with an increasing sequence — peers never accept a silently different claim.

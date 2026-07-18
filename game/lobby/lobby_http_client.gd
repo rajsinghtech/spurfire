@@ -27,6 +27,7 @@ var _participant_capability := ""
 var _invitation_lobby_id := ""
 var _requests: Array[HTTPRequest] = []
 var _closed := false
+var _last_endpoint_sequence := 0
 
 func configure(service_origin: String, player_id: String) -> bool:
 	if not SpurfireLobbyContract.service_origin_is_safe(service_origin):
@@ -105,10 +106,17 @@ func register_endpoint(
 		or session_public_key.is_empty() or key_proof.is_empty()
 	):
 		return
+	var sequence := maxi(
+		int(Time.get_unix_time_from_system() * 1000.0), _last_endpoint_sequence + 1
+	)
+	_last_endpoint_sequence = sequence
 	var body := {
 		"network_generation": network_generation,
 		"roster_revision": roster_revision,
-		"sequence": Time.get_ticks_msec(),
+		# Wall-clock milliseconds survive client restart/re-key; process-relative
+		# ticks would reset behind the server's cached value and permanently fail
+		# its strictly-increasing replay gate while the server stays up.
+		"sequence": sequence,
 		"tailnet_address": address,
 		"application_port": port,
 		"session_public_key": session_public_key,

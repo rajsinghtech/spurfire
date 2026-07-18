@@ -65,6 +65,11 @@ jobs:
             --version "$version" \
             --expected-sha256 "$EVIDENCE_SHA256"
           source_sha="$(scripts/check-release-tag-binding.sh "$version" "$tag_sha")"
+          # Publication is reserved for qualified source contained in the
+          # protected main branch; a successful dispatch at an arbitrary
+          # off-main ref must never satisfy this evidence chain.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main
           git cat-file -e "$RELEASE_TAG:$notes"
           git show "$RELEASE_TAG:$notes" > "$RUNNER_TEMP/release-notes.md"
           test -s "$RUNNER_TEMP/release-notes.md"
@@ -212,6 +217,9 @@ jobs:
           git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$VALIDATED_TAG_SHA"
           test "$(scripts/check-release-tag-binding.sh "$version" "$VALIDATED_TAG_SHA")" = "$VALIDATED_SOURCE_SHA"
+          # Re-prove protected-main ancestry from the workspace fetch in the
+          # validation step before any artifact is trusted for publication.
+          git merge-base --is-ancestor "$VALIDATED_SOURCE_SHA" refs/remotes/origin/main
           scripts/check-alpha-evidence.py "$evidence" \
             --version "$version" \
             --source-sha "$VALIDATED_SOURCE_SHA" \

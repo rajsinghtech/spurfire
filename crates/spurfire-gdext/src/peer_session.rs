@@ -871,6 +871,7 @@ impl PeerSession {
             AcceptOutcome::WrongGeneration => 8,
             AcceptOutcome::RosterMismatch => 9,
             AcceptOutcome::BadSignature => 10,
+            AcceptOutcome::InvalidAuthorityClaim => 11,
         }
     }
 

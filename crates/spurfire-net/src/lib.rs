@@ -182,6 +182,7 @@ pub enum AcceptOutcome {
     WrongGeneration,
     RosterMismatch,
     BadSignature,
+    InvalidAuthorityClaim,
 }
 
 #[derive(Clone, Debug)]
@@ -270,12 +271,27 @@ impl SessionState {
         if envelope.authority_epoch < self.authority_epoch {
             return AcceptOutcome::StaleAuthorityEpoch;
         }
-        let Some(peer) = self.peers.get_mut(&envelope.sender) else {
+        if !self.peers.contains_key(&envelope.sender) {
             return AcceptOutcome::UnknownSender;
-        };
-        if envelope.sequence <= peer.last_sequence {
+        }
+        if envelope.sequence <= self.peers[&envelope.sender].last_sequence {
             return AcceptOutcome::DuplicateOrReplay;
         }
+        if let PeerPayload::Authority { authority, epoch }
+        | PeerPayload::MigrationSnapshot {
+            authority, epoch, ..
+        } = envelope.payload
+        {
+            // Authority claims are validated before any replay, liveness, or
+            // authority state can mutate, so a forged claim is fully inert.
+            if !self.authority_claim_is_coherent(envelope.sender, authority, epoch, now_ms) {
+                return AcceptOutcome::InvalidAuthorityClaim;
+            }
+        }
+        let peer = self
+            .peers
+            .get_mut(&envelope.sender)
+            .expect("sender membership was checked above");
         peer.last_sequence = envelope.sequence;
         peer.last_seen_ms = now_ms;
         peer.connected = !matches!(envelope.payload, PeerPayload::Leave);
@@ -292,6 +308,43 @@ impl SessionState {
             }
         }
         AcceptOutcome::Accepted
+    }
+
+    /// Returns whether a signed authority claim may mutate session authority.
+    ///
+    /// A claim is coherent only when it is a self-nomination (`authority` is the
+    /// envelope sender), and one of:
+    /// - an exact one-epoch advance (`epoch == current + 1`) while the current
+    ///   authority is silent in the receiver's own view, mirroring the local
+    ///   deterministic election precondition — the local player always counts
+    ///   as fresh, so a live authority fails closed against remote usurpation;
+    /// - a same-epoch claim converging split elections toward the lowest
+    ///   `PlayerId`, which never invalidates traffic at the current epoch.
+    ///
+    /// Anything else — third-party installs, epoch jumps such as `u64::MAX`,
+    /// or advances over a demonstrably live authority — is rejected so a
+    /// signed roster member cannot freeze legitimate lower-epoch traffic.
+    fn authority_claim_is_coherent(
+        &self,
+        sender: PlayerId,
+        authority: PlayerId,
+        epoch: u64,
+        now_ms: u64,
+    ) -> bool {
+        if authority != sender {
+            return false;
+        }
+        if epoch == self.authority_epoch {
+            return authority <= self.authority;
+        }
+        if epoch != self.authority_epoch.saturating_add(1) {
+            return false;
+        }
+        self.authority != self.local_player
+            && self
+                .peers
+                .get(&self.authority)
+                .is_none_or(|peer| now_ms.saturating_sub(peer.last_seen_ms) >= HEARTBEAT_TIMEOUT_MS)
     }
 
     /// Expires silent peers and deterministically elects the smallest connected player ID.
@@ -786,6 +839,161 @@ mod tests {
             session.accept(&stale, 3_101),
             AcceptOutcome::StaleAuthorityEpoch
         );
+    }
+
+    #[test]
+    fn malicious_authority_claims_never_mutate_state() {
+        let claim = |sender: PlayerId, authority: PlayerId, epoch: u64, sequence: u64| Envelope {
+            wire_version: CURRENT_WIRE_VERSION,
+            lobby_id: lobby(),
+            sender,
+            sequence,
+            authority_epoch: epoch,
+            simulation_tick: 10,
+            payload: PeerPayload::Authority { authority, epoch },
+            session: None,
+        };
+        let baseline = |session: &SessionState| {
+            (
+                session.authority(),
+                session.authority_epoch(),
+                session.peers[&player(3)].last_sequence,
+                session.peers[&player(3)].last_seen_ms,
+            )
+        };
+        let mut session = SessionState::new(lobby(), player(2), player(1), 0);
+        session.add_peer(player(3), 0);
+        // The current authority heartbeats at 200 ms and stays live.
+        let alive = Envelope {
+            wire_version: CURRENT_WIRE_VERSION,
+            lobby_id: lobby(),
+            sender: player(1),
+            sequence: 1,
+            authority_epoch: 1,
+            simulation_tick: 9,
+            payload: PeerPayload::Heartbeat,
+            session: None,
+        };
+        assert_eq!(session.accept(&alive, 200), AcceptOutcome::Accepted);
+
+        // A u64::MAX self-nominated epoch jump is rejected and fully inert.
+        let max_jump = claim(player(3), player(3), u64::MAX, 1);
+        let before = baseline(&session);
+        assert_eq!(
+            session.accept(&max_jump, 300),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(baseline(&session), before);
+
+        // A third-party install is rejected even at a plausible epoch.
+        let third_party = claim(player(3), player(1), 2, 2);
+        assert_eq!(
+            session.accept(&third_party, 301),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(baseline(&session), before);
+
+        // A +2 epoch skip is rejected.
+        let skip = claim(player(3), player(3), 3, 3);
+        assert_eq!(
+            session.accept(&skip, 302),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(baseline(&session), before);
+
+        // An exact-step advance over a demonstrably live authority is rejected.
+        let premature = claim(player(3), player(3), 2, 4);
+        assert_eq!(
+            session.accept(&premature, 303),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(baseline(&session), before);
+
+        // Once the authority is genuinely silent, the exact-step self-
+        // nomination the deterministic election would produce is accepted.
+        let elected = claim(player(3), player(3), 2, 5);
+        assert_eq!(
+            session.accept(&elected, 200 + HEARTBEAT_TIMEOUT_MS),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(session.authority(), player(3));
+        assert_eq!(session.authority_epoch(), 2);
+        // The installed claim cannot be replayed and a further self-nominated
+        // advance requires the new authority to go silent first.
+        let replay = claim(player(3), player(3), 2, 6);
+        assert_eq!(
+            session.accept(&replay, 200 + HEARTBEAT_TIMEOUT_MS + 1),
+            AcceptOutcome::Accepted
+        );
+        let ratchet = claim(player(3), player(3), 3, 7);
+        assert_eq!(
+            session.accept(&ratchet, 200 + HEARTBEAT_TIMEOUT_MS + 2),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(session.authority_epoch(), 2);
+    }
+
+    #[test]
+    fn same_epoch_tie_break_converges_to_lowest_sender() {
+        let mut session = SessionState::new(lobby(), player(2), player(3), 0);
+        session.add_peer(player(1), 0);
+        session.add_peer(player(3), 0);
+        let claim = |sender: PlayerId, sequence: u64| Envelope {
+            wire_version: CURRENT_WIRE_VERSION,
+            lobby_id: lobby(),
+            sender,
+            sequence,
+            authority_epoch: 1,
+            simulation_tick: 10,
+            payload: PeerPayload::Authority {
+                authority: sender,
+                epoch: 1,
+            },
+            session: None,
+        };
+        // A higher-ID same-epoch claim does not displace the current authority.
+        assert_eq!(
+            session.accept(&claim(player(3), 1), 10),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(session.authority(), player(3));
+        // The lowest-ID self-nomination wins the same-epoch tie-break.
+        assert_eq!(
+            session.accept(&claim(player(1), 1), 11),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(session.authority(), player(1));
+        assert_eq!(session.authority_epoch(), 1);
+        // Once converged, the higher-ID claim is incoherent and inert.
+        assert_eq!(
+            session.accept(&claim(player(3), 2), 12),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(session.authority(), player(1));
+    }
+
+    #[test]
+    fn secure_receive_rejects_forged_authority_claim_without_mutation() {
+        let (mut attacker_session, attacker_signing, attacker_source) = secure_fixture(player(2));
+        let (mut receiver, _, _) = secure_fixture(player(1));
+        let signed = attacker_session
+            .envelope(
+                1,
+                PeerPayload::Authority {
+                    authority: player(2),
+                    epoch: u64::MAX,
+                },
+                &attacker_signing,
+            )
+            .unwrap();
+        let before = receiver.state().clone();
+        assert_eq!(
+            receiver.accept_with_source(&signed, attacker_source, None, 10),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        let after = receiver.state();
+        assert_eq!(after.authority(), before.authority());
+        assert_eq!(after.authority_epoch(), before.authority_epoch());
     }
 
     fn envelope(payload: PeerPayload) -> Envelope {

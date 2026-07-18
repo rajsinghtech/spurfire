@@ -10,19 +10,19 @@ tag_commit="$2"
 evidence="docs/release-evidence/${version}.json"
 notes="docs/release-notes-${version}.md"
 
-test -s "$evidence"
-test -s "$notes"
-source_sha="$(python3 - "$evidence" <<'PY'
+tag_sha="$(git rev-parse "${tag_commit}^{commit}")"
+# Evidence and notes are validated as committed at the tag so this check works
+# from any checkout (for example a source-only candidate build checkout).
+git cat-file -e "${tag_sha}:${evidence}"
+git cat-file -e "${tag_sha}:${notes}"
+source_sha="$(git show "${tag_sha}:${evidence}" | python3 -c '
 import json, sys
-with open(sys.argv[1], encoding='utf-8') as handle:
-    value = json.load(handle).get('source_sha', '')
+value = json.load(sys.stdin).get("source_sha", "")
 if not isinstance(value, str):
     raise SystemExit(1)
 print(value)
-PY
-)"
+')"
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
-tag_sha="$(git rev-parse "${tag_commit}^{commit}")"
 git cat-file -e "${source_sha}^{commit}"
 git merge-base --is-ancestor "$source_sha" "$tag_sha"
 

@@ -1792,6 +1792,16 @@ async fn register_session_endpoint(
     {
         let mut cache = state.session_endpoints.write().await;
         let lobby_endpoints = cache.entry(lobby_id).or_default();
+        // Expired records are already excluded from every signed projection,
+        // so evict them here as well: a restarted or re-keyed client must never
+        // be permanently fenced out by a stale cached sequence while the
+        // server stays up. The strictly-increasing replay gate and the
+        // one-player-per-node claim check keep full force inside the
+        // retention window.
+        lobby_endpoints.retain(|_, existing| {
+            now.checked_duration_since(existing.received_at)
+                .is_some_and(|age| age <= SESSION_ENDPOINT_RETENTION_MS)
+        });
         if lobby_endpoints
             .get(&player_id)
             .is_some_and(|existing| request.sequence <= existing.sequence)

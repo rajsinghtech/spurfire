@@ -1957,6 +1957,58 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     assert_eq!(endpoint_replay_status, StatusCode::CONFLICT);
     assert_eq!(endpoint_replay["code"], "endpoint_sequence_replayed");
 
+    // Client restart/key rotation recovery: once the cached record ages past
+    // the 60 s projection retention it is evicted, so the restarted client can
+    // register its fresh key even with a lower (previously process-relative)
+    // sequence, and the strictly-increasing replay gate immediately re-arms.
+    clock.advance(60_001);
+    let restarted_signing = SigningKey::from_bytes(&[43; 32]);
+    let restarted_public =
+        SessionPublicKey::from_bytes(restarted_signing.verifying_key().to_bytes());
+    let restarted_proof_digest = canonical_keyreg_digest(
+        LobbyId::parse(lobby_id).unwrap(),
+        PlayerId::parse(PLAYER_2).unwrap(),
+        selected["network_generation"].as_u64().unwrap(),
+        selected["roster_revision"].as_u64().unwrap(),
+        "100.64.0.10".parse().unwrap(),
+        41643,
+        restarted_public,
+    );
+    let restarted_proof =
+        SessionSignature::from_bytes(restarted_signing.sign(&restarted_proof_digest).to_bytes());
+    let restarted_body = json!({
+        "network_generation": selected["network_generation"],
+        "roster_revision": selected["roster_revision"],
+        "sequence": 0,
+        "tailnet_address": "100.64.0.10",
+        "application_port": 41643,
+        "session_public_key": restarted_public,
+        "key_proof": restarted_proof,
+    });
+    let (restart_status, restart_response) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
+        Some(restarted_body.clone()),
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(restart_status, StatusCode::OK);
+    assert_eq!(
+        restart_response["session"]["peers"][0]["session_public_key"],
+        serde_json::to_value(restarted_public).unwrap()
+    );
+    let (stale_replay_status, stale_replay) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
+        Some(restarted_body),
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(stale_replay_status, StatusCode::CONFLICT);
+    assert_eq!(stale_replay["code"], "endpoint_sequence_replayed");
+
     let (replay_join_status, replay_join) = json_request(
         &app,
         Method::POST,

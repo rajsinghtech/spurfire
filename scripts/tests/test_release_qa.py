@@ -358,8 +358,16 @@ class CommandTests(unittest.TestCase):
             preflight.count('test "$(git rev-parse HEAD)" = "$SOURCE_SHA"'), 4
         )
         self.assertIn(".pull_request.head.sha", preflight)
-        self.assertIn("GITHUB_SHA: ${{ needs.metadata.outputs.source_sha }}", preflight)
-        self.assertIn('--source-digest "$source_sha"', preflight)
+        # GitHub forbids overriding GITHUB_* default variables, so provenance
+        # always binds the workflow commit. Tag runs re-prove that the tag
+        # commit adds only release metadata on top of the qualified source and
+        # verify attestations against the actually-attested commit.
+        self.assertNotIn("GITHUB_SHA: ${{", preflight)
+        attest_step = preflight.split("Attest candidate archive provenance", 1)[1]
+        attest_step = attest_step.split("with:", 1)[0]
+        self.assertNotIn("env:", attest_step)
+        self.assertIn('attest_sha="$GITHUB_SHA"', preflight)
+        self.assertIn('--source-digest "$attest_sha"', preflight)
         self.assertIn("environment: alpha-release", preflight)
         self.assertIn(
             "if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'",
@@ -380,6 +388,21 @@ class CommandTests(unittest.TestCase):
         self.assertIn("check-release-tag-binding.sh", preflight)
         self.assertIn("check-release-tag-binding.sh", publisher)
         self.assertIn("github.ref == 'refs/heads/main'", packages)
+        # Trusted eligibility and publication require qualified source to be
+        # contained in the protected main branch; a bare dispatch at an
+        # arbitrary ref must never satisfy the evidence chain.
+        self.assertIn(
+            'git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main',
+            preflight,
+        )
+        self.assertIn(
+            'git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main',
+            publisher,
+        )
+        self.assertIn(
+            'git merge-base --is-ancestor "$VALIDATED_SOURCE_SHA" refs/remotes/origin/main',
+            publisher,
+        )
 
     def test_candidate_metadata_is_nonpublishing(self):
         with tempfile.TemporaryDirectory() as directory:

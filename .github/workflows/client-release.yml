@@ -405,12 +405,13 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME"
 
-      - name: Attest candidate archive provenance at the qualified source SHA
+      - name: Attest candidate archive provenance at the workflow commit
         if: github.event_name != 'pull_request'
+        # Provenance always binds the runner-provided GITHUB_SHA; GitHub does
+        # not permit overriding GITHUB_* variables, so tag events attest the
+        # metadata-only tag commit T and the verify step re-proves T = S plus
+        # release metadata before trusting that binding.
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v3
-        env:
-          # Tag events may point at metadata-only T; provenance must describe checked-out S.
-          GITHUB_SHA: ${{ needs.metadata.outputs.source_sha }}
         with:
           subject-path: candidate/Spurfire-*
 
@@ -423,8 +424,16 @@ jobs:
           set -euo pipefail
           source_sha='${{ needs.metadata.outputs.source_sha }}'
           test "$(git rev-parse HEAD)" = "$source_sha"
+          attest_sha="$GITHUB_SHA"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            git fetch --no-tags origin "$GITHUB_SHA"
+            version="$(scripts/check-release-metadata.sh)"
+            test "$(scripts/check-release-tag-binding.sh "$version" "$GITHUB_SHA")" = "$source_sha"
+          else
+            test "$attest_sha" = "$source_sha"
+          fi
           for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-macos-universal.zip candidate/Spurfire-windows-x86_64.zip; do
-            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$source_sha"
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$attest_sha"
           done
           rm -rf candidate-metadata
           python3 scripts/make-alpha-candidate-metadata.py \
@@ -503,6 +512,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          # Trusted eligibility is reserved for qualified source contained in
+          # the protected main branch; a dispatch alone must never grant
+          # release eligibility to an arbitrary ref or off-main commit.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
           [[ "$APPROVED_APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$APPROVED_WINDOWS_CERTIFICATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           for archive in trusted-candidate/Spurfire-linux-x86_64.tar.gz trusted-candidate/Spurfire-macos-universal.zip trusted-candidate/Spurfire-windows-x86_64.zip; do
