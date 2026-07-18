@@ -473,9 +473,7 @@ impl MountedWeaponController {
             prelaunch_horizontal_velocity_mmps,
         };
         if !self.shot_ledger.record_accepted(accepted)
-            || !rider
-                .bind_mut()
-                .record_authority_accepted_shot(accepted)
+            || !rider.bind_mut().record_authority_accepted_shot(accepted)
         {
             godot_error!("accepted combat shot could not reach the authoritative rider sink");
             self.last_reject_reason = GString::from("rider_snapshot");
@@ -791,11 +789,9 @@ impl MountedWeaponController {
         }
         let equipped = self.kernel.equipped_weapon();
         let tick_rate = self.kernel.tick_rate();
-        let Ok(mut kernel) = CombatKernel::with_full_loadout(
-            tick_rate,
-            self.lobby_seed.cast_unsigned(),
-            shooter,
-        ) else {
+        let Ok(mut kernel) =
+            CombatKernel::with_full_loadout(tick_rate, self.lobby_seed.cast_unsigned(), shooter)
+        else {
             return false;
         };
         if equipped != kernel.equipped_weapon() && !kernel.equip_weapon(equipped) {

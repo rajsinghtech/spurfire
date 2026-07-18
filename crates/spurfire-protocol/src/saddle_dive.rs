@@ -1722,10 +1722,7 @@ impl SaddleDiveKernel {
             .collect();
         for id in ids {
             if let Some(record) = self.rows.get_mut(&id) {
-                if !record
-                    .attributed_damage_observations
-                    .insert(observation.id)
-                {
+                if !record.attributed_damage_observations.insert(observation.id) {
                     continue;
                 }
                 record.row.damage_taken_landing_through_3s = record
@@ -2225,11 +2222,7 @@ impl HorseRunoutKernel {
         if self.state != HorseRunoutState::Runout {
             return position;
         }
-        clamp_origin_to_planar_step(
-            self.last_position,
-            position,
-            self.current_maximum_step_mm,
-        )
+        clamp_origin_to_planar_step(self.last_position, position, self.current_maximum_step_mm)
     }
 
     /// Records one collision-resolved horse movement and stops at the cap.
@@ -2309,14 +2302,18 @@ fn clamp_origin_to_planar_step(
     let dz = i128::from(requested.z) - i128::from(origin.z);
     let mut scaled_step = maximum_step_mm;
     loop {
-        let x = origin.x.saturating_add(saturating_i128_to_i32(div_round_half_away(
-            dx * i128::from(scaled_step),
-            i128::from(distance),
-        )));
-        let z = origin.z.saturating_add(saturating_i128_to_i32(div_round_half_away(
-            dz * i128::from(scaled_step),
-            i128::from(distance),
-        )));
+        let x = origin
+            .x
+            .saturating_add(saturating_i128_to_i32(div_round_half_away(
+                dx * i128::from(scaled_step),
+                i128::from(distance),
+            )));
+        let z = origin
+            .z
+            .saturating_add(saturating_i128_to_i32(div_round_half_away(
+                dz * i128::from(scaled_step),
+                i128::from(distance),
+            )));
         let clamped = QuantizedOrigin::new(x, requested.y, z);
         if rounded_planar_distance(origin, clamped) <= maximum_step_mm || scaled_step == 0 {
             return clamped;
@@ -3214,12 +3211,10 @@ mod tests {
         };
         let finalized = kernel.record_authority_result(&ledger.observe_result(7, &result));
         assert_eq!(finalized.telemetry_finalized.len(), 1);
-        assert!(
-            kernel
-                .record_authority_result(&ledger.observe_result(7, &result))
-                .telemetry_finalized
-                .is_empty()
-        );
+        assert!(kernel
+            .record_authority_result(&ledger.observe_result(7, &result))
+            .telemetry_finalized
+            .is_empty());
     }
 
     #[test]

@@ -3041,9 +3041,7 @@ mod tests {
         previous.gait = CombatGait::Walk;
         previous.planar_speed_mmps = 2_000;
         previous.gait_top_speed_mmps = 14_000;
-        kernel
-            .advance_to(SimulationTick::new(9), previous)
-            .unwrap();
+        kernel.advance_to(SimulationTick::new(9), previous).unwrap();
 
         let mut current = previous;
         current.gait = CombatGait::Gallop;
@@ -3052,9 +3050,7 @@ mod tests {
         current.ads = true;
         // Equal-tick installation changes only authoritative handling. The
         // launch call still owns progression/cancellation through tick 10.
-        kernel
-            .advance_to(SimulationTick::new(9), current)
-            .unwrap();
+        kernel.advance_to(SimulationTick::new(9), current).unwrap();
         let dive_id = DiveId::new(44).unwrap();
         kernel
             .begin_saddle_dive(

@@ -84,9 +84,7 @@ impl RiderStance {
     #[must_use]
     pub const fn is_canonical(self) -> bool {
         match self {
-            Self::Unknown(value) => {
-                value < Self::MOUNTED_ID || value > Self::ON_FOOT_STANDING_ID
-            }
+            Self::Unknown(value) => value < Self::MOUNTED_ID || value > Self::ON_FOOT_STANDING_ID,
             _ => true,
         }
     }

@@ -8,9 +8,8 @@ use spurfire_protocol::{
     LandingTerrain, PlayerId, QuantizedDirection, QuantizedOrigin, RiderMotionObservation,
     RiderStance, SaddleDiveCommand, SaddleDiveEffects, SaddleDiveKernel, SaddleDiveState,
     SaddleDiveTickInput, ShotResultAttribution, SimulationTick, WeaponId, BAD_LANDING_DAMAGE,
-    DIRECTION_UNITS, MIN_DIVE_SPEED_MMPS, MOVEMENT_SCALE_FULL_MILLI,
-    MOVEMENT_SCALE_PRONE_MILLI, MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2,
-    SADDLE_DIVE_TICK_RATE_HZ,
+    DIRECTION_UNITS, MIN_DIVE_SPEED_MMPS, MOVEMENT_SCALE_FULL_MILLI, MOVEMENT_SCALE_PRONE_MILLI,
+    MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2, SADDLE_DIVE_TICK_RATE_HZ,
 };
 
 use crate::horse_controller::HorseController;
@@ -161,9 +160,7 @@ impl SaddleDiveController {
                 && planar_speed_squared_mmps(horse_velocity_mmps)
                     >= u128::from(MIN_DIVE_SPEED_MMPS).pow(2);
             if launch_candidate
-                && (!weapon
-                    .bind()
-                    .can_begin_authoritative_dive(tick, weapon_id)
+                && (!weapon.bind().can_begin_authoritative_dive(tick, weapon_id)
                     || !horse.bind().can_start_authoritative_runout())
             {
                 return false;
@@ -224,9 +221,8 @@ impl SaddleDiveController {
             if self.kernel.state() != SaddleDiveState::SaddleDiveAirborne
                 && !self.base().is_on_floor()
             {
-                velocity.y -= SADDLE_DIVE_GRAVITY_MMPS2 as f32
-                    / 1_000.0
-                    / SADDLE_DIVE_TICK_RATE_HZ as f32;
+                velocity.y -=
+                    SADDLE_DIVE_GRAVITY_MMPS2 as f32 / 1_000.0 / SADDLE_DIVE_TICK_RATE_HZ as f32;
                 self.base_mut().set_velocity(velocity);
             }
             descending = velocity.y <= 0.0;
@@ -483,17 +479,9 @@ impl SaddleDiveController {
         self.refresh_runtime_properties();
     }
 
-    pub(crate) fn record_authority_accepted_shot(
-        &mut self,
-        shot: AcceptedShotMetadata,
-    ) -> bool {
+    pub(crate) fn record_authority_accepted_shot(&mut self, shot: AcceptedShotMetadata) -> bool {
         if shot.shooter != self.kernel.actor()
-            || !self.can_accept_authority_shot(
-                shot.tick,
-                shot.stance,
-                shot.dive_id,
-                shot.weapon_id,
-            )
+            || !self.can_accept_authority_shot(shot.tick, shot.stance, shot.dive_id, shot.weapon_id)
         {
             return false;
         }
@@ -526,11 +514,7 @@ impl SaddleDiveController {
         accepted
     }
 
-    pub(crate) fn bind_session_identity(
-        &mut self,
-        actor: PlayerId,
-        authority_epoch: u64,
-    ) -> bool {
+    pub(crate) fn bind_session_identity(&mut self, actor: PlayerId, authority_epoch: u64) -> bool {
         if self.kernel.actor() == actor && self.kernel.authority_epoch() == authority_epoch {
             return true;
         }
@@ -629,9 +613,9 @@ impl SaddleDiveController {
         for command in &effects.commands {
             match *command {
                 SaddleDiveCommand::StartHorseRunout { tick, .. } => {
-                    let started = self
-                        .horse()
-                        .is_some_and(|mut horse| horse.bind_mut().start_dive_runout(tick_i64(tick)));
+                    let started = self.horse().is_some_and(|mut horse| {
+                        horse.bind_mut().start_dive_runout(tick_i64(tick))
+                    });
                     if !started {
                         godot_error!("preflighted horse runout failed at tick {}", tick.as_u64());
                         return;
@@ -785,8 +769,7 @@ impl SaddleDiveController {
                         return false;
                     }
                 }
-                SaddleDiveCommand::DetachRider { .. }
-                | SaddleDiveCommand::ApplyRiderDamage(_) => {}
+                SaddleDiveCommand::DetachRider { .. } | SaddleDiveCommand::ApplyRiderDamage(_) => {}
             }
         }
 
@@ -799,8 +782,10 @@ impl SaddleDiveController {
             };
             let already_applied = matches!(
                 (transition.from, transition.to),
-                (SaddleDiveState::Mounted, SaddleDiveState::SaddleDiveAirborne)
-                    | (SaddleDiveState::OnFootReady, SaddleDiveState::Mounted)
+                (
+                    SaddleDiveState::Mounted,
+                    SaddleDiveState::SaddleDiveAirborne
+                ) | (SaddleDiveState::OnFootReady, SaddleDiveState::Mounted)
             );
             if already_applied {
                 continue;
@@ -810,7 +795,10 @@ impl SaddleDiveController {
             };
             if matches!(
                 (transition.from, transition.to),
-                (SaddleDiveState::SaddleDiveAirborne, SaddleDiveState::LandingProne)
+                (
+                    SaddleDiveState::SaddleDiveAirborne,
+                    SaddleDiveState::LandingProne
+                )
             ) {
                 let Some(id) = transition.dive_id else {
                     return false;
@@ -926,7 +914,11 @@ impl SaddleDiveController {
             )
         } else {
             let top_speed = finite_positive_or(snapshot.gallop_speed_mps, 13.0);
-            (planar_speed, (planar_speed / top_speed).clamp(0.0, 1.0), 0.0)
+            (
+                planar_speed,
+                (planar_speed / top_speed).clamp(0.0, 1.0),
+                0.0,
+            )
         };
         let mut telemetry = VarDictionary::new();
         telemetry.set("speed_mps", speed_mps);
