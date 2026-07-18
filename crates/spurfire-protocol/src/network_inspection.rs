@@ -213,12 +213,12 @@ pub enum Freshness {
     Fresh,
     /// Last successful value is retained outside its freshness window.
     Stale,
-    /// No freshness statement can be made.
+    /// The fact does not apply to this mode or lifecycle.
+    NotApplicable,
+    /// No freshness statement can be made, including values added by newer schemas.
     #[default]
     #[serde(other)]
     Unknown,
-    /// The fact does not apply to this mode or lifecycle.
-    NotApplicable,
 }
 
 /// Why a value is unknown rather than false, zero, offline, or absent.
@@ -370,7 +370,7 @@ impl<T> Fact<T> {
                 }
                 if !source_supports_assurance(self.source, self.assurance) {
                     return Err(FactValidationError::InvalidSourceAssurance {
-                        source: self.source,
+                        fact_source: self.source,
                         assurance: self.assurance,
                     });
                 }
@@ -465,10 +465,10 @@ pub enum FactValidationError {
         freshness: Freshness,
     },
     /// Source and assurance make an unsupported truth claim.
-    #[error("source {source:?} cannot claim assurance {assurance:?}")]
+    #[error("source {fact_source:?} cannot claim assurance {assurance:?}")]
     InvalidSourceAssurance {
         /// Fact source.
-        source: FactSource,
+        fact_source: FactSource,
         /// Unsupported assurance.
         assurance: FactAssurance,
     },
@@ -2275,7 +2275,7 @@ mod tests {
                     Freshness::Fresh,
                 ),
                 FactValidationError::InvalidSourceAssurance {
-                    source: FactSource::ParticipantReport,
+                    fact_source: FactSource::ParticipantReport,
                     assurance: FactAssurance::Authoritative,
                 },
             ),
