@@ -37,7 +37,7 @@ The script requires the gitignored `.env` OAuth settings. It:
 9. Verifies surviving processes B and C elect B at epoch 2, exchange the authority announcement and a new rider-input frame, and continue play.
 10. Closes survivors and exactly deletes the child tailnet under an exit trap.
 
-On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true`, and `SPURFIRE_P2P_LIFECYCLE_OK`. The child tailnet `tail83569b.ts.net` was deleted. Earlier direct-UDP development tailnets were also deleted. Those runs exposed RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as a local teardown warning only after traffic succeeds.
+On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true`, and `SPURFIRE_P2P_LIFECYCLE_OK`. The disposable child tailnet was deleted, as were earlier direct-UDP development tailnets. Those runs exposed RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as a local teardown warning only after traffic succeeds.
 
 ## Security boundaries
 

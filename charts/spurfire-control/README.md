@@ -52,7 +52,7 @@ The implemented selected-lobby inspection GET reads cached state only and never 
 
 ## Gateway API
 
-Gateway API routing is opt-in and is restricted by chart validation to credential-free dry-run mode. The supplied values target the `home/public` Gateway and `spurfire.rajsingh.info`:
+Gateway API routing is opt-in and is restricted by chart validation to credential-free dry-run mode. The supplied values use generic Gateway coordinates and the public Spurfire hostname; replace the Gateway name and namespace for your deployment:
 
 ```yaml
 fullnameOverride: spurfire
@@ -61,8 +61,8 @@ httpRoute:
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: public
-      namespace: home
+      name: public-gateway
+      namespace: gateway-system
   hostnames:
     - spurfire.rajsingh.info
 ```

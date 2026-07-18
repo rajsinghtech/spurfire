@@ -70,7 +70,7 @@ See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changi
 
 Godot 4.7.1 with Rust GDExtension is the accepted game stack. Keep engine-facing scenes and content in `game/` and gameplay classes in `crates/spurfire-gdext/`; never commit generated libraries under `game/bin/`. M0 is movement-only, and RustScale integration starts only after the movement acceptance checks in `docs/godot-m0.md` pass.
 
-The sibling repository `/Users/rajsingh/Documents/GitHub/rustscale` is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. In-process Rust integration is feasible, but production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
+A sibling checkout of the RustScale repository (conventionally `../rustscale`) is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. In-process Rust integration is feasible, but production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
 
 ## Agent worktree pattern
 

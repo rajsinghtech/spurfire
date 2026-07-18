@@ -73,8 +73,8 @@ httpRoute:
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: public
-      namespace: home
+      name: public-gateway
+      namespace: gateway-system
   hostnames:
     - spurfire.rajsingh.info
   path:

@@ -64,13 +64,13 @@ No observer is retained in the current architecture. A future diagnostic observe
 
 ## Tailnet DNS name terminology and privacy
 
-The canonical field is `tailnet_dns_name`. It is the complete provider-returned tailnet DNS name/FQDN, for example `tail9a1c23.ts.net`, canonicalized to lowercase ASCII without a trailing root dot.
+The canonical field is `tailnet_dns_name`. It is the complete provider-returned tailnet DNS name/FQDN, for example the illustrative `example-tailnet.ts.net`, canonicalized to lowercase ASCII without a trailing root dot.
 
 In that example:
 
 - the TLD is **`.net`**;
 - `.ts.net` is a provider DNS suffix, not a TLD;
-- the useful operational value is the complete FQDN `tail9a1c23.ts.net`.
+- the useful operational value is the complete FQDN, illustrated here as `example-tailnet.ts.net`.
 
 Do not introduce fields named `tailnet_tld`, `tld`, or `tailnet_domain_suffix`. The FQDN must originate in a typed provider response or trusted server configuration, never request input. Before it is used as a provider path segment, validate DNS label/total limits and reject empty labels, controls, slash, percent, userinfo, port, query, or fragment syntax; then use a URL path-segment builder/encoder. Dry-run must use `null`, never a guessed FQDN or the internal `dry-run.invalid` selector.
 
@@ -389,8 +389,8 @@ Every item is mandatory; order does not imply partial activation:
 - [ ] The operator listener is private and unreachable through the hosted public Gateway.
 - [ ] Privacy approval covers FQDN, private addresses, participant reports, and tombstone retention; public small-cohort suppression is enabled.
 - [ ] Exact-ID cleanup, quota lock, vault, and reconciliation alerts plus this runbook are deployed and exercised.
-- [ ] Persistent non-secret state and an approved parent-credential path are deployed; no credential is copied to `raj-builder`.
-- [ ] Clean credential-free Linux checks pass on `ssh ubuntu@raj-builder`; cross-platform GitHub Actions pass. No Mac build is used for this activation.
+- [ ] Persistent non-secret state and an approved parent-credential path are deployed; no credential is copied to any build host.
+- [ ] Clean credential-free Linux checks pass in an isolated build environment; cross-platform GitHub Actions pass. No Mac build is used for this activation.
 - [ ] A separate GitOps review attests every preceding gate and explicitly changes the hosted deployment. Until then it remains forced dry-run.
 
 ## Required test plan

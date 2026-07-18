@@ -80,7 +80,7 @@ These routes are the accepted contract. Safe groundwork implements the schema, c
 
 Absent, wrong-lobby, wrong-generation, expired, revoked, and insufficient-scope requests use the same `404 lobby_not_found` body. Sensitive responses carry `Cache-Control: private, no-store`, `Vary: Authorization`, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
 
-The selected view uses a complete provider-returned `tailnet_dns_name`/FQDN, such as `tail9a1c23.ts.net`, for authorized audiences only. The TLD is `.net`; `.ts.net` is not a TLD. Dry-run returns a null/not-applicable FQDN and never serializes the current internal `dry-run.invalid` placeholder. See [the complete audience, fact, report, and freshness contract](control-plane-network-view.md#network-view-contract).
+The selected view uses a complete provider-returned `tailnet_dns_name`/FQDN, such as the illustrative `example-tailnet.ts.net`, for authorized audiences only. The TLD is `.net`; `.ts.net` is not a TLD. Dry-run returns a null/not-applicable FQDN and never serializes the current internal `dry-run.invalid` placeholder. See [the complete audience, fact, report, and freshness contract](control-plane-network-view.md#network-view-contract).
 
 ## State machine
 

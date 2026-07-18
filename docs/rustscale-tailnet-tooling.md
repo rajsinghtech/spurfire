@@ -1,6 +1,6 @@
 # RustScale organization-tailnet tooling reference
 
-Spurfire consulted, but did not modify, the sibling RustScale repository at `/Users/rajsingh/Documents/GitHub/rustscale`. The reference scripts are under `tools/tailnet/`:
+Spurfire consulted, but did not modify, a sibling checkout of the RustScale repository. The reference scripts are under its `tools/tailnet/` directory:
 
 | Script | Relevant behavior |
 |---|---|
@@ -19,7 +19,7 @@ These scripts established the correct endpoint and token boundaries. The raw Rus
 `scripts/ts-api.sh` therefore exposes a narrower surface:
 
 - `token` prints status only and never the token;
-- `list-tailnets` prints only a count, not all 415 entries observed at verification time;
+- `list-tailnets` prints only a count and never prints the organization inventory;
 - `probe-org-tailnet --confirm` is the only mutating command;
 - the probe name is generated with the `spurfire-probe-*` prefix and the verified 50-byte grammar;
 - an exit/signal cleanup trap is installed before creation;

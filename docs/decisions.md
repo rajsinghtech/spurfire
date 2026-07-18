@@ -126,7 +126,7 @@ summaries, and then inspects exactly one lobby. Unauthorized and absent requests
 shape. Inspection GETs are cache-only and mutation-free.
 
 The selected view may show the complete `tailnet_dns_name`/FQDN to authorized members while the
-network is active or cleanup is pending. In `tail9a1c23.ts.net`, the TLD is `.net`; the useful
+network is active or cleanup is pending. In the illustrative `example-tailnet.ts.net`, the TLD is `.net`; the useful
 value is the complete FQDN, not a supposed `.ts.net` TLD. FQDNs and private addresses are
 capability-gated topology metadata. Every lifecycle, enrollment, route, application RTT/loss,
 authority, freshness, and cleanup fact carries source and assurance; participant reports remain
