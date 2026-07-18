@@ -421,7 +421,8 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 func _exercise_bridge_caps(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"MountedWeaponController"):
 		return
-	for weapon_id in [1, 0, 2]:
+	for weapon_value in [1, 0, 2]:
+		var weapon_id: int = int(weapon_value)
 		var controller := ClassDB.instantiate(&"MountedWeaponController") as Node3D
 		add_child(controller)
 		await get_tree().process_frame
@@ -430,21 +431,21 @@ func _exercise_bridge_caps(failures: Array[String]) -> void:
 			controller.queue_free()
 			continue
 		controller.call("equip_weapon", weapon_id)
-		var dive_id := weapon_id + 20
+		var dive_id: int = weapon_id + 20
 		if not bool(controller.call("begin_saddle_dive", dive_id, 2, Vector2(8, 0), 45)):
 			failures.append("combat bridge could not begin dive for weapon %d" % weapon_id)
 			controller.queue_free()
 			continue
-		var cap := 1 if weapon_id == 1 else (3 if weapon_id == 0 else 5)
-		var cadence := 15 if weapon_id == 1 else (8 if weapon_id == 0 else 6)
-		var accepted := 0
+		var cap: int = 1 if weapon_id == 1 else (3 if weapon_id == 0 else 5)
+		var cadence: int = 15 if weapon_id == 1 else (8 if weapon_id == 0 else 6)
+		var accepted: int = 0
 		for index in cap:
-			var shot_tick := 2 + index * cadence
+			var shot_tick: int = 2 + index * cadence
 			controller.call("set_rider_context", shot_tick, STANCE_DIVE, dive_id, 3, 8.0, 13.0, 0.0, false, false, false)
 			if bool(controller.call("request_fire", controller.global_position, Vector3.FORWARD, shot_tick)):
 				accepted += 1
 				controller.call("resolve_local_miss")
-		var blocked_tick := 2 + cap * cadence
+		var blocked_tick: int = 2 + cap * cadence
 		controller.call("set_rider_context", blocked_tick, STANCE_DIVE, dive_id, 3, 8.0, 13.0, 0.0, false, false, false)
 		if bool(controller.call("request_fire", controller.global_position, Vector3.FORWARD, blocked_tick)):
 			failures.append("weapon %d accepted cap+1 Saddle Dive shot" % weapon_id)
@@ -456,7 +457,7 @@ func _exercise_bridge_caps(failures: Array[String]) -> void:
 			failures.append("weapon %d reloaded during Saddle Dive" % weapon_id)
 		controller.call("finish_saddle_dive", dive_id, blocked_tick + 1)
 		controller.call("complete_remount", blocked_tick + 1)
-		var jump_tick := blocked_tick + 2
+		var jump_tick: int = blocked_tick + 2
 		controller.call("set_rider_context", jump_tick, STANCE_MOUNTED_AIRBORNE, -1, 3, 8.0, 13.0, 0.0, false, false, false)
 		if bool(controller.call("request_fire", controller.global_position, Vector3.FORWARD, jump_tick)):
 			failures.append("ordinary mounted-airborne shot became legal")
