@@ -26,7 +26,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 |---|---|---|---|
 | M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
-| M2 | Saddle Dive | not started | measurable risk/reward; testers dive 2–4x/match |
+| M2 | Saddle Dive | **implementation complete / playtest pending** | measurable risk/reward; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | not started | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
@@ -128,14 +128,19 @@ underestimated.
 
 ## M2 — Saddle Dive
 
+**Status: implementation complete / playtest pending.** Deterministic Rust, GDExtension,
+wire 1.1 stance, thin Godot presentation, and forced bounded smoke are implemented. Those
+gates prove mechanics, not the natural frequency, effectiveness, death-rate, notification,
+or feel targets below; M2 is not done until observational playtest evidence passes them.
+
 **Goal:** signature mechanic works and is *measurable*: high risk, high reward, never dominant.
 
 **Mechanics in scope:** dive via the dismount input at speed (>=8 m/s — no dedicated
-button), launch vector, airborne accuracy window, horse continues, landing recovery,
-scoring notifications (FLYING DISMOUNT, SADDLE DIVE HEADSHOT, FULL-GALLOP HIT, AIRBORNE
-REVERSAL). Airborne fire is **dive-only**; the kernel keeps rejecting normal jump-air fire.
-Groundwork: snapshot DTOs carry a stance field from M2 onward so M6 lag compensation needs
-no wire break.
+button), launch vector, airborne accuracy window, horse continues, landing recovery, and
+deterministic notifications (FLYING DISMOUNT, SADDLE DIVE HEADSHOT, FULL-GALLOP HIT,
+AIRBORNE REVERSAL). These events award no points; M5 owns scoring. Airborne fire is
+**dive-only**; the kernel keeps rejecting normal jump-air fire. Groundwork: snapshot DTOs
+carry a stance field from M2 onward so D7 lag-comp rewind needs no later wire break.
 
 **Tuning table** (airtime numbers re-derived for shipped gravity 22.0; the v1 values
 assumed 9.8 and would have produced ~0.57s of air):
@@ -156,8 +161,11 @@ assumed 9.8 and would have produced ~0.57s of air):
 - [ ] Airborne hit% is measurably above mounted-gallop baseline (target +25–40% relative).
 - [ ] Deaths within 3s of landing: 25–40% of dives (risk is real, not suicidal).
 - [ ] Testers use dive 2–4x per 15-min match (not 0, not 10).
-- [ ] All four scoring notifications trigger in normal play within 3 matches.
-- [ ] Reversal dive (behind launch) lands without animation popping.
+- [ ] All four notifications trigger naturally within 3 matches.
+- [ ] AIRBORNE REVERSAL presentation lands without animation popping. The legacy
+  “behind launch” wording is blocked: a +/-75-degree launch cone cannot produce a >90-degree
+  launch. M2 logs reversal only when an authority-confirmed dive shot points strictly behind
+  pre-launch velocity; the cone remains locked pending product-documentation correction.
 
 **Top risks:** (1) dive becomes optimal spam (recovery too weak) or never used (recovery too
 strong) — this is the single most sensitive number pair in the prototype (airborne sway x0.6 /
@@ -435,20 +443,28 @@ Godot 4.7.1 with gdext and the acceptance checks held. See `docs/decisions.md` D
 
 ## 4. Playtest instrumentation: tuning the Saddle Dive risk/reward
 
-Log per dive: speed at launch, launch angle, airtime, shots fired/hit, damage dealt,
-landing terrain, damage taken 0–3s post-landing, time-to-remount, outcome score delta.
+The secret-free schema-v1 row is keyed by `(actor, dive_id)` and records authority epoch;
+launch tick, locked weapon/gait, pre-launch velocity and speed; requested/clamped direction
+and angle; clamp flag; horizontal impulse, vertical pop, launch height, resulting planar and
+total speed, and nominal airtime; landing tick and actual airtime; shot attempts, accepted
+shots, hits, headshots, reversal hits, and damage dealt; landing terrain, quantized slope,
+outcome, and landing damage; damage taken and death within the inclusive landing-through-3s
+window; remount tick/time; and terminal censor reason. It contains no score delta, bond gain,
+credential, seed, or client-claimed style credit.
 
 | Metric | Target band | Dial if out of band |
 |---|---|---|
-| Dives per player per match | 2–4 | recovery 0.8s +/- 0.2s |
+| Dives per player per 15-min match | 2–4 | recovery 0.8s +/- 0.2s |
 | Airborne hit% vs gallop baseline | +25–40% relative | airborne sway x0.6 (range 0.5–0.8) |
 | Deaths within 3s of landing | 25–40% | recovery length; bad-landing penalty |
-| Dive elim share of all elims | 8–15% | +25 score bonus; airborne shot cap |
+| Natural notification coverage | all four within 3 matches | presentation clarity, then shot cap |
 | Median time-to-remount after dive | 6–10s | horse continue distance (25m) |
-| Reversal dives (angle >90deg) share | 15–30% | launch cone width |
-| Dive usage by match half | 2nd half >= 1st | if drops: perceived as suicide -> buff reward |
-| Post-dive bond gain vs dive risk (M4) | positive expected value | +8 bond for dive elim |
-| Sickness reports (camera) | ~0 | FOV kick, landing camera dip |
+| AIRBORNE REVERSAL hit share | observe first; no launch-angle target while contradiction is blocked | shot-direction skill window; do not widen launch cone |
+| Sickness reports (camera) | ~0 | keep no kick/dip/roll first; tune only from evidence |
+
+**Deferred metrics:** M4 owns bond gain and its value; M5 owns outcome score delta, dive-elim
+share, score bonuses, and match-half reward pressure. M2 instrumentation must not synthesize
+those future systems.
 
 Kill criteria (redesign, not tune): dive elim share >25% (dominant) for 2 consecutive
 milestones, or usage <1/match after two buff passes (players have voted it's not fun).

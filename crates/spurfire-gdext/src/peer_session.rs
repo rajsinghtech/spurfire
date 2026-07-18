@@ -11,9 +11,11 @@ use godot::prelude::*;
 use spurfire_net::{
     decode, encode, rustscale::RustScalePeer, AcceptOutcome, PeerPayload, SessionState,
 };
-use spurfire_protocol::{LobbyId, PlayerId};
+use spurfire_protocol::{LobbyId, PlayerId, RiderStance};
 use tokio::time::Duration;
 use zeroize::Zeroizing;
+
+use crate::saddle_dive_controller::SaddleDiveController;
 
 enum WorkerCommand {
     Send {
@@ -143,12 +145,16 @@ fn run_worker(
 pub struct PeerSession {
     #[base]
     base: Base<Node>,
+    #[export]
+    gameplay_rider_path: NodePath,
     #[var(no_set)]
     connection_state: GString,
     #[var(no_set)]
     tailnet_ip: GString,
     #[var(no_set)]
     local_port: i64,
+    #[var(no_set)]
+    local_player_id: GString,
     #[var(no_set)]
     authority_player_id: GString,
     #[var(no_set)]
@@ -170,6 +176,8 @@ impl PeerSession {
     fn connection_failed(message: GString);
     #[signal]
     fn disconnected();
+    #[signal]
+    fn session_identity_bound(local_player_id: GString, authority_epoch: i64);
 
     /// Configure validated application identity and deterministic authority state.
     #[func]
@@ -192,9 +200,27 @@ impl PeerSession {
         let Ok(now_ms) = u64::try_from(now_ms) else {
             return false;
         };
+        let authority_epoch = 1_u64;
+        if let Some(mut rider) = self
+            .base()
+            .try_get_node_as::<SaddleDiveController>(&self.gameplay_rider_path)
+        {
+            if !rider
+                .bind_mut()
+                .bind_session_identity(local_player, authority_epoch)
+            {
+                return false;
+            }
+        }
         self.session = Some(SessionState::new(lobby_id, local_player, authority, now_ms));
+        self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
-        self.authority_epoch = 1;
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        let signal_player = self.local_player_id.clone();
+        let signal_epoch = self.authority_epoch;
+        self.signals()
+            .session_identity_bound()
+            .emit(&signal_player, signal_epoch);
         true
     }
 
@@ -229,7 +255,10 @@ impl PeerSession {
         ) else {
             return PackedByteArray::new();
         };
-        if !(-1_000..=1_000).contains(&throttle_milli) || !(-1_000..=1_000).contains(&steer_milli) {
+        if !(-1_000..=1_000).contains(&throttle_milli)
+            || !(-1_000..=1_000).contains(&steer_milli)
+            || buttons & !0b11 != 0
+        {
             return PackedByteArray::new();
         }
         self.make_packet(
@@ -250,6 +279,7 @@ impl PeerSession {
         position: Vector3,
         velocity: Vector3,
         yaw_degrees: f64,
+        stance_id: i64,
     ) -> PackedByteArray {
         fn millimetres(value: f32) -> Option<i32> {
             let scaled = f64::from(value) * 1_000.0;
@@ -276,7 +306,14 @@ impl PeerSession {
             return PackedByteArray::new();
         };
         let yaw = yaw_degrees * 1_000.0;
-        if !yaw.is_finite() || yaw < f64::from(i32::MIN) || yaw > f64::from(i32::MAX) {
+        let Ok(stance_id) = u8::try_from(stance_id) else {
+            return PackedByteArray::new();
+        };
+        if !yaw.is_finite()
+            || yaw < f64::from(i32::MIN)
+            || yaw > f64::from(i32::MAX)
+            || !(RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID).contains(&stance_id)
+        {
             return PackedByteArray::new();
         }
         self.make_packet(
@@ -285,6 +322,7 @@ impl PeerSession {
                 position_mm: [position_mm[0], position_mm[1], position_mm[2]],
                 velocity_mmps: [velocity_mmps[0], velocity_mmps[1], velocity_mmps[2]],
                 yaw_millidegrees: yaw.round() as i32,
+                stance: RiderStance::from_u8(stance_id),
             },
         )
     }
@@ -334,6 +372,7 @@ impl PeerSession {
                 position_mm,
                 velocity_mmps,
                 yaw_millidegrees,
+                stance,
             } => {
                 result.set("type", "rider_snapshot");
                 result.set(
@@ -353,6 +392,8 @@ impl PeerSession {
                     ),
                 );
                 result.set("yaw_degrees", f64::from(yaw_millidegrees) / 1_000.0);
+                result.set("stance_id", i64::from(stance.as_u8()));
+                result.set("stance_known", stance.is_known());
             }
             PeerPayload::ShotCommand { .. } => result.set("type", "shot_command"),
             PeerPayload::ShotResult { .. } => result.set("type", "shot_result"),
@@ -524,9 +565,11 @@ impl INode for PeerSession {
     fn init(base: Base<Node>) -> Self {
         Self {
             base,
+            gameplay_rider_path: NodePath::from("../Rider"),
             connection_state: "offline".into(),
             tailnet_ip: GString::new(),
             local_port: 0,
+            local_player_id: GString::new(),
             authority_player_id: GString::new(),
             authority_epoch: 0,
             session: None,

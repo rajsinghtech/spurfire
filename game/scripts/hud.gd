@@ -1,6 +1,7 @@
 extends CanvasLayer
 
 @export var horse: Node
+@export var rider: Node3D
 var _log: FileAccess
 const GAITS := ["Idle", "Walk", "Trot", "Gallop"]
 
@@ -10,6 +11,21 @@ func _ready() -> void:
 	_log = FileAccess.open("user://m0_telemetry.csv", FileAccess.WRITE)
 	if _log:
 		_log.store_line("time_ms,speed_mps,speed_kmh,gait,slope_angle_deg,surface,x,y,z,is_airborne")
+
+func _process(_delta: float) -> void:
+	var hint := $Panel/Margin/VBox/RemountHint as Label
+	var retrievable := horse != null and bool(horse.get("is_retrievable"))
+	var on_foot := rider != null and int(rider.get("stance_id")) == 6
+	if not retrievable or not on_foot:
+		hint.visible = false
+		return
+	var offset := rider.global_position - (horse as Node3D).global_position
+	var distance := Vector2(offset.x, offset.z).length()
+	hint.visible = true
+	if distance <= 3.0:
+		hint.text = "E — REMOUNT"
+	else:
+		hint.text = "HORSE READY  •  %.1f m" % distance
 
 func _on_telemetry(data: Dictionary) -> void:
 	var gait_index := clampi(int(data.get("gait", 0)), 0, GAITS.size() - 1)

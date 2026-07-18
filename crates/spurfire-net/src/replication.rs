@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use spurfire_protocol::RiderStance;
+
 pub const DEFAULT_INTERPOLATION_TICKS: u64 = 2;
 pub const DEFAULT_MAX_EXTRAPOLATION_TICKS: u64 = 15;
 pub const DEFAULT_SNAP_DISTANCE_M: f32 = 2.0;
@@ -12,6 +14,8 @@ pub struct RiderState {
     pub position_m: [f32; 3],
     pub velocity_mps: [f32; 3],
     pub yaw_degrees: f32,
+    /// Discrete logical stance. Unknown future codes are retained.
+    pub stance: RiderStance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +29,8 @@ pub struct Reconciliation {
     pub position_error_m: [f32; 3],
     pub distance_m: f32,
     pub snap: bool,
+    /// Apply this correction immediately and independently from position.
+    pub stance_mismatch: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +95,13 @@ impl SnapshotBuffer {
                 let span = (after.tick - before.tick).max(1) as f32;
                 let alpha = ((render_tick - before.tick as f64) as f32 / span).clamp(0.0, 1.0);
                 return Some(SampledRiderState {
-                    state: interpolate(*before, *after, alpha, render_tick.round() as u64),
+                    state: interpolate(
+                        *before,
+                        *after,
+                        alpha,
+                        render_tick.round() as u64,
+                        render_tick,
+                    ),
                     extrapolated: false,
                 });
             }
@@ -131,10 +143,17 @@ pub fn reconcile(predicted: RiderState, authoritative: RiderState) -> Reconcilia
         position_error_m: error,
         distance_m: distance,
         snap: distance >= DEFAULT_SNAP_DISTANCE_M,
+        stance_mismatch: predicted.stance != authoritative.stance,
     }
 }
 
-fn interpolate(before: RiderState, after: RiderState, alpha: f32, tick: u64) -> RiderState {
+fn interpolate(
+    before: RiderState,
+    after: RiderState,
+    alpha: f32,
+    tick: u64,
+    render_tick: f64,
+) -> RiderState {
     let mut position = [0.0; 3];
     let mut velocity = [0.0; 3];
     for axis in 0..3 {
@@ -149,6 +168,11 @@ fn interpolate(before: RiderState, after: RiderState, alpha: f32, tick: u64) -> 
         position_m: position,
         velocity_mps: velocity,
         yaw_degrees: (before.yaw_degrees + yaw_delta * alpha).rem_euclid(360.0),
+        stance: if render_tick < after.tick as f64 {
+            before.stance
+        } else {
+            after.stance
+        },
     }
 }
 
@@ -162,6 +186,7 @@ mod tests {
             position_m: [x, 0.0, 0.0],
             velocity_mps: [velocity, 0.0, 0.0],
             yaw_degrees: yaw,
+            stance: RiderStance::Mounted,
         }
     }
 
@@ -202,5 +227,50 @@ mod tests {
         assert!((close.distance_m - 0.25).abs() < f32::EPSILON);
         let far = reconcile(predicted, state(10, 3.0, 0.0, 0.0));
         assert!(far.snap);
+        assert!(!far.stance_mismatch);
+    }
+
+    #[test]
+    fn stance_switches_only_at_the_discrete_snapshot_boundary() {
+        let mut buffer = SnapshotBuffer::new(60, 8);
+        let before = state(10, 0.0, 1.0, 0.0);
+        let mut after = state(14, 4.0, 1.0, 0.0);
+        after.stance = RiderStance::SaddleDiveAirborne;
+        assert!(buffer.push(before));
+        assert!(buffer.push(after));
+        assert_eq!(
+            buffer.sample(9.0).unwrap().state.stance,
+            RiderStance::Mounted
+        );
+        assert_eq!(
+            buffer.sample(13.999).unwrap().state.stance,
+            RiderStance::Mounted
+        );
+        assert_eq!(
+            buffer.sample(14.0).unwrap().state.stance,
+            RiderStance::SaddleDiveAirborne
+        );
+        assert_eq!(
+            buffer.sample(100.0).unwrap().state.stance,
+            RiderStance::SaddleDiveAirborne
+        );
+    }
+
+    #[test]
+    fn unknown_stance_is_retained_and_reconciles_without_forcing_position_snap() {
+        let mut buffer = SnapshotBuffer::new(60, 2);
+        let mut unknown = state(1, 0.0, 0.0, 0.0);
+        unknown.stance = RiderStance::Unknown(222);
+        assert!(buffer.push(unknown));
+        assert_eq!(
+            buffer.sample(2.0).unwrap().state.stance,
+            RiderStance::Unknown(222)
+        );
+
+        let predicted = state(1, 0.0, 0.0, 0.0);
+        let correction = reconcile(predicted, unknown);
+        assert!(correction.stance_mismatch);
+        assert!(!correction.snap);
+        assert_eq!(correction.distance_m, 0.0);
     }
 }

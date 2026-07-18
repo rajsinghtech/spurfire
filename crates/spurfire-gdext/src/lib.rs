@@ -8,6 +8,7 @@ pub mod locomotion;
 pub mod mounted_weapon_controller;
 mod network_rider;
 mod peer_session;
+mod saddle_dive_controller;
 
 // godot-rust requires this one unsafe marker to acknowledge the engine ABI.
 // Unsafe code remains denied everywhere else in this crate.

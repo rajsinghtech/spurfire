@@ -15,6 +15,8 @@ mod id;
 mod model;
 mod network_inspection;
 mod radius;
+mod saddle_dive;
+mod stance;
 mod state;
 mod time;
 mod version;
@@ -27,6 +29,8 @@ pub use id::{IdValidationError, LobbyId, PlayerId};
 pub use model::*;
 pub use network_inspection::*;
 pub use radius::{playable_radius_m, MAX_PLAYABLE_RADIUS_M, MIN_PLAYABLE_RADIUS_M};
+pub use saddle_dive::*;
+pub use stance::RiderStance;
 pub use state::{LobbyState, LobbyTransitionError};
 pub use time::UnixMillis;
 pub use version::{

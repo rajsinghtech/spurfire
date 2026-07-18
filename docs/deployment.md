@@ -24,12 +24,13 @@ A stable tag such as `v0.1.0` publishes `v0.1.0`, `0.1.0`, `0.1`, `latest`, and 
 
 Release tags must be strict `vX.Y.Z` or `vX.Y.Z-prerelease`, point to a commit on `main`, and match all of these files:
 
-- `crates/spurfire-server/Cargo.toml`
-- `charts/spurfire-control/Chart.yaml` `version`
-- `charts/spurfire-control/Chart.yaml` `appVersion`
-- `docs/release-notes-<version>.md`
+- `crates/spurfire-server/Cargo.toml` and its `Cargo.lock` package row;
+- `charts/spurfire-control/Chart.yaml` `version` and `appVersion`;
+- `game/project.godot` `config/version`;
+- the landing-page release-candidate source label; and
+- `docs/release-notes-<version>.md` and its heading.
 
-Image labels record the immutable source URL, package version, full revision, commit timestamp, license, and documentation URL. The multi-platform publication includes BuildKit provenance and an SBOM.
+`scripts/check-release-metadata.sh [expected-version]` enforces that agreement and also keeps internal crate versions at 0.1.0. Image labels record the immutable source URL, package version, full revision, commit timestamp, license, and documentation URL. The multi-platform publication includes BuildKit provenance and an SBOM.
 
 ### Chart versions
 
@@ -40,6 +41,12 @@ A semantic release tag publishes the same semantic chart version, with no synthe
 ```
 
 A main-channel chart defaults to its corresponding immutable `sha-<full-commit-sha>` image tag. Use a semantic release version for stable deployment and record the resolved image and chart digests in GitOps.
+
+### Client preflight and publication
+
+`.github/workflows/client-release.yml` is deliberately a **nonpublishing Client Preflight**. Pull requests and manual dispatches build Linux x86_64, Windows x86_64, and macOS universal archives; a later tag run does the same. These are expiring GitHub Actions artifacts, not a release. The jobs use checksum-verified Godot 4.7.1 editors/templates, need no repository secrets, and do not require Apple notarization.
+
+A stable client can be published only by a later explicit dispatch of `.github/workflows/client-publish.yml` for an existing tag and successful tag preflight run. That workflow verifies the tag commit, metadata, exact artifact set, and successful Ubuntu/macOS/Windows source gates plus Linux Godot smoke before creating the release. It refuses to replace a published release or its assets. Release preparation itself never tags or invokes either publishing path.
 
 ## Run the image safely
 
@@ -190,6 +197,7 @@ The GitHub repository should protect `main` and `v*` tags, require package valid
 These checks do not publish. For the control-network workstream, do not build on the development Mac: run the credential-free checks from a clean checkout on `ssh ubuntu@raj-builder`, and use GitHub Actions for cross-platform checks/artifacts. Never copy `.env` or credentials to the builder.
 
 ```sh
+scripts/check-release-metadata.sh
 scripts/check-packaging.sh
 cargo +1.91.0 fmt --all --check
 cargo +1.91.0 clippy --locked -p spurfire-server --all-targets -- -D warnings

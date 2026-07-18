@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       run_id:
-        description: Client Release run containing the platform artifacts
+        description: Successful tag-triggered Client Preflight run containing the platform artifacts
         required: true
         type: string
 
@@ -69,11 +69,12 @@ jobs:
             --arg tag "$RELEASE_TAG" \
             --arg sha "$tag_sha" \
             --argjson workflow_id "$workflow_id" \
-            '(.name == "Client Release") and
+            '(.name == "Client Preflight") and
              (.path == $workflow) and
              (.workflow_id == $workflow_id) and
              (.event == "push") and
              (.status == "completed") and
+             (.conclusion == "success") and
              (.head_branch == $tag) and
              (.head_sha == $sha) and
              (.repository.full_name == $repository) and
@@ -86,12 +87,51 @@ jobs:
           jq -e '
             ([.jobs[] | {name, status, conclusion}] | sort_by(.name)) ==
             ([
-              {name: "Validate client release", status: "completed", conclusion: "success"},
+              {name: "Validate client preflight", status: "completed", conclusion: "success"},
               {name: "Linux x86_64 client", status: "completed", conclusion: "success"},
               {name: "Windows x86_64 client", status: "completed", conclusion: "success"},
-              {name: "macOS universal client", status: "completed", conclusion: "success"},
-              {name: "Publish GitHub Release", status: "completed", conclusion: "failure"}
+              {name: "macOS universal client", status: "completed", conclusion: "success"}
             ] | sort_by(.name))' <<< "$jobs_json" > /dev/null
+
+          ci_runs_json="$(
+            gh api "/repos/$expected_repository/actions/workflows/ci.yml/runs?head_sha=$tag_sha&event=push&status=completed&per_page=100"
+          )"
+          ci_run_id="$(
+            jq -er \
+              --arg repository "$expected_repository" \
+              --arg tag "$RELEASE_TAG" \
+              --arg sha "$tag_sha" '
+                [.workflow_runs[] |
+                  select(
+                    (.name == "CI") and
+                    (.path == ".github/workflows/ci.yml") and
+                    (.event == "push") and
+                    (.head_branch == $tag) and
+                    (.head_sha == $sha) and
+                    (.conclusion == "success") and
+                    (.repository.full_name == $repository) and
+                    (.head_repository.full_name == $repository)
+                  )] |
+                if length >= 1 then sort_by(.run_attempt) | last | .id
+                else error("no successful tag CI run") end' \
+              <<< "$ci_runs_json"
+          )"
+          [[ "$ci_run_id" =~ ^[0-9]+$ ]]
+
+          ci_jobs_json="$(
+            gh api "/repos/$expected_repository/actions/runs/$ci_run_id/jobs?per_page=100"
+          )"
+          jq -e '
+            def passed($name):
+              any(.jobs[];
+                (.name == $name) and
+                (.status == "completed") and
+                (.conclusion == "success"));
+            passed("Rust source gates (ubuntu-latest)") and
+            passed("Rust source gates (macos-latest)") and
+            passed("Rust source gates (windows-latest)") and
+            passed("Godot / Rust M2 (Linux)")' \
+            <<< "$ci_jobs_json" > /dev/null
 
           artifacts_json="$(
             gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"

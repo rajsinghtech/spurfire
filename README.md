@@ -4,7 +4,7 @@
 
 *High noon. Low ping.*
 
-**Spurfire** is a third-person, peer-hosted open-range movement shooter where every player fights from horseback, performs dangerous flying dismounts, builds Spur with stylish riding, and battles across terrain that scales with the size of the lobby. Today the prototype ships mounted locomotion, the SF-series rifle range, and the networking spine; the Saddle Dive, on-foot kit, Spur meter, and Bounty Run are designed (see `docs/prototype-plan.md`) but not yet built.
+**Spurfire** is a third-person, peer-hosted open-range movement shooter where every player fights from horseback, performs dangerous flying dismounts, builds Spur with stylish riding, and battles across terrain that scales with the size of the lobby. Today the prototype includes mounted locomotion, the SF-series rifle range, the live-verified networking spine, and the M2 Saddle Dive implementation prepared for 0.2.0. Saddle Dive is **playtest pending, not done**; the on-foot kit, Spur meter, and Bounty Run remain unbuilt (see `docs/prototype-plan.md`).
 
 This repository contains the Rust **control plane** and the Godot game prototype. The control plane provisions Tailscale-backed lobbies, mints one-use join credentials, exposes the `spurfire-server` HTTP service, and provides the `spurfire-ctl` operations CLI. The game uses Godot 4.7.1 with Rust GDExtension gameplay classes. Game clients embed pinned [RustScale](https://github.com/rajsinghtech/rustscale) native Rust UDP and play peer-to-peer; `spurfire-server` is never a permanent gameplay server.
 
@@ -35,7 +35,8 @@ docs/rustscale-tailnet-tooling.md  Organization-tailnet script comparison
 docs/godot-m0.md           Godot setup, M0/M0.5 handling contract, and platform notes
 docs/asset-licenses.md     Verified provenance and licenses for imported game assets
 docs/combat-m1.md          Mounted assault-rifle controls, authority boundary, and tests
-.github/workflows/         Locked CI gates and manual credentialed e2e
+docs/release-notes-0.2.0.md  M2 release scope, verification, and pending playtest gates
+.github/workflows/         Locked CI, client preflight, and manual credentialed e2e
 justfile                   Task runner recipes
 ```
 
@@ -75,7 +76,7 @@ Useful commands:
 - `cargo run -p spurfire-server -- --help` — server options.
 - `just e2e` — manual live token probe; requires `.env`.
 - `just game-build [debug|release]` — build and install the platform-native GDExtension.
-- `just game-test` — headless import and M0 smoke tests with a bounded timeout.
+- `just game-test` — headless import and M0–M2 smoke tests with a bounded timeout.
 - `just game-editor` / `just game-run` — edit or run one local Godot client.
 - `just p2p-demo` — provision a disposable tailnet and open three replicated Godot clients with a Tab route/RTT roster.
 - `just p2p-live` — headless real-UDP and forced-authority-migration probe.
@@ -92,6 +93,12 @@ oci://ghcr.io/rajsinghtech/charts/spurfire-control
 
 The chart defaults to one credential-free dry-run replica with no public route. Ottawa deliberately exposes only the forced-dry-run service: public real provisioning remains blocked by capability/abuse controls, encrypted dynamic child-credential recovery, startup reconciliation, and the other activation gates. See [docs/deployment.md](docs/deployment.md) for artifacts and [docs/control-plane-network-view.md](docs/control-plane-network-view.md) for the authoritative activation/runbook contract.
 
+## Release qualification
+
+Release metadata is checked by `scripts/check-release-metadata.sh`: the server manifest and lockfile row, Helm chart and app versions, Godot `config/version`, landing-page label, and release-note filename/heading must agree. Internal crates remain at 0.1.0.
+
+Every pull request runs `just check` on Ubuntu, macOS, and Windows plus the bounded Godot 4.7.1 smoke suite on Linux. The nonpublishing **Client Preflight** workflow runs on pull requests and manual dispatches and builds Linux x86_64, Windows x86_64, and macOS universal archives. It uploads only short-lived workflow artifacts; it does not create a tag or GitHub release, publish a package, advance an alias, or require Apple notarization credentials. See [docs/testing.md](docs/testing.md) and [docs/deployment.md](docs/deployment.md).
+
 ## Documentation
 
 - [docs/design.md](docs/design.md) — game design and product source of truth.
@@ -103,8 +110,9 @@ The chart defaults to one credential-free dry-run replica with no public route. 
 - [docs/tailscale-api.md](docs/tailscale-api.md) — current API permission evidence.
 - [docs/rustscale-integration.md](docs/rustscale-integration.md) — sibling integration readiness.
 - [docs/rustscale-tailnet-tooling.md](docs/rustscale-tailnet-tooling.md) — reference script comparison and safe wrapper policy.
-- [docs/godot-m0.md](docs/godot-m0.md) — local setup, automation, M0 checks, and platform caveats.
+- [docs/godot-m0.md](docs/godot-m0.md) — local setup, automation, smoke checks, and Godot UID policy.
+- [docs/release-notes-0.2.0.md](docs/release-notes-0.2.0.md) — M2 scope, release qualification, and observational gates.
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Child-scoped one-use enrollment and exact deletion are live-proven, but the main control plane never joins a lobby tailnet. Public real activation remains closed until exact-lobby capabilities, one-real-lobby leasing, stable-identity cleanup proof, encrypted dynamic recovery/reconciliation, and operations gates are complete; Ottawa remains dry-run. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat (milestones M0–M1) and a native `PeerSession`. Gameplay milestones M2–M5 remain in their strict order, and remaining M6 completion waits for the M5 fun verdict; see `docs/prototype-plan.md`, `docs/decisions.md`, and `docs/control-plane-network-view.md`.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Child-scoped one-use enrollment and exact deletion are live-proven, but the main control plane never joins a lobby tailnet. Public real activation remains closed until capability migration, abuse controls, encrypted dynamic recovery/startup reconciliation, and operations gates are complete; Ottawa remains dry-run. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat (M0–M1), the M2 Saddle Dive implementation, and a native `PeerSession`. M2 is **implementation complete / playtest pending**: deterministic and headless gates do not replace the natural frequency, hit-rate, post-landing-death, notification, and animation checks in `docs/prototype-plan.md`. M3–M5 remain unbuilt. M6 completion work, restart recovery, and RustScale's remaining platform/telemetry gaps still block alpha; see `docs/prototype-plan.md`, `docs/decisions.md`, and `docs/control-plane-network-view.md`.
