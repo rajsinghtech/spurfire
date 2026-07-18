@@ -73,10 +73,13 @@ scripts/check-release-metadata.sh 0.2.0
 GitHub Actions then provides these credential-free gates:
 
 1. **CI:** `cargo check --locked --all-targets` and `just check` on Ubuntu, macOS, and Windows.
-2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite.
-3. **Client Preflight:** pull requests, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. These are short-lived workflow artifacts only; preflight never creates a release or publishes a package.
+2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite. `scripts/check-alpha-smoke-log.sh` additionally requires the integrated one-lobby Alpha marker; the baseline graybox intentionally does not pass that gate.
+3. **Release QA tooling:** deterministic aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
+4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
-The macOS preflight uses ad-hoc signing for native test libraries and does not require Apple notarization secrets. Notarization is not an ordinary-CI gate. Do not create `v0.2.0` until implementation integration and all required checks are green. A version-tag push automatically runs gated OCI server/chart publication; publishing the GitHub client release remains a separate explicit dispatch.
+The current macOS candidate is only ad-hoc signed and is not notarized. The current Windows candidate has no Authenticode signature. Both are explicit release blockers; checksums and provenance do not waive them. Tag-triggered package jobs validate but do not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains a separate protected-environment dispatch that refuses to overwrite any draft or published release.
+
+See [alpha-release-qualification.md](alpha-release-qualification.md) for candidate artifacts, telemetry aggregation, two-client entry points, and the terminal evidence contract.
 
 ## 5. Manual gameplay check
 
@@ -147,7 +150,7 @@ SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 
 `Direct` is preferred but relay paths are valid when NAT or local policy prevents direct UDP. The migration marker proves three separate OS peer processes formed a mesh, authority A was forcibly terminated, B and C agreed on B at epoch 2, and a rider-input packet was accepted after migration.
 
-The cleanup trap deletes the tailnet on success, failure, interruption, or timeout. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue; it does not invalidate the test if the success and lifecycle markers appear.
+The cleanup trap attempts to delete the tailnet on success, failure, interruption, or timeout. This development probe is **not Alpha lifecycle evidence**: its delete acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha lifecycle qualification even when UDP/migration markers appear.
 
 ## 8. Final secret and repository checks
 
@@ -159,7 +162,7 @@ git diff -- . ':!.env' | rg 'tskey-|Bearer |clientSecret' || true
 
 No auth key, bearer token, OAuth secret, capability plaintext, or generated child credential should appear.
 
-## 8. Control-plane network-view and activation plan
+## 9. Control-plane network-view and activation plan
 
 The normative matrix is [control-plane-network-view.md#required-test-plan](control-plane-network-view.md#required-test-plan). It covers exact-lobby capabilities/audience projection, FQDN validation, directional report aggregation, stale/unknown facts, cache-only inspection, one-real-lobby leasing, startup reconciliation, exact-ID cleanup proof, secret canaries, and the never-join dependency gate.
 

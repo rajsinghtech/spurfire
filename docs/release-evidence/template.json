@@ -1,0 +1,84 @@
+{
+  "approvals": {
+    "activation": {
+      "approved": false,
+      "evidence_digest": ""
+    },
+    "release": {
+      "approved": false,
+      "evidence_digest": ""
+    }
+  },
+  "artifacts": [
+    {
+      "launch_smoke_passed": false,
+      "platform": "linux-x86_64",
+      "provenance_verified": false,
+      "sbom_present": false,
+      "sha256": ""
+    },
+    {
+      "launch_smoke_passed": false,
+      "platform": "macos-universal",
+      "provenance_verified": false,
+      "sbom_present": false,
+      "sha256": ""
+    },
+    {
+      "launch_smoke_passed": false,
+      "platform": "windows-x86_64",
+      "provenance_verified": false,
+      "sbom_present": false,
+      "sha256": ""
+    }
+  ],
+  "blockers": [
+    "template only — do not approve or tag"
+  ],
+  "distribution_trust": {
+    "macos": {
+      "developer_id_signed": false,
+      "notarized": false
+    },
+    "windows": {
+      "authenticode_signed": false
+    }
+  },
+  "gates": {
+    "activation_approved": false,
+    "apple_distribution_trust": false,
+    "artifact_launch_smoke": false,
+    "cleanup_exact_absence": false,
+    "client_preflight": false,
+    "credential_free_linux": false,
+    "gameplay_regressions": false,
+    "independent_release_approval": false,
+    "managed_two_download_lifecycle": false,
+    "natural_m2_playtest": false,
+    "one_lobby_client_flow": false,
+    "provenance_verified": false,
+    "secret_canaries": false,
+    "telemetry_metrics": false,
+    "windows_distribution_trust": false
+  },
+  "runs": {
+    "ci": {
+      "conclusion": "",
+      "head_sha": "",
+      "id": 0
+    },
+    "client_preflight": {
+      "conclusion": "",
+      "head_sha": "",
+      "id": 0
+    },
+    "private_live_lifecycle": {
+      "conclusion": "",
+      "head_sha": "",
+      "id": 0
+    }
+  },
+  "schema_version": 1,
+  "source_sha": "",
+  "version": "0.2.0"
+}
