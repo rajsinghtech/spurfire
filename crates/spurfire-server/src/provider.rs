@@ -739,8 +739,10 @@ impl NetworkProvider for TailscaleProvider {
             .create_tailnet(&display_name)
             .await
             .map_err(|error| map_control_error(error, "organization_tailnet_create"))?;
-        let (provider_tailnet_id, dns_name, _display_name, child_credentials) =
+        let (provider_tailnet_id, provider_dns_name, _display_name, child_credentials) =
             tailnet.into_parts();
+        let dns_name = TailnetDnsName::parse(provider_dns_name.as_str())
+            .map_err(|_| ProviderError::IdentityMismatch)?;
         if !valid_provider_tailnet_id(&provider_tailnet_id) || request.network_generation == 0 {
             return Err(ProviderError::IdentityMismatch);
         }
@@ -919,7 +921,7 @@ impl NetworkProvider for TailscaleProvider {
         if found
             .dns_name
             .as_ref()
-            .is_some_and(|dns_name| dns_name != &request.identity.tailnet_dns_name)
+            .is_some_and(|dns_name| dns_name.as_str() != request.identity.tailnet_dns_name.as_str())
         {
             return Err(ProviderError::IdentityMismatch);
         }

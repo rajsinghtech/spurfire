@@ -7,6 +7,7 @@
 
 pub mod clock;
 pub mod config;
+mod crypto;
 pub mod error;
 pub mod provider;
 pub mod service;

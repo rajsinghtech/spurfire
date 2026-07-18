@@ -14,9 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     elect_authority, elect_authority_for_roster, validate_start_roster, AcceptedHeartbeatReference,
     ApplicationQuality, AuthorityCandidate, AuthorityElection, AuthorityElectionError,
@@ -41,6 +39,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     clock::{Clock, SystemClock},
     config::Config,
+    crypto::{base64url_decode, base64url_encode, sha256},
     error::ApiError,
     provider::{
         CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
@@ -137,16 +136,24 @@ struct GeneratedCapability {
 }
 
 impl GeneratedCapability {
-    fn generate() -> Result<Self, ApiError> {
-        let mut bytes = [0_u8; 32];
-        getrandom::fill(&mut bytes).map_err(|_| internal_error(false))?;
-        let plaintext = Zeroizing::new(URL_SAFE_NO_PAD.encode(bytes));
+    fn generate() -> Self {
+        // Three UUIDv4 values contribute 366 random bits after their fixed
+        // version/variant bits, exceeding the 256-bit capability minimum.
+        let mut bytes = [0_u8; 48];
+        for (chunk, uuid) in
+            bytes
+                .chunks_exact_mut(16)
+                .zip([Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()])
+        {
+            chunk.copy_from_slice(uuid.as_bytes());
+        }
+        let plaintext = Zeroizing::new(base64url_encode(&bytes));
         bytes.zeroize();
         let verifier = capability_verifier(plaintext.as_bytes());
-        Ok(Self {
+        Self {
             plaintext,
             verifier,
-        })
+        }
     }
 }
 
@@ -578,8 +585,7 @@ async fn create_lobby(
         created_at: now,
         cleanup_pending: false,
     };
-    let creator_capability =
-        GeneratedCapability::generate().map_err(|error| error.dry_run(effective_dry_run))?;
+    let creator_capability = GeneratedCapability::generate();
     let capability_record = StoredCapabilityVerifier::new(
         creator_capability.verifier,
         lobby_id,
@@ -1690,10 +1696,12 @@ struct AuthorityEnvelope {
 }
 
 fn capability_verifier(token: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(CAPABILITY_HASH_DOMAIN);
-    hasher.update(token);
-    hasher.finalize().into()
+    let mut input = Vec::with_capacity(CAPABILITY_HASH_DOMAIN.len() + token.len());
+    input.extend_from_slice(CAPABILITY_HASH_DOMAIN);
+    input.extend_from_slice(token);
+    let verifier = sha256(&input);
+    input.zeroize();
+    verifier
 }
 
 fn capability_from_headers(headers: &HeaderMap) -> Option<[u8; 32]> {
@@ -1702,8 +1710,8 @@ fn capability_from_headers(headers: &HeaderMap) -> Option<[u8; 32]> {
     if scheme != CAPABILITY_SCHEME || token.is_empty() || token.contains(char::is_whitespace) {
         return None;
     }
-    let mut decoded = URL_SAFE_NO_PAD.decode(token).ok()?;
-    if decoded.len() != 32 {
+    let mut decoded = base64url_decode(token)?;
+    if decoded.len() != 48 {
         decoded.zeroize();
         return None;
     }

@@ -12,13 +12,86 @@ use std::{
 };
 
 use reqwest::{Method, Url};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
-use spurfire_protocol::TailnetDnsName;
+use serde::{de, de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 const REDACTED: &str = "<redacted>";
+const MAX_TAILNET_DNS_NAME_LEN: usize = 253;
+
+/// Validated provider-returned tailnet DNS name/FQDN.
+///
+/// The canonical representation is lowercase ASCII without a trailing root
+/// dot. This is topology metadata rather than a credential, but diagnostics
+/// still omit it so accidental logs do not become a lobby directory.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TailnetDnsName(String);
+
+impl TailnetDnsName {
+    /// Parses and canonicalizes a complete DNS name before it can enter a
+    /// provider path or durable identity tuple.
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        if value.is_empty() || !value.is_ascii() {
+            return Err("tailnet DNS name must be non-empty ASCII");
+        }
+        let value = value.strip_suffix('.').unwrap_or(value);
+        if value.is_empty() || value.len() > MAX_TAILNET_DNS_NAME_LEN {
+            return Err("tailnet DNS name length is invalid");
+        }
+        let mut label_count = 0_usize;
+        for label in value.split('.') {
+            label_count += 1;
+            if label.is_empty() || label.len() > 63 {
+                return Err("tailnet DNS label length is invalid");
+            }
+            let bytes = label.as_bytes();
+            if bytes.first() == Some(&b'-')
+                || bytes.last() == Some(&b'-')
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+            {
+                return Err("tailnet DNS label characters are invalid");
+            }
+        }
+        if label_count < 2 {
+            return Err("tailnet DNS name must be fully qualified");
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    /// Returns the canonical complete DNS name/FQDN.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TailnetDnsName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TailnetDnsName(<topology-metadata>)")
+    }
+}
+
+impl Serialize for TailnetDnsName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TailnetDnsName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
 
 /// How lobbies are provisioned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

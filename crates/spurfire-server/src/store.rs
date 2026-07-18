@@ -9,14 +9,14 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby, LobbyId,
     LobbyState, NetworkLifecycle, PlayerId, TailnetDnsName, UnixMillis,
 };
-use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
+
+use crate::crypto::{constant_time_eq, sha256};
 
 /// Idempotency records and destroyed tombstones are retained for 24 hours.
 pub const IDEMPOTENCY_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -175,7 +175,7 @@ impl StoredCapabilityVerifier {
             && self.lobby_id == lobby_id
             && self.network_generation == generation
             && now < self.expires_at
-            && bool::from(self.verifier.ct_eq(candidate))
+            && constant_time_eq(&self.verifier, candidate)
     }
 }
 
@@ -772,10 +772,10 @@ fn authorized_network_view(
 }
 
 fn idempotency_digest(fingerprint: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(IDEMPOTENCY_DIGEST_DOMAIN);
-    hasher.update(fingerprint);
-    hasher.finalize().into()
+    let mut input = Vec::with_capacity(IDEMPOTENCY_DIGEST_DOMAIN.len() + fingerprint.len());
+    input.extend_from_slice(IDEMPOTENCY_DIGEST_DOMAIN);
+    input.extend_from_slice(fingerprint);
+    sha256(&input)
 }
 
 fn has_release_proof(stored: &StoredLobby) -> bool {

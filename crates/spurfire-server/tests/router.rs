@@ -9,7 +9,6 @@ use axum::{
     http::{Method, Request, StatusCode},
     Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use spurfire_protocol::{
@@ -649,7 +648,10 @@ async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_re
     assert_eq!(status, StatusCode::CREATED);
     let lobby_id = created["lobby_id"].as_str().unwrap();
     let capability = created["creator_capability"].as_str().unwrap();
-    assert_eq!(URL_SAFE_NO_PAD.decode(capability).unwrap().len(), 32);
+    assert_eq!(capability.len(), 64);
+    assert!(capability
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')));
     let (_, anonymous_lobby) = get(&app, lobby_id).await;
     assert_eq!(anonymous_lobby["provisioning_mode"], "dry_run");
     assert_eq!(anonymous_lobby["roster_count"], 0);
@@ -695,7 +697,7 @@ async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_re
     let (wrong_status, wrong) = network(
         &app,
         lobby_id,
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     )
     .await;
     assert_eq!(missing_status, StatusCode::NOT_FOUND);
