@@ -1,9 +1,6 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
@@ -1032,7 +1029,7 @@ async fn identity_or_vault_cleanup_failure_retains_real_lease() {
         &[("x-spurfire-player-id", PLAYER_1)],
     )
     .await;
-    clock.advance(Duration::from_secs(5));
+    clock.advance(5_000);
     json_request(
         &vault_app,
         Method::DELETE,
