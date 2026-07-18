@@ -1,6 +1,8 @@
 # Container and Kubernetes deployment
 
-Spurfire publishes the lobby control service as a multi-architecture OCI image and the deployment chart as an OCI Helm artifact. Gameplay traffic remains peer-to-peer.
+Spurfire publishes the lobby control service as a multi-architecture OCI image and the deployment chart as an OCI Helm artifact. Gameplay traffic remains peer-to-peer, and the control-plane workload never joins a lobby tailnet.
+
+> **Public real activation is closed.** Safe deployment groundwork adds an independent kill switch fixed off and a singleton real-lobby policy. Inspection timing values remain deferred and are not rendered until a production scheduler consumes them. The chart deliberately rejects enabling real mutations and still does not supply complete lobby-route capability/abuse controls, a dynamic encrypted child vault, startup reconciliation, or a private operator listener. Ottawa remains public dry-run. See [control-plane-network-view.md](control-plane-network-view.md) for the authoritative gates and runbook.
 
 ## Artifact coordinates
 
@@ -65,6 +67,7 @@ docker run --rm \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --tmpfs /var/lib/spurfire:rw,noexec,nosuid,size=16m \
   -e SPURFIRE_DRY_RUN=1 \
+  -e SPURFIRE_REAL_MUTATIONS_ENABLED=0 \
   -e SPURFIRE_PROVISIONING_MODE=dry_run \
   -p 127.0.0.1:8080:8080 \
   spurfire-server:local
@@ -74,7 +77,7 @@ The runtime image is Alpine-based, runs as UID/GID `10001`, and contains only CA
 
 ## Install the Helm chart
 
-The defaults are intentionally safe: one replica, `Recreate`, dry-run, `emptyDir`, ClusterIP, and no public HTTPRoute.
+The defaults are intentionally safe: one replica, `Recreate`, dry-run, `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, a schema-locked one-real-lobby policy, deferred (non-rendered) inspection timing values, `emptyDir`, ClusterIP, and no public HTTPRoute. This chart revision rejects setting the real-mutation switch to true.
 
 ```sh
 helm upgrade --install spurfire \
@@ -114,24 +117,26 @@ httpRoute:
     value: /
 ```
 
-Gateway API CRDs and a listener that permits cross-namespace routes must already exist. TLS and DNS are responsibilities of that Gateway deployment.
+Gateway API CRDs and a listener that permits cross-namespace routes must already exist. TLS and DNS are responsibilities of that Gateway deployment. Chart validation permits this public route only with credential-free dry-run and the real-mutation switch off.
 
-**Security boundary:** `X-Spurfire-Player-Id` is currently a client assertion, not authentication. Public routing is disabled by default. Do not expose the control API without an external authentication/authorization policy, request limits, and appropriate network controls.
+**Security boundary:** `X-Spurfire-Player-Id` is currently a client assertion, not authentication. Public routing is disabled by chart default. A public Gateway may serve only the static shell and forced-dry-run API; `/v1/operator/*` must use a separate private listener. Generic external authentication alone does not satisfy the exact-lobby capability, uniform-404, rate-limit, and privacy gates.
 
-## Real provisioning mode
+## Prototype real provisioning mode (activation blocked)
 
-Real mode requires all of the following:
+The activation-closed chart can render non-dry provider staging only with all of the following necessary prototype settings. It still emits `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, forbids a public HTTPRoute in that configuration, and therefore cannot perform real mutations. These settings are not sufficient for public activation:
 
 1. an existing Kubernetes Secret with keys `TS_CLIENT_ID` and `TS_CLIENT_SECRET`;
 2. `config.dryRun=false` and a real provisioning mode;
 3. persistent `ReadWriteOnce` storage for `/var/lib/spurfire`;
 4. exactly one server process.
 
-The chart accepts only the Secret name and key names; it has no values for credential payloads. Provision the Secret through an external secret manager, enable Kubernetes encryption at rest, and restrict who can read it.
+The chart accepts only the parent organization OAuth Secret name and key names; it has no values for credential payloads. Provision that parent credential through an approved external secret path, enable Kubernetes encryption at rest, and restrict who can read it. This static Secret is not an acceptable destination for one-time dynamically generated child OAuth material.
 
 ```yaml
 config:
   dryRun: false
+  realMutationsEnabled: false
+  maxActiveRealLobbies: 1
   provisioningMode: tailnet_per_lobby
 
 tailscale:
@@ -147,9 +152,13 @@ persistence:
   retain: true
 ```
 
-The PVC contains non-secret JSON state and needs a writable directory because state updates use a sibling temporary file followed by an atomic rename. The OAuth Secret is not checksummed into the pod template. After rotating it, perform an explicit controlled restart.
+The PVC contains non-secret JSON state and needs a writable directory because state updates use a sibling temporary file followed by an atomic rename. The parent OAuth Secret is not checksummed into the pod template. After rotating it, perform an explicit controlled restart.
 
-Do not restart or upgrade a real tailnet-per-lobby deployment while lobbies are active. Child OAuth pairs remain process-local; after a restart, retained child-backed lobbies fail closed with `cleanup_pending` and may require manual remediation. A production secret vault and reconciliation loop are still blockers. Shared-tailnet mode separately remains blocked until its required Tailscale scopes are live-verified.
+Do not apply this example to Ottawa or another public listener. Safe-groundwork server revisions recognize the independent switch and reject real create/mint/delete while it is false; the chart pins it false and rejects true. Older binary/chart revisions without this contract are unsuitable. A future activation change may make `true` renderable only after every other gate is attested; credentials and non-dry values never suffice.
+
+Do not restart or upgrade the current process-local-vault prototype while child lobbies are active. After restart, retained child-backed lobbies fail closed with `cleanup_pending` and may require exact-ID manual remediation. Production requires a dynamic encrypted child vault with workload identity/audit/backup/CAS/deletion, mutation-closed startup reconciliation across store/vault/lease/exact upstream IDs, and proven create crash-window handling. Dynamic child credentials must never enter JSON, a static Kubernetes Secret, SOPS, rendered Helm output, logs, or metrics. Shared-tailnet mode separately remains blocked until its required scopes are live-verified and still consumes the one-real-lobby quota.
+
+Ottawa's required GitOps posture remains `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false`. Changing it requires a separate review after every activation gate is green.
 
 ## Verify published artifacts
 
@@ -183,9 +192,9 @@ helm show chart \
 
 The GitHub repository should protect `main` and `v*` tags, require package validation, restrict the release environment, grant package administration only to this repository, and make GHCR packages public only when anonymous pulls are intended.
 
-## Local validation
+## Validation
 
-These checks do not publish:
+These checks do not publish. For the control-network workstream, do not build on the development Mac: run the credential-free checks from a clean checkout on `ssh ubuntu@raj-builder`, and use GitHub Actions for cross-platform checks/artifacts. Never copy `.env` or credentials to the builder.
 
 ```sh
 scripts/check-release-metadata.sh
@@ -196,4 +205,4 @@ cargo +1.91.0 test --locked \
   -p spurfire-server -p spurfire-control -p spurfire-protocol
 ```
 
-See [lobby-service.md](lobby-service.md) for routes, environment variables, capability boundaries, and restart behavior.
+See [lobby-service.md](lobby-service.md) for current/target routes and environment behavior. See [control-plane-network-view.md](control-plane-network-view.md) for audiences, the never-join decision, activation gates, exact cleanup proof, and operator response.

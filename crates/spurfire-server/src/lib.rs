@@ -7,6 +7,7 @@
 
 pub mod clock;
 pub mod config;
+mod crypto;
 pub mod error;
 pub mod provider;
 pub mod service;
@@ -17,11 +18,13 @@ pub use config::{Config, ConfigError};
 pub use error::ApiError;
 pub use provider::{
     CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest,
-    MintedCredential, NetworkProvider, PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities,
-    ProviderError, SecretString, TailscaleProvider,
+    MintedCredential, MutationGatedProvider, NetworkProvider, ObserveNetworkRequest,
+    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
+    ProviderError, ProviderNetworkIdentity, SecretString, TailnetPresenceRequest,
+    TailscaleProvider,
 };
 pub use service::{build_router, router, AppState};
 pub use store::{
-    CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError, StoredCredential,
-    StoredLobby,
+    CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError,
+    StoredCapabilityVerifier, StoredCredential, StoredLobby, StoredNetworkIdentity,
 };

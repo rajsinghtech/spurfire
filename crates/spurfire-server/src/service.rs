@@ -16,33 +16,40 @@ use axum::{
 };
 use serde::Serialize;
 use spurfire_protocol::{
-    elect_authority, elect_authority_for_roster, validate_start_roster, AuthorityCandidate,
-    AuthorityElection, AuthorityElectionError, AuthorityHeartbeatRequest,
-    AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary, CapabilitiesResponse,
-    CreateLobbyRequest, CreateLobbyResponse, DestroyLobbyResponse, FinalScore, JoinCredential,
-    JoinCredentialReceipt, JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse,
-    LeaveLobbyRequest, LeaveLobbyResponse, Lobby, LobbyId, LobbyResponse, LobbyState, LobbyTtl,
-    Player, PlayerId, PlayerJoinState, ProvisioningMode, ResponseMetadata, StartLobbyRequest,
+    elect_authority, elect_authority_for_roster, validate_start_roster, AcceptedHeartbeatReference,
+    ApplicationQuality, AuthorityCandidate, AuthorityElection, AuthorityElectionError,
+    AuthorityHeartbeatRequest, AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary,
+    BackingMode, CapabilitiesResponse, ControlElectionReference, CreateLobbyRequest,
+    CreateLobbyResponse, DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore,
+    Freshness, InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt,
+    JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest,
+    LeaveLobbyResponse, Lobby, LobbyId, LobbyNetworkView, LobbyResponse, LobbyState, LobbyTtl,
+    NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
+    NetworkLifecycle, NetworkTruthLabel, ParticipantCleanupReason, Player, PlayerId,
+    PlayerJoinState, ProvisioningMode, ResponseMetadata, RouteAggregate, StartLobbyRequest,
     StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
-    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
-    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS,
-    WIRE_VERSION,
+    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
+    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
+    MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
 };
-use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     clock::{Clock, SystemClock},
     config::Config,
+    crypto::{base64url_decode, base64url_encode, sha256},
     error::ApiError,
     provider::{
         CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
-        NetworkProvider, PrepareLobbyRequest, ProviderError,
+        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest,
+        ProviderError, ProviderNetworkIdentity, TailnetPresenceRequest,
     },
     store::{
-        apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredCredential,
-        StoredIssuanceReservation, StoredJoinAttempt, StoredJoinReplay, StoredLobby,
-        StoredMutationReplay,
+        apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
+        StoredCapabilityVerifier, StoredCredential, StoredIssuanceReservation, StoredJoinAttempt,
+        StoredJoinReplay, StoredLobby, StoredMutationReplay, StoredNetworkIdentity,
     },
 };
 
@@ -58,7 +65,114 @@ const MAX_PROVIDER_CONCURRENCY: usize = 16;
 const PROVIDER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FINAL_SCORE_ABS: i64 = 1_000_000;
 const MAX_MATCH_DURATION_S: u32 = 60 * 60;
+const AUTHORIZATION_HEADER: &str = "authorization";
+const CAPABILITY_SCHEME: &str = "Spurfire-Capability";
+const CAPABILITY_HASH_DOMAIN: &[u8] = b"spurfire-capability-lobby-read-v1\0";
+const INSPECTOR_REPORT_FRESHNESS_MS: u64 = 15_000;
+const PROVIDER_DEVICE_FRESHNESS_MS: u64 = 30_000;
+const PROVIDER_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
+const MAX_CACHED_PROVIDER_OBSERVATIONS: usize = 10_000;
 const LANDING_HTML: &str = include_str!("landing.html");
+const INSPECT_HTML: &str = include_str!("inspect.html");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachedObservationFailure {
+    PermissionDenied,
+    Timeout,
+    SourceError,
+    Conflict,
+}
+
+impl CachedObservationFailure {
+    const fn unknown_reason(self) -> UnknownReason {
+        match self {
+            Self::PermissionDenied => UnknownReason::PermissionDenied,
+            Self::Timeout => UnknownReason::Timeout,
+            Self::SourceError => UnknownReason::SourceError,
+            Self::Conflict => UnknownReason::Conflict,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CachedProviderObservation {
+    network_generation: u64,
+    enrolled_device_count: Option<u32>,
+    successful_at: Option<UnixMillis>,
+    last_failure: Option<(CachedObservationFailure, UnixMillis)>,
+}
+
+impl CachedProviderObservation {
+    const fn success(network_generation: u64, enrolled_device_count: u32, at: UnixMillis) -> Self {
+        Self {
+            network_generation,
+            enrolled_device_count: Some(enrolled_device_count),
+            successful_at: Some(at),
+            last_failure: None,
+        }
+    }
+
+    fn failed(
+        network_generation: u64,
+        previous: Option<Self>,
+        failure: CachedObservationFailure,
+        at: UnixMillis,
+    ) -> Self {
+        Self {
+            network_generation,
+            enrolled_device_count: match previous {
+                Some(previous) => previous.enrolled_device_count,
+                None => None,
+            },
+            successful_at: match previous {
+                Some(previous) => previous.successful_at,
+                None => None,
+            },
+            last_failure: Some((failure, at)),
+        }
+    }
+}
+
+struct GeneratedCapability {
+    plaintext: Zeroizing<String>,
+    verifier: [u8; 32],
+}
+
+impl GeneratedCapability {
+    fn generate() -> Self {
+        // Three UUIDv4 values contribute 366 random bits after their fixed
+        // version/variant bits, exceeding the 256-bit capability minimum.
+        let mut bytes = [0_u8; 48];
+        for (chunk, uuid) in
+            bytes
+                .chunks_exact_mut(16)
+                .zip([Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()])
+        {
+            chunk.copy_from_slice(uuid.as_bytes());
+        }
+        let plaintext = Zeroizing::new(base64url_encode(&bytes));
+        bytes.zeroize();
+        let verifier = capability_verifier(plaintext.as_bytes());
+        Self {
+            plaintext,
+            verifier,
+        }
+    }
+}
+
+impl fmt::Debug for GeneratedCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GeneratedCapability(<redacted>)")
+    }
+}
+
+#[derive(Serialize)]
+struct FirstCreateResponse<'a> {
+    #[serde(flatten)]
+    response: CreateLobbyResponse,
+    creator_capability: &'a str,
+}
 
 /// Cloneable application dependencies shared by every Axum handler.
 #[derive(Clone)]
@@ -68,6 +182,8 @@ pub struct AppState {
     provider: Arc<dyn NetworkProvider>,
     clock: Arc<dyn Clock>,
     lobby_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
+    observation_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
+    provider_observations: Arc<RwLock<BTreeMap<LobbyId, CachedProviderObservation>>>,
     provider_limit: Arc<Semaphore>,
 }
 
@@ -79,12 +195,15 @@ impl AppState {
         store: Arc<dyn LobbyStore>,
         provider: Arc<dyn NetworkProvider>,
     ) -> Self {
+        let real_mutations_enabled = config.real_mutations_enabled;
         Self {
             config: Arc::new(config),
             store,
-            provider,
+            provider: Arc::new(MutationGatedProvider::new(provider, real_mutations_enabled)),
             clock: Arc::new(SystemClock),
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
+            observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
+            provider_observations: Arc::new(RwLock::new(BTreeMap::new())),
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
         }
     }
@@ -120,21 +239,176 @@ impl AppState {
         lock.lock_owned().await
     }
 
+    async fn lock_observation(&self, lobby_id: LobbyId) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.observation_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(lobby_id)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
+    }
+
+    /// Refreshes one exact lobby's coarse provider observation into a bounded
+    /// cache. This is an explicit worker/operator action; inspection GET never
+    /// calls it and never fans out upstream.
+    pub async fn refresh_network_observation_at(
+        &self,
+        lobby_id: LobbyId,
+        now: UnixMillis,
+    ) -> Result<(), ProviderError> {
+        let _refresh = self.lock_observation(lobby_id).await;
+        let stored = self
+            .store
+            .get(lobby_id)
+            .await
+            .ok_or(ProviderError::Unavailable {
+                operation: "network_observation_lobby",
+            })?;
+        if stored.dry_run || stored.lobby.provisioning_mode == ProvisioningMode::DryRun {
+            return Ok(());
+        }
+        if !matches!(
+            stored.network_lifecycle,
+            NetworkLifecycle::Active
+                | NetworkLifecycle::CleanupRequested
+                | NetworkLifecycle::CleanupPending
+                | NetworkLifecycle::VerifyingAbsence
+        ) {
+            return Err(ProviderError::Unavailable {
+                operation: "network_observation_inactive",
+            });
+        }
+        let network_generation = stored.network_generation;
+        let request = observe_request(&stored)?;
+        let outcome = tokio::time::timeout(
+            PROVIDER_OBSERVATION_TIMEOUT,
+            self.provider.observe_network(request),
+        )
+        .await;
+
+        // Provider I/O may race cleanup or a future replacement generation.
+        // Revalidate before any result can enter the cache.
+        let current = self.store.get(lobby_id).await;
+        if current.as_ref().is_none_or(|value| {
+            value.network_generation != network_generation
+                || !matches!(
+                    value.network_lifecycle,
+                    NetworkLifecycle::Active
+                        | NetworkLifecycle::CleanupRequested
+                        | NetworkLifecycle::CleanupPending
+                        | NetworkLifecycle::VerifyingAbsence
+                )
+        }) {
+            return Err(ProviderError::Unavailable {
+                operation: "network_observation_generation_changed",
+            });
+        }
+
+        match outcome {
+            Ok(Ok(observation)) => {
+                self.cache_provider_observation(
+                    lobby_id,
+                    CachedProviderObservation::success(
+                        network_generation,
+                        observation.enrolled_device_count,
+                        now,
+                    ),
+                )
+                .await;
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                let failure = observation_failure(&error);
+                self.cache_provider_failure(lobby_id, network_generation, failure, now)
+                    .await;
+                Err(error)
+            }
+            Err(_) => {
+                self.cache_provider_failure(
+                    lobby_id,
+                    network_generation,
+                    CachedObservationFailure::Timeout,
+                    now,
+                )
+                .await;
+                Err(ProviderError::Unavailable {
+                    operation: "network_observation_timeout",
+                })
+            }
+        }
+    }
+
+    /// Refreshes against the configured wall clock.
+    pub async fn refresh_network_observation(
+        &self,
+        lobby_id: LobbyId,
+    ) -> Result<(), ProviderError> {
+        self.refresh_network_observation_at(lobby_id, self.clock.now())
+            .await
+    }
+
+    async fn cache_provider_observation(
+        &self,
+        lobby_id: LobbyId,
+        observation: CachedProviderObservation,
+    ) {
+        let mut cache = self.provider_observations.write().await;
+        if cache.len() < MAX_CACHED_PROVIDER_OBSERVATIONS || cache.contains_key(&lobby_id) {
+            cache.insert(lobby_id, observation);
+        }
+    }
+
+    async fn cache_provider_failure(
+        &self,
+        lobby_id: LobbyId,
+        network_generation: u64,
+        failure: CachedObservationFailure,
+        now: UnixMillis,
+    ) {
+        let previous = self
+            .provider_observations
+            .read()
+            .await
+            .get(&lobby_id)
+            .copied();
+        self.cache_provider_observation(
+            lobby_id,
+            CachedProviderObservation::failed(network_generation, previous, failure, now),
+        )
+        .await;
+    }
+
     /// Runs deterministic expiry/start-timeout transitions and teardown retries.
     pub async fn cleanup_expired_at(&self, now: UnixMillis) -> Vec<LobbyId> {
-        let Ok(lobby_ids) = self.store.cleanup_expired(now).await else {
-            return Vec::new();
-        };
-        for lobby_id in &lobby_ids {
-            let _lobby = self.lock_lobby(*lobby_id).await;
-            let Some(mut stored) = self.store.get(*lobby_id).await else {
+        let lobby_ids = self.store.lobby_ids().await;
+        let mut cleaned = Vec::new();
+        for lobby_id in lobby_ids {
+            // Candidate discovery is read-only. Transition and teardown happen
+            // only after acquiring the same lock as join/delete handlers.
+            let _lobby = self.lock_lobby(lobby_id).await;
+            let Some(mut stored) = self.store.get(lobby_id).await else {
                 continue;
             };
+            let transitioned = apply_time_transitions(&mut stored, now);
+            let needs_cleanup = transitioned
+                || stored.lobby.state == LobbyState::Closing
+                || (stored.cleanup_pending
+                    && matches!(
+                        stored.lobby.state,
+                        LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
+                    ));
+            if !needs_cleanup {
+                continue;
+            }
             let finalize = stored.lobby.state == LobbyState::Closing;
             let _ = cleanup_resources(self, &mut stored, now, true, finalize).await;
             let _ = self.store.replace(stored).await;
+            cleaned.push(lobby_id);
         }
-        lobby_ids
+        cleaned
     }
 
     /// Runs expiry cleanup against the configured clock.
@@ -151,6 +425,7 @@ impl fmt::Debug for AppState {
             .field("store", &"<lobby-store>")
             .field("provider", &"<network-provider>")
             .field("clock", &"<clock>")
+            .field("provider_observations", &"<bounded-coarse-cache>")
             .finish()
     }
 }
@@ -159,6 +434,7 @@ impl fmt::Debug for AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(landing))
+        .route("/inspect", get(inspect_shell))
         .route("/healthz", get(healthz))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/lobbies", post(create_lobby))
@@ -166,6 +442,7 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/lobbies/{lobby_id}",
             get(get_lobby).delete(delete_lobby),
         )
+        .route("/v1/lobbies/{lobby_id}/network", get(get_lobby_network))
         .route("/v1/lobbies/{lobby_id}/join", post(join_lobby))
         .route("/v1/lobbies/{lobby_id}/leave", post(leave_lobby))
         .route(
@@ -213,6 +490,63 @@ async fn landing() -> impl IntoResponse {
     (headers, Html(LANDING_HTML))
 }
 
+async fn inspect_shell() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'sha256-M+A8mqmnVAeKAZUaP1OIDiMgzOa3E/Q2fsItjMYClpM='; script-src 'sha256-3xl3dBD9h+2H3qL/B3ZS2tKPYh9LqF4Uicf6YQuZbmk='; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    (headers, Html(INSPECT_HTML))
+}
+
+#[derive(Serialize)]
+struct AnonymousDryLobbyResponse {
+    lobby_id: LobbyId,
+    state: LobbyState,
+    max_players: u8,
+    ttl: LobbyTtl,
+    wire_version: spurfire_protocol::WireVersion,
+    provisioning_mode: ProvisioningMode,
+    created_at: UnixMillis,
+    cleanup_pending: bool,
+    roster_count: u32,
+    dry_run: bool,
+    planned_actions: Vec<spurfire_protocol::PlannedAction>,
+}
+
+impl From<LobbyResponse> for AnonymousDryLobbyResponse {
+    fn from(response: LobbyResponse) -> Self {
+        Self {
+            lobby_id: response.lobby.lobby_id,
+            state: response.lobby.state,
+            max_players: response.lobby.max_players,
+            ttl: response.lobby.ttl,
+            wire_version: response.lobby.wire_version,
+            provisioning_mode: ProvisioningMode::DryRun,
+            created_at: response.lobby.created_at,
+            cleanup_pending: response.lobby.cleanup_pending,
+            roster_count: u32::try_from(response.lobby.roster.len())
+                .expect("validated roster is bounded by MAX_PLAYERS"),
+            dry_run: true,
+            planned_actions: Vec::new(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -221,10 +555,11 @@ struct HealthResponse {
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
     let ready = state.config.force_dry_run
-        || state
-            .provider
-            .cached_capabilities()
-            .mode_available(state.config.provisioning_mode);
+        || (state.config.real_mutations_enabled
+            && state
+                .provider
+                .cached_capabilities()
+                .mode_available(state.config.provisioning_mode));
     Json(HealthResponse {
         status: if ready { "ok" } else { "degraded" },
         provisioning_ready: ready,
@@ -298,8 +633,18 @@ async fn create_lobby(
         created_at: now,
         cleanup_pending: false,
     };
-    // Persist PROVISIONING before a child-tailnet mutation. This makes create idempotency resolve
-    // before `prepare_lobby` and prevents a retry from creating a second child tailnet.
+    let creator_capability = GeneratedCapability::generate();
+    let capability_record = StoredCapabilityVerifier::new(
+        creator_capability.verifier,
+        lobby_id,
+        1,
+        now.saturating_add(
+            absolute_ttl_ms.saturating_add(crate::store::CREATOR_CAPABILITY_CLEANUP_GRACE_MS),
+        ),
+    );
+    // Persist PROVISIONING/RESERVED and acquire the singleton real lease before
+    // a child-tailnet mutation. Replay resolution occurs inside this same store
+    // transaction before either the kill switch or quota is evaluated.
     let stored = StoredLobby::new(
         lobby,
         actor,
@@ -307,19 +652,36 @@ async fn create_lobby(
         lobby_tag(lobby_id),
         effective_dry_run,
         idle_ttl_ms,
-    );
+    )
+    .with_creator_capability(capability_record);
 
     let outcome = state
         .store
-        .create(idempotency_key, request_fingerprint, actor, now, stored)
+        .create(
+            idempotency_key,
+            request_fingerprint,
+            actor,
+            now,
+            stored,
+            state.config.real_mutations_enabled,
+        )
         .await
         .map_err(|error| store_api_error(&error, effective_dry_run))?;
     match outcome {
         CreateStoreOutcome::Created(mut advanced) => {
+            if !effective_dry_run {
+                advanced.network_lifecycle = NetworkLifecycle::Creating;
+                state
+                    .store
+                    .replace(advanced.clone())
+                    .await
+                    .map_err(|error| store_api_error(&error, effective_dry_run))?;
+            }
             let prepared = tokio::time::timeout(
                 PROVIDER_OPERATION_TIMEOUT,
                 state.provider.prepare_lobby(PrepareLobbyRequest {
                     lobby_id,
+                    network_generation: advanced.network_generation,
                     mode: effective_mode,
                     dry_run: effective_dry_run,
                 }),
@@ -332,6 +694,23 @@ async fn create_lobby(
                 Ok(prepared) => {
                     advanced.tailnet = prepared.tailnet;
                     advanced.dry_run = prepared.dry_run;
+                    if prepared.dry_run {
+                        advanced.network_lifecycle = NetworkLifecycle::Simulated;
+                    } else {
+                        let identity = prepared
+                            .identity
+                            .ok_or_else(|| internal_error(effective_dry_run))?;
+                        identity
+                            .validate_for_mode(effective_mode)
+                            .map_err(|error| provider_api_error(&error, effective_dry_run))?;
+                        advanced.network_identity = Some(StoredNetworkIdentity {
+                            provider_tailnet_id: identity.provider_tailnet_id,
+                            tailnet_dns_name: identity.tailnet_dns_name,
+                            network_generation: advanced.network_generation,
+                            captured_at: now,
+                        });
+                        advanced.network_lifecycle = NetworkLifecycle::Active;
+                    }
                     if prepared.dry_run
                         || state
                             .provider
@@ -341,6 +720,8 @@ async fn create_lobby(
                         transition(&mut advanced.lobby, LobbyState::Forming, effective_dry_run)?;
                     } else {
                         transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
+                        advanced.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                        advanced.cleanup_pending = true;
                         advanced.lobby.state_reason = Some(
                             state
                                 .provider
@@ -362,7 +743,22 @@ async fn create_lobby(
                     } else {
                         error.state_reason().to_owned()
                     });
-                    advanced.cleanup_pending = ambiguous_child_create;
+                    advanced.network_lifecycle = if ambiguous_child_create {
+                        NetworkLifecycle::CreateUnknown
+                    } else if effective_mode == ProvisioningMode::TailnetPerLobby
+                        && matches!(
+                            error,
+                            ProviderError::InsufficientScopes {
+                                operation: "organization_tailnet_create"
+                            }
+                        )
+                    {
+                        NetworkLifecycle::CreateRejected
+                    } else {
+                        NetworkLifecycle::ManualRemediation
+                    };
+                    advanced.cleanup_pending =
+                        !matches!(advanced.network_lifecycle, NetworkLifecycle::CreateRejected);
                     advanced.terminal_at = Some(now);
                     metadata_for(effective_dry_run)
                 }
@@ -373,13 +769,18 @@ async fn create_lobby(
                 .replace(advanced)
                 .await
                 .map_err(|error| store_api_error(&error, effective_dry_run))?;
-            Ok((StatusCode::CREATED, Json(response)).into_response())
+            Ok(sensitive_json_response(
+                StatusCode::CREATED,
+                &FirstCreateResponse {
+                    response,
+                    creator_capability: creator_capability.plaintext.as_str(),
+                },
+            ))
         }
-        CreateStoreOutcome::Replay(stored) => Ok((
+        CreateStoreOutcome::Replay(stored) => Ok(sensitive_json_response(
             StatusCode::OK,
-            Json(create_response(&stored, metadata_for(stored.dry_run))),
-        )
-            .into_response()),
+            &create_response(&stored, metadata_for(stored.dry_run)),
+        )),
         CreateStoreOutcome::Conflict => Err(ApiError::new(
             StatusCode::CONFLICT,
             "idempotency_conflict",
@@ -393,17 +794,81 @@ async fn get_lobby(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<LobbyResponse>, ApiError> {
-    let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
+) -> Response {
+    let protected = !state.config.force_dry_run || headers.contains_key(AUTHORIZATION_HEADER);
+    let result = get_lobby_inner(&state, &lobby_id, &headers, protected).await;
+    match result {
+        Ok(response) if protected => sensitive_json_response(StatusCode::OK, &response),
+        Ok(response) => Json(AnonymousDryLobbyResponse::from(response)).into_response(),
+        Err(error) if protected => sensitive_response_headers(error.into_response()),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn get_lobby_inner(
+    state: &AppState,
+    lobby_id: &str,
+    headers: &HeaderMap,
+    protected: bool,
+) -> Result<LobbyResponse, ApiError> {
+    let header_dry_run = parse_dry_run_header(headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = if protected {
+        LobbyId::parse(lobby_id).map_err(|_| lobby_not_found(false))?
+    } else {
+        parse_lobby_id(lobby_id, dry_hint)?
+    };
+    if protected {
+        let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+        state
+            .store
+            .get_authorized_network_view(lobby_id, verifier, state.clock.now())
+            .await
+            .ok_or_else(|| lobby_not_found(false))?;
+    }
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
-    let stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
-    Ok(Json(LobbyResponse {
+    let stored = load_maintained_lobby(state, lobby_id, now, dry_hint).await?;
+    Ok(LobbyResponse {
         lobby: stored.snapshot(),
         metadata: metadata_for(stored.dry_run || dry_hint),
-    }))
+    })
+}
+
+async fn get_lobby_network(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match get_lobby_network_inner(&state, &lobby_id, &headers).await {
+        Ok(view) => sensitive_json_response(StatusCode::OK, &view),
+        Err(error) => sensitive_response_headers(error.into_response()),
+    }
+}
+
+async fn get_lobby_network_inner(
+    state: &AppState,
+    lobby_id: &str,
+    headers: &HeaderMap,
+) -> Result<LobbyNetworkView, ApiError> {
+    // Capability parsing and verification happen before any exact-lobby state is
+    // returned. Every failure shares one 404 body to prevent existence oracles.
+    let lobby_id = LobbyId::parse(lobby_id).map_err(|_| lobby_not_found(false))?;
+    let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+    let now = state.clock.now();
+    let stored = state
+        .store
+        .get_authorized_network_view(lobby_id, verifier, now)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    let observation = state
+        .provider_observations
+        .read()
+        .await
+        .get(&lobby_id)
+        .copied()
+        .filter(|observation| observation.network_generation == stored.network_generation);
+    build_network_view(&stored, observation, now).map_err(|_| internal_error(false))
 }
 
 async fn join_lobby(
@@ -432,15 +897,14 @@ async fn join_lobby(
         if replay.fingerprint != request_fingerprint || replay.player_id != actor {
             return Err(idempotency_conflict(dry_run));
         }
-        return Ok((
+        return Ok(sensitive_json_response(
             StatusCode::OK,
-            Json(JoinLobbyReplayResponse {
+            &JoinLobbyReplayResponse {
                 join_credential: replay.receipt.clone(),
                 lobby: stored.snapshot(),
                 metadata: metadata_for(dry_run),
-            }),
-        )
-            .into_response());
+            },
+        ));
     }
 
     request
@@ -491,15 +955,14 @@ async fn join_lobby(
                     .replace(stored.clone())
                     .await
                     .map_err(|error| store_api_error(&error, dry_run))?;
-                return Ok((
+                return Ok(sensitive_json_response(
                     StatusCode::OK,
-                    Json(JoinLobbyReplayResponse {
+                    &JoinLobbyReplayResponse {
                         join_credential: receipt,
                         lobby: stored.snapshot(),
                         metadata: metadata_for(dry_run),
-                    }),
-                )
-                    .into_response());
+                    },
+                ));
             }
         }
     } else {
@@ -567,6 +1030,8 @@ async fn join_lobby(
         PROVIDER_OPERATION_TIMEOUT,
         state.provider.mint_credential(MintCredentialRequest {
             lobby_id,
+            network_generation: stored.network_generation,
+            identity: provider_identity(&stored),
             mode: stored.lobby.provisioning_mode,
             player_id: request.player_id,
             tailnet: stored.tailnet.clone(),
@@ -594,8 +1059,23 @@ async fn join_lobby(
             stored.lobby.authority = None;
             stored.last_election = None;
             stored.terminal_at = Some(now);
-            stored.cleanup_pending = !stored.credentials.is_empty()
-                || matches!(error, ProviderError::ChildSecretUnavailable);
+            if matches!(
+                error,
+                ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch
+            ) {
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+            }
+            stored.cleanup_pending = !dry_run
+                || !stored.credentials.is_empty()
+                || matches!(
+                    error,
+                    ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch
+                );
+            if stored.cleanup_pending
+                && stored.network_lifecycle != NetworkLifecycle::ManualRemediation
+            {
+                stored.network_lifecycle = NetworkLifecycle::CleanupPending;
+            }
             state
                 .store
                 .replace(stored)
@@ -681,15 +1161,14 @@ async fn join_lobby(
         .await
         .map_err(|error| store_api_error(&error, dry_run))?;
 
-    Ok((
+    Ok(sensitive_json_response(
         StatusCode::CREATED,
-        Json(JoinLobbyResponse {
+        &JoinLobbyResponse {
             join_credential: credential,
             lobby: stored.snapshot(),
             metadata: minted.metadata,
-        }),
-    )
-        .into_response())
+        },
+    ))
 }
 
 async fn leave_lobby(
@@ -747,7 +1226,7 @@ async fn leave_lobby(
         |_| metadata_for(dry_run),
         |outcome| outcome.metadata.clone(),
     );
-    apply_cleanup_result(&mut stored, now, cleanup);
+    apply_cleanup_result(&mut stored, now, cleanup, false);
     stored
         .lobby
         .roster
@@ -873,8 +1352,26 @@ async fn get_lobby_authority(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<AuthorityEnvelope>, ApiError> {
-    authority_handler(state, lobby_id, headers).await
+) -> Result<Response, ApiError> {
+    let lobby_id = LobbyId::parse(&lobby_id).map_err(|_| lobby_not_found(false))?;
+    let verifier = capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?;
+    let now = state.clock.now();
+    let stored = state
+        .store
+        .get_authorized_network_view(lobby_id, verifier, now)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    let election = stored
+        .last_election
+        .as_ref()
+        .ok_or_else(|| lobby_not_found(false))?;
+    Ok(sensitive_json_response(
+        StatusCode::OK,
+        &AuthorityEnvelope {
+            authority: AuthorityResponse::from(election),
+            metadata: metadata_for(stored.dry_run),
+        },
+    ))
 }
 
 async fn authority_handler(
@@ -1094,6 +1591,12 @@ async fn authority_heartbeat(
         transition(&mut stored.lobby, LobbyState::InMatch, dry_run)?;
     }
     stored.last_authority_heartbeat_at = Some(now);
+    stored.last_accepted_heartbeat = Some(StoredAcceptedHeartbeat {
+        player_id: actor,
+        epoch: stored.authority_epoch,
+        input_hash: request.input_hash,
+        received_at: now,
+    });
     let authority = stored
         .lobby
         .authority
@@ -1260,6 +1763,490 @@ struct AuthorityEnvelope {
     authority: AuthorityResponse,
     #[serde(flatten)]
     metadata: ResponseMetadata,
+}
+
+fn capability_verifier(token: &[u8]) -> [u8; 32] {
+    let mut input = Vec::with_capacity(CAPABILITY_HASH_DOMAIN.len() + token.len());
+    input.extend_from_slice(CAPABILITY_HASH_DOMAIN);
+    input.extend_from_slice(token);
+    let verifier = sha256(&input);
+    input.zeroize();
+    verifier
+}
+
+fn capability_from_headers(headers: &HeaderMap) -> Option<[u8; 32]> {
+    let value = headers.get(AUTHORIZATION_HEADER)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme != CAPABILITY_SCHEME || token.is_empty() || token.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut decoded = base64url_decode(token)?;
+    if decoded.len() != 48 {
+        decoded.zeroize();
+        return None;
+    }
+    decoded.zeroize();
+    Some(capability_verifier(token.as_bytes()))
+}
+
+fn sensitive_json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+    sensitive_response_headers((status, Json(value)).into_response())
+}
+
+fn sensitive_response_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Authorization"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+fn provider_identity(stored: &StoredLobby) -> Option<ProviderNetworkIdentity> {
+    let identity = stored.network_identity.as_ref()?;
+    if stored.network_generation == 0
+        || identity.network_generation != stored.network_generation
+        || identity.tailnet_dns_name.as_str() != stored.tailnet
+    {
+        return None;
+    }
+    let identity = ProviderNetworkIdentity {
+        provider_tailnet_id: identity.provider_tailnet_id.clone(),
+        tailnet_dns_name: identity.tailnet_dns_name.clone(),
+    };
+    identity
+        .validate_for_mode(stored.lobby.provisioning_mode)
+        .ok()?;
+    Some(identity)
+}
+
+fn observe_request(stored: &StoredLobby) -> Result<ObserveNetworkRequest, ProviderError> {
+    let identity = provider_identity(stored).ok_or(ProviderError::IdentityMismatch)?;
+    if identity.tailnet_dns_name.as_str() != stored.tailnet {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    Ok(ObserveNetworkRequest {
+        lobby_id: stored.lobby.lobby_id,
+        network_generation: stored.network_generation,
+        mode: stored.lobby.provisioning_mode,
+        identity: Some(identity),
+        tailnet: stored.tailnet.clone(),
+        tag: stored.tag.clone(),
+        dry_run: stored.dry_run,
+    })
+}
+
+const fn observation_failure(error: &ProviderError) -> CachedObservationFailure {
+    match error {
+        ProviderError::RealMutationsDisabled => CachedObservationFailure::SourceError,
+        ProviderError::InsufficientScopes { .. } => CachedObservationFailure::PermissionDenied,
+        ProviderError::IdentityMismatch => CachedObservationFailure::Conflict,
+        ProviderError::ChildSecretUnavailable
+        | ProviderError::Upstream { .. }
+        | ProviderError::Unavailable { .. } => CachedObservationFailure::SourceError,
+    }
+}
+
+fn control_fact<T>(value: T, as_of: UnixMillis, served_at: UnixMillis) -> Fact<T> {
+    Fact::known(
+        value,
+        FactSource::ControlStore,
+        FactAssurance::Authoritative,
+        Some(as_of),
+        served_at,
+        Freshness::Current,
+    )
+}
+
+fn derived_fact<T>(value: T, served_at: UnixMillis) -> Fact<T> {
+    Fact::known(
+        value,
+        FactSource::Derived,
+        FactAssurance::Derived,
+        Some(served_at),
+        served_at,
+        Freshness::Fresh,
+    )
+}
+
+fn unknown_control<T>(reason: UnknownReason, received_at: Option<UnixMillis>) -> Fact<T> {
+    Fact::unknown(FactSource::ControlStore, reason, received_at)
+}
+
+fn provider_enrollment_fact(
+    observation: Option<CachedProviderObservation>,
+    now: UnixMillis,
+) -> Fact<u32> {
+    let Some(observation) = observation else {
+        return Fact::unknown(FactSource::ProviderApi, UnknownReason::NeverObserved, None);
+    };
+    match (observation.enrolled_device_count, observation.successful_at) {
+        (Some(value), Some(successful_at)) => {
+            let failed_after_success = observation
+                .last_failure
+                .is_some_and(|(_, failed_at)| failed_at >= successful_at);
+            let fresh = !failed_after_success
+                && now
+                    .checked_duration_since(successful_at)
+                    .is_some_and(|age| age < PROVIDER_DEVICE_FRESHNESS_MS);
+            Fact::known(
+                value,
+                FactSource::ProviderApi,
+                FactAssurance::Observed,
+                Some(successful_at),
+                successful_at,
+                if fresh {
+                    Freshness::Fresh
+                } else {
+                    Freshness::Stale
+                },
+            )
+        }
+        _ => {
+            let (failure, failed_at) = observation
+                .last_failure
+                .unwrap_or((CachedObservationFailure::SourceError, now));
+            Fact::unknown(
+                FactSource::ProviderApi,
+                failure.unknown_reason(),
+                Some(failed_at),
+            )
+        }
+    }
+}
+
+fn provider_online_fact(observation: Option<CachedProviderObservation>) -> Fact<u32> {
+    let received_at = observation.and_then(|observation| {
+        observation
+            .last_failure
+            .map(|(_, at)| at)
+            .or(observation.successful_at)
+    });
+    Fact::unknown(
+        FactSource::ProviderApi,
+        UnknownReason::Unsupported,
+        received_at,
+    )
+}
+
+fn cleanup_time_fact(value: Option<UnixMillis>, now: UnixMillis) -> Fact<UnixMillis> {
+    value.map_or_else(
+        || unknown_control(UnknownReason::NeverObserved, None),
+        |value| control_fact(value, value, now),
+    )
+}
+
+fn build_network_view(
+    stored: &StoredLobby,
+    observation: Option<CachedProviderObservation>,
+    now: UnixMillis,
+) -> Result<LobbyNetworkView, ()> {
+    let dry_run = stored.dry_run || stored.lobby.provisioning_mode == ProvisioningMode::DryRun;
+    let identity = provider_identity(stored);
+    let identity_required = !dry_run
+        && matches!(
+            stored.network_lifecycle,
+            NetworkLifecycle::Active
+                | NetworkLifecycle::CleanupRequested
+                | NetworkLifecycle::CleanupPending
+                | NetworkLifecycle::VerifyingAbsence
+        );
+    let lifecycle = if identity_required && identity.is_none() {
+        NetworkLifecycle::ManualRemediation
+    } else if dry_run {
+        NetworkLifecycle::Simulated
+    } else {
+        stored.network_lifecycle
+    };
+
+    let (truth_label, mut backing) = if dry_run {
+        (
+            NetworkTruthLabel::SimulatedNoTailnet,
+            NetworkBacking::simulated(stored.network_generation.max(1), now),
+        )
+    } else {
+        let (truth_label, backing_mode, isolation) = match stored.lobby.provisioning_mode {
+            ProvisioningMode::TailnetPerLobby => (
+                NetworkTruthLabel::RealDedicatedTailnet,
+                BackingMode::TailnetPerLobby,
+                NetworkIsolation::Dedicated,
+            ),
+            ProvisioningMode::SharedTailnet => (
+                NetworkTruthLabel::RealSharedCompatibility,
+                BackingMode::SharedTailnet,
+                NetworkIsolation::Shared,
+            ),
+            ProvisioningMode::DryRun => return Err(()),
+        };
+        let tailnet_dns_name = if matches!(
+            lifecycle,
+            NetworkLifecycle::CreateRejected
+                | NetworkLifecycle::DedicatedAbsent
+                | NetworkLifecycle::SharedResourcesClean
+        ) {
+            Fact::not_applicable()
+        } else if let (Some(identity), Some(stored_identity)) =
+            (identity.as_ref(), stored.network_identity.as_ref())
+        {
+            Fact::known(
+                identity.tailnet_dns_name.clone(),
+                FactSource::ControlStore,
+                FactAssurance::Authoritative,
+                Some(stored_identity.captured_at),
+                stored_identity.captured_at,
+                Freshness::Current,
+            )
+        } else {
+            unknown_control(UnknownReason::ReconciliationPending, None)
+        };
+        (
+            truth_label,
+            NetworkBacking {
+                backing_mode,
+                simulates_mode: None,
+                isolation,
+                network_generation: stored.network_generation,
+                network_lifecycle: lifecycle,
+                tailnet_dns_name,
+                control_service_member: control_fact(false, now, now),
+            },
+        )
+    };
+    backing.network_lifecycle = lifecycle;
+
+    let roster_count = u32::try_from(stored.lobby.roster.len()).map_err(|_| ())?;
+    let expected_directions = roster_count
+        .checked_mul(roster_count.saturating_sub(1))
+        .ok_or(())?;
+    let roster_ids: BTreeSet<PlayerId> = stored
+        .lobby
+        .roster
+        .iter()
+        .map(|player| player.player_id)
+        .collect();
+    let fresh_measurements: Vec<_> = stored
+        .measurements
+        .iter()
+        .filter(|(player_id, sample)| {
+            roster_ids.contains(player_id)
+                && now
+                    .checked_duration_since(sample.measured_at)
+                    .is_some_and(|age| age < INSPECTOR_REPORT_FRESHNESS_MS)
+        })
+        .map(|(_, sample)| sample)
+        .collect();
+    // The current measurement route uses client-asserted player identifiers;
+    // it is not the generation/session-bound participant-report contract.
+    // Do not relabel those rows as authenticated fresh reporters.
+    let fresh_reporter_count = 0;
+    let (direct_count, peer_relay_count, derp_relay_count, fresh_directions) = fresh_measurements
+        .iter()
+        .try_fold((0_u32, 0_u32, 0_u32, 0_u32), |counts, sample| {
+            Some((
+                counts.0.checked_add(sample.route_summary.direct_count)?,
+                counts
+                    .1
+                    .checked_add(sample.route_summary.peer_relay_count)?,
+                counts.2.checked_add(sample.route_summary.derp_count)?,
+                counts.3.checked_add(sample.observed_peer_count)?,
+            ))
+        })
+        .ok_or(())?;
+    if fresh_directions > expected_directions {
+        return Err(());
+    }
+    let unknown_count = expected_directions - fresh_directions;
+    let unavailable_count = 0;
+    let reported_direction_count = fresh_directions.checked_add(unknown_count).ok_or(())?;
+    let reachable_known_count = direct_count
+        .checked_add(peer_relay_count)
+        .and_then(|value| value.checked_add(derp_relay_count))
+        .ok_or(())?;
+    let direct_ratio_milli = if reachable_known_count == 0 {
+        Fact::not_applicable()
+    } else {
+        let ratio =
+            u32::try_from((1_000_u64 * u64::from(direct_count)) / u64::from(reachable_known_count))
+                .map_err(|_| ())?;
+        derived_fact(ratio, now)
+    };
+
+    let (provider_enrolled_device_count, provider_online_device_count) = if dry_run {
+        (Fact::not_applicable(), Fact::not_applicable())
+    } else {
+        (
+            provider_enrollment_fact(observation, now),
+            provider_online_fact(observation),
+        )
+    };
+
+    let control_election = stored.last_election.as_ref().map_or_else(
+        || Fact::unknown(FactSource::Derived, UnknownReason::NeverObserved, None),
+        |election| {
+            let evaluated_at = election.input.election_at;
+            let freshness = if now
+                .checked_duration_since(evaluated_at)
+                .is_some_and(|age| age < MEASUREMENT_FRESHNESS_MS)
+            {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            };
+            let score_milli = election
+                .eligible
+                .iter()
+                .find(|score| score.player_id == election.winner_player_id)
+                .map_or(0, |score| score.score_milli);
+            Fact::known(
+                ControlElectionReference {
+                    formula_version: election.formula_version.clone(),
+                    winner_player_id: election.winner_player_id,
+                    score_milli,
+                    input_hash: election.input_hash,
+                    evaluated_at,
+                    degraded: election.degraded,
+                    input_assurance: FactAssurance::Reported,
+                },
+                FactSource::Derived,
+                FactAssurance::Authoritative,
+                Some(evaluated_at),
+                evaluated_at,
+                freshness,
+            )
+        },
+    );
+    let last_accepted_heartbeat = stored.last_accepted_heartbeat.map_or_else(
+        || unknown_control(UnknownReason::NeverObserved, None),
+        |heartbeat| {
+            Fact::known(
+                AcceptedHeartbeatReference {
+                    player_id: heartbeat.player_id,
+                    epoch: heartbeat.epoch,
+                    input_hash: heartbeat.input_hash,
+                    received_at: heartbeat.received_at,
+                },
+                FactSource::ControlStore,
+                FactAssurance::Authoritative,
+                Some(heartbeat.received_at),
+                heartbeat.received_at,
+                if now
+                    .checked_duration_since(heartbeat.received_at)
+                    .is_some_and(|age| age < MEASUREMENT_FRESHNESS_MS)
+                {
+                    Freshness::Fresh
+                } else {
+                    Freshness::Stale
+                },
+            )
+        },
+    );
+
+    let cleanup = if dry_run {
+        NetworkCleanup {
+            network_lifecycle: NetworkLifecycle::Simulated,
+            requested_at: Fact::not_applicable(),
+            delete_acknowledged_at: Fact::not_applicable(),
+            absence_confirmed_at: Fact::not_applicable(),
+            participant_safe_reason: ParticipantCleanupReason::SimulatedNoTailnet,
+        }
+    } else {
+        let participant_safe_reason = match lifecycle {
+            NetworkLifecycle::Simulated => return Err(()),
+            NetworkLifecycle::Reserved
+            | NetworkLifecycle::Creating
+            | NetworkLifecycle::Active
+            | NetworkLifecycle::CreateRejected => ParticipantCleanupReason::NotRequested,
+            NetworkLifecycle::CreateUnknown | NetworkLifecycle::ManualRemediation => {
+                ParticipantCleanupReason::ManualRemediationRequired
+            }
+            NetworkLifecycle::CleanupRequested => ParticipantCleanupReason::CleanupRequested,
+            NetworkLifecycle::CleanupPending => ParticipantCleanupReason::CleanupPending,
+            NetworkLifecycle::VerifyingAbsence => ParticipantCleanupReason::VerifyingExactAbsence,
+            NetworkLifecycle::DedicatedAbsent => ParticipantCleanupReason::DedicatedTailnetAbsent,
+            NetworkLifecycle::SharedResourcesClean => {
+                ParticipantCleanupReason::SharedResourcesClean
+            }
+            NetworkLifecycle::Unknown => return Err(()),
+        };
+        NetworkCleanup {
+            network_lifecycle: lifecycle,
+            requested_at: cleanup_time_fact(stored.cleanup_requested_at, now),
+            delete_acknowledged_at: cleanup_time_fact(stored.delete_acknowledged_at, now),
+            absence_confirmed_at: cleanup_time_fact(stored.absence_confirmed_at, now),
+            participant_safe_reason,
+        }
+    };
+
+    let view = LobbyNetworkView {
+        schema_version: LOBBY_NETWORK_SCHEMA_VERSION,
+        lobby_id: stored.lobby.lobby_id,
+        served_at: now,
+        truth_label,
+        backing,
+        lobby_lifecycle: control_fact(InspectedLobbyLifecycle::from(stored.lobby.state), now, now),
+        counts: NetworkCounts {
+            roster_count: control_fact(roster_count, now, now),
+            provider_enrolled_device_count,
+            provider_online_device_count,
+            fresh_reporter_count: derived_fact(fresh_reporter_count, now),
+            fresh_directional_observation_count: derived_fact(fresh_directions, now),
+        },
+        routes: RouteAggregate {
+            expected_direction_count: derived_fact(expected_directions, now),
+            reported_direction_count: derived_fact(reported_direction_count, now),
+            direct_count: derived_fact(direct_count, now),
+            peer_relay_count: derived_fact(peer_relay_count, now),
+            derp_relay_count: derived_fact(derp_relay_count, now),
+            unavailable_count: derived_fact(unavailable_count, now),
+            unknown_count: derived_fact(unknown_count, now),
+            reachable_known_count: derived_fact(reachable_known_count, now),
+            direct_ratio_milli,
+        },
+        application_quality: ApplicationQuality {
+            sample_count: derived_fact(0, now),
+            application_rtt_ms_median: Fact::unknown(
+                FactSource::ParticipantReport,
+                UnknownReason::Unsupported,
+                None,
+            ),
+            application_rtt_ms_p95: Fact::unknown(
+                FactSource::ParticipantReport,
+                UnknownReason::Unsupported,
+                None,
+            ),
+            application_rtt_ms_worst: Fact::unknown(
+                FactSource::ParticipantReport,
+                UnknownReason::Unsupported,
+                None,
+            ),
+            application_loss_ppm_median: Fact::unknown(
+                FactSource::ParticipantReport,
+                UnknownReason::Unsupported,
+                None,
+            ),
+        },
+        authority: NetworkAuthority {
+            control_election,
+            last_accepted_heartbeat,
+            peer_reported_match_authority: Fact::unknown(
+                FactSource::ParticipantReport,
+                UnknownReason::NeverObserved,
+                None,
+            ),
+        },
+        cleanup,
+    };
+    view.validate().map_err(|_| ())?;
+    Ok(view)
 }
 
 fn create_response(stored: &StoredLobby, metadata: ResponseMetadata) -> CreateLobbyResponse {
@@ -1452,6 +2439,7 @@ async fn load_maintained_lobby(
             state.provider.lobby_access_error(
                 stored.lobby.lobby_id,
                 stored.lobby.provisioning_mode,
+                stored.network_lifecycle,
                 stored.dry_run,
             )
         })
@@ -1469,6 +2457,7 @@ async fn load_maintained_lobby(
             stored.lobby.state = LobbyState::Failed;
         }
         stored.lobby.state_reason = Some(error.state_reason().to_owned());
+        stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
         stored.lobby.authority = None;
         stored.last_election = None;
         stored.cleanup_pending = true;
@@ -1723,6 +2712,13 @@ fn apply_election(
         .iter()
         .find(|score| score.player_id == election.winner_player_id)
         .map_or(0, |score| score.score_milli);
+    let election_changed = stored.last_election.as_ref().is_none_or(|previous| {
+        previous.winner_player_id != election.winner_player_id
+            || previous.input_hash != election.input_hash
+    });
+    if election_changed {
+        stored.authority_epoch = stored.authority_epoch.saturating_add(1).max(1);
+    }
     stored.lobby.authority = Some(AuthoritySummary {
         candidate_player_id: election.winner_player_id,
         formula_version: election.formula_version.clone(),
@@ -1760,6 +2756,8 @@ fn cleanup_request(
 ) -> CleanupLobbyRequest {
     CleanupLobbyRequest {
         lobby_id: stored.lobby.lobby_id,
+        network_generation: stored.network_generation,
+        identity: provider_identity(stored),
         mode: stored.lobby.provisioning_mode,
         tailnet: stored.tailnet.clone(),
         tag: stored.tag.clone(),
@@ -1827,13 +2825,74 @@ async fn cleanup_resources(
     include_devices: bool,
     finalize: bool,
 ) -> ResponseMetadata {
+    // Serialize invalidation with provider observation refresh so a poll that
+    // started before teardown cannot repopulate the cache afterward.
+    let _observation = state.lock_observation(stored.lobby.lobby_id).await;
     let dry_run = stored.dry_run;
+    if stored.cleanup_requested_at.is_none() {
+        stored.measurements.clear();
+        for player in &mut stored.lobby.roster {
+            player.route_summary = Default::default();
+        }
+        state
+            .provider_observations
+            .write()
+            .await
+            .remove(&stored.lobby.lobby_id);
+    }
+
+    if stored.lobby.provisioning_mode == ProvisioningMode::TailnetPerLobby
+        && stored.network_lifecycle == NetworkLifecycle::VerifyingAbsence
+    {
+        reconcile_dedicated_absence(state, stored, now).await;
+        finalize_lobby_cleanup(stored, now, finalize);
+        return metadata_for(dry_run);
+    }
+    if matches!(
+        stored.network_lifecycle,
+        NetworkLifecycle::DedicatedAbsent | NetworkLifecycle::SharedResourcesClean
+    ) {
+        finalize_lobby_cleanup(stored, now, finalize);
+        return metadata_for(dry_run);
+    }
+    if !dry_run
+        && stored.lobby.provisioning_mode == ProvisioningMode::TailnetPerLobby
+        && matches!(
+            stored.network_lifecycle,
+            NetworkLifecycle::CreateUnknown | NetworkLifecycle::ManualRemediation
+        )
+    {
+        stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+        stored.cleanup_pending = true;
+        finalize_lobby_cleanup(stored, now, finalize);
+        return metadata_for(false);
+    }
+
+    if !dry_run {
+        stored.cleanup_requested_at.get_or_insert(now);
+        stored.network_lifecycle = NetworkLifecycle::CleanupRequested;
+        stored.cleanup_pending = true;
+        // No destructive call is allowed unless cleanup intent and the held
+        // identity/generation are durably replaceable first.
+        if state.store.replace(stored.clone()).await.is_err() {
+            stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+            stored.lobby.state_reason = Some("cleanup_intent_persistence_failed".to_owned());
+            finalize_lobby_cleanup(stored, now, finalize);
+            return metadata_for(false);
+        }
+    }
+
     let result = provider_cleanup(state, cleanup_request(stored, now, include_devices)).await;
     let metadata = result.as_ref().map_or_else(
         |_| metadata_for(dry_run),
         |outcome| outcome.metadata.clone(),
     );
-    apply_cleanup_result(stored, now, result);
+    apply_cleanup_result(stored, now, result, true);
+    finalize_lobby_cleanup(stored, now, finalize);
+    metadata
+}
+
+fn finalize_lobby_cleanup(stored: &mut StoredLobby, now: UnixMillis, finalize: bool) {
     if finalize && stored.lobby.state != LobbyState::Destroyed {
         if stored
             .lobby
@@ -1849,16 +2908,94 @@ async fn cleanup_resources(
         stored.lobby.authority = None;
         stored.terminal_at = Some(now);
     }
-    metadata
+}
+
+async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby, now: UnixMillis) {
+    let Some(identity) = provider_identity(stored) else {
+        stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+        stored.cleanup_pending = true;
+        stored.lobby.state_reason = Some("provider_identity_missing_manual_remediation".to_owned());
+        return;
+    };
+    let request = TailnetPresenceRequest {
+        lobby_id: stored.lobby.lobby_id,
+        network_generation: stored.network_generation,
+        identity,
+    };
+    let present = tokio::time::timeout(
+        PROVIDER_OBSERVATION_TIMEOUT,
+        state.provider.tailnet_present(request.clone()),
+    )
+    .await;
+    match present {
+        Ok(Ok(true)) => {
+            stored.first_absence_observed_at = None;
+            stored.cleanup_pending = true;
+        }
+        Ok(Ok(false)) => match stored.first_absence_observed_at {
+            None => {
+                stored.first_absence_observed_at = Some(now);
+                stored.cleanup_pending = true;
+            }
+            Some(first)
+                if now
+                    .checked_duration_since(first)
+                    .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS) =>
+            {
+                // Absence evidence is complete; only now may the exact
+                // generation-bound vault tuple be erased. Failure remains
+                // fail-closed and retains the singleton lease.
+                match tokio::time::timeout(
+                    PROVIDER_OPERATION_TIMEOUT,
+                    state.provider.erase_child_secret(request),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        stored.child_secret_erased_at = Some(now);
+                        stored.absence_confirmed_at = Some(now);
+                        stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+                        stored.cleanup_pending = false;
+                        stored.lobby.state_reason = None;
+                    }
+                    Ok(Err(error)) => {
+                        stored.cleanup_pending = true;
+                        stored.lobby.state_reason = Some(error.state_reason().to_owned());
+                    }
+                    Err(_) => {
+                        stored.cleanup_pending = true;
+                        stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
+                    }
+                }
+            }
+            Some(_) => {
+                stored.cleanup_pending = true;
+            }
+        },
+        Ok(Err(ProviderError::IdentityMismatch)) => {
+            stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+            stored.cleanup_pending = true;
+            stored.lobby.state_reason =
+                Some("provider_identity_mismatch_manual_remediation".to_owned());
+        }
+        Ok(Err(_)) | Err(_) => {
+            // Preserve the last absence evidence without converting uncertainty
+            // into absence. The singleton lease remains held.
+            stored.cleanup_pending = true;
+        }
+    }
 }
 
 fn apply_cleanup_result(
     stored: &mut StoredLobby,
     now: UnixMillis,
     result: Result<CleanupOutcome, ProviderError>,
+    full_cleanup: bool,
 ) {
-    if let Err(ProviderError::ChildSecretUnavailable) = &result {
-        stored.lobby.state_reason = Some("child_secret_unavailable_manual_remediation".to_owned());
+    if let Err(error @ (ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch)) =
+        &result
+    {
+        stored.lobby.state_reason = Some(error.state_reason().to_owned());
     }
     if let Ok(outcome) = &result {
         let revoked: BTreeSet<&str> = outcome
@@ -1872,6 +3009,12 @@ fn apply_cleanup_result(
                 credential.cleanup_pending = false;
             }
         }
+        if full_cleanup && outcome.delete_acknowledged {
+            stored.delete_acknowledged_at.get_or_insert(now);
+        }
+        if full_cleanup && outcome.child_secret_erased {
+            stored.child_secret_erased_at.get_or_insert(now);
+        }
     }
     let credential_pending = stored
         .credentials
@@ -1881,10 +3024,41 @@ fn apply_cleanup_result(
             credential.cleanup_pending = true;
             true
         });
-    stored.cleanup_pending = result
+    let provider_pending = result
         .as_ref()
-        .map_or(true, |outcome| outcome.cleanup_pending)
-        || credential_pending;
+        .map_or(true, |outcome| outcome.cleanup_pending);
+
+    if full_cleanup && !stored.dry_run {
+        match stored.lobby.provisioning_mode {
+            ProvisioningMode::TailnetPerLobby => match &result {
+                Ok(outcome) if outcome.delete_acknowledged => {
+                    stored.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
+                    stored.cleanup_pending = true;
+                }
+                Err(ProviderError::IdentityMismatch | ProviderError::ChildSecretUnavailable) => {
+                    stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                    stored.cleanup_pending = true;
+                }
+                _ => {
+                    stored.network_lifecycle = NetworkLifecycle::CleanupPending;
+                    stored.cleanup_pending = true;
+                }
+            },
+            ProvisioningMode::SharedTailnet => {
+                if !provider_pending && !credential_pending {
+                    stored.network_lifecycle = NetworkLifecycle::SharedResourcesClean;
+                    stored.cleanup_pending = false;
+                } else {
+                    stored.network_lifecycle = NetworkLifecycle::CleanupPending;
+                    stored.cleanup_pending = true;
+                }
+            }
+            ProvisioningMode::DryRun => unreachable!("real record cannot use dry-run mode"),
+        }
+    } else {
+        stored.cleanup_pending = provider_pending || credential_pending;
+    }
+
     for player in &mut stored.lobby.roster {
         player.cleanup_pending = stored.cleanup_pending;
         if stored.cleanup_pending {
@@ -1963,6 +3137,16 @@ fn invalid_results(message: &str, dry_run: bool) -> ApiError {
 
 fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
     let (status, code, message) = match error {
+        ProviderError::RealMutationsDisabled => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "real_mutations_disabled",
+            "real provider mutations are disabled by the independent safety switch",
+        ),
+        ProviderError::IdentityMismatch => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "manual_remediation_required",
+            "provider identity evidence does not match the selected lobby generation",
+        ),
         ProviderError::ChildSecretUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "manual_remediation_required",
@@ -1990,15 +3174,27 @@ fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
 }
 
 fn store_api_error(error: &crate::store::StoreError, dry_run: bool) -> ApiError {
-    if matches!(error, crate::store::StoreError::Capacity) {
-        return ApiError::new(
+    match error {
+        crate::store::StoreError::Capacity => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "service_capacity_reached",
             "lobby service capacity is temporarily exhausted",
         )
-        .dry_run(dry_run);
+        .dry_run(dry_run),
+        crate::store::StoreError::RealMutationsDisabled => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "real_mutations_disabled",
+            "real provider mutations are disabled by the independent safety switch",
+        )
+        .dry_run(dry_run),
+        crate::store::StoreError::RealLobbyCapacityReached => ApiError::new(
+            StatusCode::CONFLICT,
+            "real_lobby_capacity_reached",
+            "the single real-lobby safety lease is currently held",
+        )
+        .dry_run(dry_run),
+        _ => internal_error(dry_run),
     }
-    internal_error(dry_run)
 }
 
 fn internal_error(dry_run: bool) -> ApiError {

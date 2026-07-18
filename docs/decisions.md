@@ -25,10 +25,12 @@ server with a provider-owned in-memory child-secret vault and fail-closed restar
 implemented, but historical probes received 403 for auth-key, device-list, and ACL operations.
 Capability reporting keeps organization-tailnet access independent from these shared scopes.
 
-Keep this decision provisional until child one-use key issuance is live-verified and the in-memory
-vault is replaced by an encrypted secret manager with reconciliation, rotation, audit, and cleanup
-recovery; see `docs/tailscale-api.md`. Production custody intent: **setec** (secrets service) backing
-the child-OAuth vault, with startup reconciliation against upstream tailnets.
+Child-scoped one-use key issuance is implemented and mock-tested but still requires live
+end-to-end verification. This decision remains provisional because that verification is incomplete
+and the process-local vault must still be replaced by a dynamic encrypted secret manager with
+reconciliation, rotation, audit, and cleanup recovery; see `docs/control-plane-network-view.md`. Production custody intent: **setec** (secrets
+service) backing the child-OAuth vault, with mutation-closed startup reconciliation against exact
+upstream stable IDs.
 
 ## D3 — Rust monorepo for the control plane
 
@@ -91,6 +93,62 @@ creator-shared join code on top of service rate limits. No persistent leaderboar
 user database; the single-process JSON store remains the only durable state. The public
 landing page shows only secret-free aggregates (riders online, lobbies by state,
 direct-connection rate, median RTT).
+
+Opaque, expiring, lobby-scoped creator/invitation/participant capabilities are compatible with
+this decision: they authorize one ephemeral lobby and do not create an account, profile, or
+recovery identity. The current join code and client-asserted player headers are migration-only;
+capability authorization is mandatory before any public real lobby.
+
+## D9 — The control plane owns but never joins lobby tailnets
+
+**Status:** accepted
+
+For dedicated lobbies, ownership means create, bind the provider stable ID and tailnet DNS
+name/FQDN, issue narrow enrollment credentials, inspect cached provider metadata and participant
+reports, reconcile, and delete. `spurfire-server`, `spurfire-control`, and the normal operator CLI
+must never run a Tailscale/RustScale node in a lobby tailnet. Joining would add private node state,
+peer-facing attack surface, cross-tailnet compromise blast radius, biased observer measurements,
+and a false gameplay-participant/witness role without producing player-to-player truth.
+
+The server must not depend on RustScale, `spurfire-net`, a gameplay listener, relay, or observer
+runtime. A future short-lived diagnostic observer requires a separate security ADR and may not be
+linked into or deployed with the main control plane. See
+[control-plane-network-view.md](control-plane-network-view.md).
+
+## D10 — Capability-protected exact-lobby network inspection
+
+**Status:** accepted (safe groundwork; real activation closed)
+
+There is no public lobby directory or anonymous real-lobby lookup. A participant or creator uses
+an opaque capability bound to one exact lobby, player where applicable, network generation,
+scope, and expiry. An operator authenticates on a private listener, may choose from minimal
+summaries, and then inspects exactly one lobby. Unauthorized and absent requests have one 404
+shape. Inspection GETs are cache-only and mutation-free.
+
+The selected view may show the complete `tailnet_dns_name`/FQDN to authorized members while the
+network is active or cleanup is pending. In `tail9a1c23.ts.net`, the TLD is `.net`; the useful
+value is the complete FQDN, not a supposed `.ts.net` TLD. FQDNs and private addresses are
+capability-gated topology metadata. Every lifecycle, enrollment, route, application RTT/loss,
+authority, freshness, and cleanup fact carries source and assurance; participant reports remain
+untrusted reports and never affect gameplay or cleanup truth.
+
+## D11 — One real lobby and fail-closed activation
+
+**Status:** accepted for alpha safety; Ottawa activation not approved
+
+One singleton lease covers every real lobby in either dedicated or shared compatibility mode.
+Public real mode, when separately approved, accepts only server-selected `tailnet_per_lobby`.
+Ambiguous create, restart, polling, cleanup, identity, or vault state holds the lease and closes
+new real mutations. Release requires definitive pre-resource create rejection, exact dedicated
+absence plus encrypted-secret erasure, or complete shared-resource cleanup.
+
+Public real activation additionally requires capability migration on every lobby route, an
+independent default-off real-mutation kill switch, a dynamic encrypted child-OAuth vault,
+mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
+gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
+alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
+separate GitOps review. Ottawa remains `dryRun=true`, `provisioningMode=dry_run`,
+`existingSecret=""`, and `persistence.enabled=false` until that review.
 
 ## Settled design questions (formerly open, 2026-07-17)
 

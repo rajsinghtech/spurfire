@@ -63,23 +63,44 @@ app.kubernetes.io/part-of: spurfire
 
 {{/* Fail early on unsafe or contradictory mode combinations. */}}
 {{- define "spurfire-control.validateValues" -}}
+{{- if .Values.config.realMutationsEnabled -}}
+{{- fail "config.realMutationsEnabled=true is activation-closed until capability authorization, encrypted dynamic child-credential recovery, startup reconciliation, and a separate activation review are complete" -}}
+{{- end -}}
+{{- if ne (int .Values.config.maxActiveRealLobbies) 1 -}}
+{{- fail "config.maxActiveRealLobbies must remain 1 during alpha" -}}
+{{- end -}}
 {{- if and .Values.config.dryRun (ne .Values.config.provisioningMode "dry_run") -}}
 {{- fail "config.dryRun=true requires config.provisioningMode=\"dry_run\"" -}}
+{{- end -}}
+{{- if and .Values.config.dryRun (not (empty .Values.tailscale.existingSecret)) -}}
+{{- fail "credential-free dry-run requires tailscale.existingSecret to be empty" -}}
 {{- end -}}
 {{- if and (not .Values.config.dryRun) (eq .Values.config.provisioningMode "dry_run") -}}
 {{- fail "config.provisioningMode=\"dry_run\" requires config.dryRun=true" -}}
 {{- end -}}
 {{- if and (not .Values.config.dryRun) (empty .Values.tailscale.existingSecret) -}}
-{{- fail "real mode requires tailscale.existingSecret" -}}
+{{- fail "non-dry-run staging requires tailscale.existingSecret" -}}
 {{- end -}}
 {{- if and (not .Values.config.dryRun) (not .Values.persistence.enabled) -}}
-{{- fail "real mode requires persistence.enabled=true" -}}
+{{- fail "non-dry-run staging requires persistence.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.httpRoute.enabled (not .Values.config.dryRun) -}}
+{{- fail "httpRoute.enabled=true is restricted to credential-free dry-run; real and operator routes require a private authenticated listener" -}}
 {{- end -}}
 {{- if and .Values.httpRoute.enabled (empty .Values.httpRoute.parentRefs) -}}
 {{- fail "httpRoute.enabled=true requires at least one parentRef" -}}
 {{- end -}}
 {{- if and .Values.httpRoute.enabled (empty .Values.httpRoute.hostnames) -}}
 {{- fail "httpRoute.enabled=true requires at least one hostname" -}}
+{{- end -}}
+{{- if lt (int .Values.networkSummary.deviceInventory.freshForSeconds) (int .Values.networkSummary.deviceInventory.refreshSeconds) -}}
+{{- fail "networkSummary.deviceInventory.freshForSeconds must be at least refreshSeconds" -}}
+{{- end -}}
+{{- if lt (int .Values.networkSummary.organizationPresence.freshForSeconds) (int .Values.networkSummary.organizationPresence.refreshSeconds) -}}
+{{- fail "networkSummary.organizationPresence.freshForSeconds must be at least refreshSeconds" -}}
+{{- end -}}
+{{- if lt (int .Values.networkSummary.participantReports.retentionSeconds) (int .Values.networkSummary.participantReports.freshForSeconds) -}}
+{{- fail "networkSummary.participantReports.retentionSeconds must be at least freshForSeconds" -}}
 {{- end -}}
 {{- range $label := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" "app.kubernetes.io/part-of" -}}
 {{- if hasKey $.Values.podLabels $label -}}

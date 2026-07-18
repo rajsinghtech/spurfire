@@ -11,13 +11,87 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::Method;
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use reqwest::{Method, Url};
+use serde::{de, de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 const REDACTED: &str = "<redacted>";
+const MAX_TAILNET_DNS_NAME_LEN: usize = 253;
+
+/// Validated provider-returned tailnet DNS name/FQDN.
+///
+/// The canonical representation is lowercase ASCII without a trailing root
+/// dot. This is topology metadata rather than a credential, but diagnostics
+/// still omit it so accidental logs do not become a lobby directory.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TailnetDnsName(String);
+
+impl TailnetDnsName {
+    /// Parses and canonicalizes a complete DNS name before it can enter a
+    /// provider path or durable identity tuple.
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        if value.is_empty() || !value.is_ascii() {
+            return Err("tailnet DNS name must be non-empty ASCII");
+        }
+        let value = value.strip_suffix('.').unwrap_or(value);
+        if value.is_empty() || value.len() > MAX_TAILNET_DNS_NAME_LEN {
+            return Err("tailnet DNS name length is invalid");
+        }
+        let mut label_count = 0_usize;
+        for label in value.split('.') {
+            label_count += 1;
+            if label.is_empty() || label.len() > 63 {
+                return Err("tailnet DNS label length is invalid");
+            }
+            let bytes = label.as_bytes();
+            if bytes.first() == Some(&b'-')
+                || bytes.last() == Some(&b'-')
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+            {
+                return Err("tailnet DNS label characters are invalid");
+            }
+        }
+        if label_count < 2 {
+            return Err("tailnet DNS name must be fully qualified");
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    /// Returns the canonical complete DNS name/FQDN.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TailnetDnsName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TailnetDnsName(<topology-metadata>)")
+    }
+}
+
+impl Serialize for TailnetDnsName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TailnetDnsName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
 
 /// How lobbies are provisioned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,8 +218,8 @@ impl fmt::Display for ChildOAuthCredentials {
 pub struct Tailnet {
     /// Stable organization tailnet ID.
     pub id: String,
-    /// DNS selector accepted by child-scoped tailnet operations.
-    pub dns_name: String,
+    /// Provider-returned, validated tailnet DNS name/FQDN.
+    pub dns_name: TailnetDnsName,
     /// Human-facing organization display name.
     pub display_name: String,
     #[serde(rename = "oauthClient")]
@@ -153,7 +227,22 @@ pub struct Tailnet {
 }
 
 impl Tailnet {
-    /// Transfers the one-time OAuth material into a child-scoped client or secret vault.
+    /// Splits the typed non-secret identity from the one-time OAuth material.
+    ///
+    /// Callers must bind the stable ID and DNS name to their durable generation
+    /// before using the child credential for any destructive operation.
+    #[must_use]
+    pub fn into_parts(self) -> (String, TailnetDnsName, String, ChildOAuthCredentials) {
+        (
+            self.id,
+            self.dns_name,
+            self.display_name,
+            self.oauth_credentials,
+        )
+    }
+
+    /// Transfers only the one-time OAuth material into a child-scoped client.
+    /// Prefer [`Self::into_parts`] when the provider identity must be retained.
     #[must_use]
     pub fn into_child_oauth_credentials(self) -> ChildOAuthCredentials {
         self.oauth_credentials
@@ -180,9 +269,9 @@ pub struct OrganizationTailnet {
     pub id: String,
     /// Human-facing organization display name.
     pub display_name: String,
-    /// DNS selector, when supplied by the listing API.
+    /// Validated DNS name/FQDN, when supplied by the listing API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_name: Option<String>,
+    pub dns_name: Option<TailnetDnsName>,
     /// Organization identifier, when supplied by the listing API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
@@ -215,10 +304,28 @@ impl Default for AuthKeyOpts {
 }
 
 /// A minted auth key. `key` is a secret — never log it.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthKey {
     pub id: String,
     pub key: String,
+}
+
+impl Serialize for AuthKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct RedactedAuthKey<'a> {
+            id: &'a str,
+            key: &'static str,
+        }
+        RedactedAuthKey {
+            id: &self.id,
+            key: REDACTED,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl fmt::Debug for AuthKey {
@@ -254,6 +361,8 @@ pub enum ControlError {
     InvalidTailnetName(&'static str),
     #[error("tailnet operation requires child-scoped OAuth credentials: {0}")]
     ProvisioningUnavailable(String),
+    #[error("provider URL or path could not be constructed safely")]
+    InvalidProviderPath,
     #[error("Tailscale transport failed; details redacted")]
     Reqwest(#[source] reqwest::Error),
     #[error("Tailscale JSON response was invalid; details redacted")]
@@ -288,6 +397,7 @@ impl fmt::Debug for ControlError {
             Self::ProvisioningUnavailable(_) => {
                 formatter.write_str("ProvisioningUnavailable(<redacted>)")
             }
+            Self::InvalidProviderPath => formatter.write_str("InvalidProviderPath"),
             Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
         }
@@ -362,10 +472,41 @@ impl OAuthSession {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<reqwest::Response, ControlError> {
+        let url = Url::parse(&format!("{}{}", self.api_base, path))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+        self.send_url(method, url, body).await
+    }
+
+    async fn send_segments(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, ControlError> {
+        let mut url = Url::parse(&format!("{}/", self.api_base))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|_| ControlError::InvalidProviderPath)?;
+            path.pop_if_empty();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        self.send_url(method, url, body).await
+    }
+
+    async fn send_url(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, ControlError> {
         let token = self.access_token().await?;
         let mut request = self
             .http
-            .request(method, format!("{}{}", self.api_base, path))
+            .request(method, url)
             .bearer_auth(token.expose_secret());
         if let Some(body) = body {
             request = request.json(body);
@@ -400,8 +541,14 @@ impl OAuthSession {
         Ok(())
     }
 
-    async fn probe_get(&self, path: &str) -> Result<(), ControlError> {
-        self.send(Method::GET, path, None).await?;
+    async fn probe_tailnet_resource(
+        &self,
+        tailnet: &str,
+        resource: &str,
+    ) -> Result<(), ControlError> {
+        validate_tailnet_selector(tailnet)?;
+        self.send_segments(Method::GET, &["tailnet", tailnet, resource], None)
+            .await?;
         Ok(())
     }
 
@@ -410,7 +557,7 @@ impl OAuthSession {
         tailnet: &str,
         opts: &AuthKeyOpts,
     ) -> Result<AuthKey, ControlError> {
-        let path = format!("/tailnet/{tailnet}/keys");
+        validate_tailnet_selector(tailnet)?;
         let body = serde_json::json!({
             "capabilities": {
                 "devices": {
@@ -424,7 +571,9 @@ impl OAuthSession {
             },
             "expirySeconds": opts.ttl_secs,
         });
-        let response = self.send(Method::POST, &path, Some(&body)).await?;
+        let response = self
+            .send_segments(Method::POST, &["tailnet", tailnet, "keys"], Some(&body))
+            .await?;
         Self::decode(response).await
     }
 
@@ -433,8 +582,13 @@ impl OAuthSession {
         tailnet: &str,
         credential_id: &str,
     ) -> Result<(), ControlError> {
-        let path = format!("/tailnet/{tailnet}/keys/{credential_id}");
-        self.send(Method::DELETE, &path, None).await?;
+        validate_tailnet_selector(tailnet)?;
+        self.send_segments(
+            Method::DELETE,
+            &["tailnet", tailnet, "keys", credential_id],
+            None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -446,22 +600,28 @@ impl OAuthSession {
             Bare(Vec<Device>),
         }
 
-        let path = format!("/tailnet/{tailnet}/devices");
-        let response = self.send(Method::GET, &path, None).await?;
+        validate_tailnet_selector(tailnet)?;
+        let response = self
+            .send_segments(Method::GET, &["tailnet", tailnet, "devices"], None)
+            .await?;
         match Self::decode(response).await? {
             DevicesResponse::Wrapped { devices } | DevicesResponse::Bare(devices) => Ok(devices),
         }
     }
 
     async fn delete_device(&self, device_id: &str) -> Result<(), ControlError> {
-        let path = format!("/device/{device_id}");
-        self.send(Method::DELETE, &path, None).await?;
+        self.send_segments(Method::DELETE, &["device", device_id], None)
+            .await?;
         Ok(())
     }
 
     async fn delete_tailnet(&self, dns_name: &str) -> Result<(), ControlError> {
-        let path = format!("/tailnet/{dns_name}");
-        match self.send(Method::DELETE, &path, None).await {
+        let dns_name = TailnetDnsName::parse(dns_name)
+            .map_err(|_| ControlError::InvalidTailnetName("invalid tailnet DNS name/FQDN"))?;
+        match self
+            .send_segments(Method::DELETE, &["tailnet", dns_name.as_str()], None)
+            .await
+        {
             Ok(_) | Err(ControlError::Http { status: 404 }) => Ok(()),
             Err(error) => Err(error),
         }
@@ -585,22 +745,18 @@ impl TailscaleClient {
     /// Probe token/settings access without mutating the shared tailnet.
     pub async fn probe_settings(&self, tailnet: &str) -> Result<(), ControlError> {
         self.session
-            .probe_get(&format!("/tailnet/{tailnet}/settings"))
+            .probe_tailnet_resource(tailnet, "settings")
             .await
     }
 
     /// Probe shared auth-key scope using the non-mutating key-list endpoint.
     pub async fn probe_auth_keys(&self, tailnet: &str) -> Result<(), ControlError> {
-        self.session
-            .probe_get(&format!("/tailnet/{tailnet}/keys"))
-            .await
+        self.session.probe_tailnet_resource(tailnet, "keys").await
     }
 
     /// Probe shared ACL scope using the non-mutating policy-read endpoint.
     pub async fn probe_acl(&self, tailnet: &str) -> Result<(), ControlError> {
-        self.session
-            .probe_get(&format!("/tailnet/{tailnet}/acl"))
-            .await
+        self.session.probe_tailnet_resource(tailnet, "acl").await
     }
 
     /// List devices currently joined to the shared tailnet.
@@ -668,6 +824,23 @@ impl ChildTailscaleClient {
 impl fmt::Debug for ChildTailscaleClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ChildTailscaleClient(<redacted>)")
+    }
+}
+
+fn validate_tailnet_selector(tailnet: &str) -> Result<(), ControlError> {
+    let safe_compatibility_label = !tailnet.is_empty()
+        && tailnet.len() <= 63
+        && !tailnet.starts_with('-')
+        && !tailnet.ends_with('-')
+        && tailnet
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if tailnet == "-" || safe_compatibility_label || TailnetDnsName::parse(tailnet).is_ok() {
+        Ok(())
+    } else {
+        Err(ControlError::InvalidTailnetName(
+            "invalid safe tailnet selector",
+        ))
     }
 }
 
@@ -832,7 +1005,7 @@ mod tests {
         let serialized = serde_json::to_string(&tailnet).unwrap();
 
         assert_eq!(tailnet.id, "TtStableCNTRL");
-        assert_eq!(tailnet.dns_name, "tail-test.ts.net");
+        assert_eq!(tailnet.dns_name.as_str(), "tail-test.ts.net");
         for output in [&debug, &serialized] {
             assert!(!output.contains(CHILD_ID));
             assert!(!output.contains(CHILD_SECRET));
@@ -907,6 +1080,9 @@ mod tests {
 
         assert_eq!(result.id, "key-id");
         assert!(!format!("{result:?}").contains("synthetic-auth-key-secret"));
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("synthetic-auth-key-secret"));
+        assert!(serialized.contains(REDACTED));
         token.assert_async().await;
         key.assert_async().await;
     }
@@ -985,6 +1161,70 @@ mod tests {
         assert!(!error.to_string().contains(CANARY));
         assert!(!format!("{error:?}").contains(CANARY));
         assert!(error.to_string().contains("discarded"));
+    }
+
+    #[tokio::test]
+    async fn rejects_tailnet_path_injection_before_oauth_or_provider_io() {
+        let mut server = Server::new_async().await;
+        let no_requests = server
+            .mock("POST", Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(server.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+
+        for malicious in [
+            "tail.ts.net/../other",
+            "tail.ts.net?target=other",
+            "tail.ts.net#fragment",
+            "tail%2fother.ts.net",
+            "user@tail.ts.net",
+            "tail.ts.net:443",
+            "tail\nts.net",
+        ] {
+            assert!(matches!(
+                child.delete_tailnet(malicious).await,
+                Err(ControlError::InvalidTailnetName(_))
+            ));
+            assert!(matches!(
+                parent
+                    .create_auth_key(malicious, &AuthKeyOpts::default())
+                    .await,
+                Err(ControlError::InvalidTailnetName(_))
+            ));
+        }
+        no_requests.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_untyped_provider_fqdn_in_create_response() {
+        let mut server = Server::new_async().await;
+        let token = token_mock(&mut server, 3600, 1).await;
+        let create = server
+            .mock("POST", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "id":"TtStableCNTRL",
+                    "dnsName":"tail.ts.net/../other",
+                    "displayName":"spurfire-probe-test",
+                    "oauthClient":{"id":"child-id","secret":"child-secret"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(server.url(), "client", "secret");
+
+        assert!(matches!(
+            client.create_tailnet("spurfire-probe-test").await,
+            Err(ControlError::Json(_))
+        ));
+        token.assert_async().await;
+        create.assert_async().await;
     }
 
     #[test]

@@ -4,29 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Spurfire is a peer-hosted horseback shooter with temporary private lobbies, live route telemetry, and deterministic host migration.">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="Spurfire is a peer-hosted horseback shooter with temporary private lobbies, selected-lobby network inspection, and deterministic host migration.">
   <title>Spurfire — High noon. Low ping.</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20128%20128'%3E%3Crect%20x='4'%20y='4'%20width='120'%20height='120'%20rx='28'%20fill='%231b222d'/%3E%3Cpolygon%20points='64,18%2074.33,39.05%2096.53,31.47%2088.95,53.67%20110,64%2088.95,74.33%2096.53,96.53%2074.33,88.95%2064,110%2053.67,88.95%2031.47,96.53%2039.05,74.33%2018,64%2039.05,53.67%2031.47,31.47%2053.67,39.05'%20fill='%23f2c879'/%3E%3Ccircle%20cx='64'%20cy='64'%20r='19'%20fill='%23f07a3f'/%3E%3Ccircle%20cx='64'%20cy='64'%20r='9'%20fill='%231b222d'/%3E%3C/svg%3E">
   <style>
-    :root{--ink:#11151b;--panel:#222936;--panel2:#1b222d;--sand:#f2c879;--fire:#f07a3f;--sky:#62c9e7;--green:#67d391;--muted:#aab5c4;--line:#3a4556;--white:#f7f3e8}
-    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 72% -8%,#3b506d 0,#1b2029 43%,#10141a 100%);color:var(--white);font-family:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;min-height:100vh}
-    a{color:var(--sky)}main,.nav{width:min(1080px,calc(100% - 32px));margin:auto}.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0}.brand{display:flex;align-items:center;gap:10px;color:var(--white);font-weight:1000;letter-spacing:.12em;text-decoration:none}.brand svg{display:block}.navlinks{display:flex;gap:20px}.navlinks a{color:var(--muted);font-size:14px;font-weight:800;text-decoration:none}.navlinks a:hover{color:var(--white)}
-    main{padding:42px 0 56px}.hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:30px;align-items:center}.eyebrow{color:var(--sky);font-weight:900;letter-spacing:.18em;font-size:13px}.hero h1{font-size:clamp(58px,10vw,112px);line-height:.82;margin:16px 0 24px;letter-spacing:-.07em;text-transform:uppercase}.accent{color:var(--sand);text-shadow:5px 5px 0 #8b4c32}.lead{font-size:clamp(19px,2.6vw,28px);line-height:1.4;color:#d7dce5;max-width:760px;margin:0}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:32px 0 20px}.button{display:inline-flex;align-items:center;justify-content:center;padding:14px 20px;border:2px solid var(--sand);border-radius:10px;color:var(--ink);background:var(--sand);font-weight:900;text-decoration:none;box-shadow:0 5px 0 #8d6334;transition:.12s}.button:hover{transform:translateY(-2px);box-shadow:0 7px 0 #8d6334}.button.secondary{color:#edf5ff;background:transparent;border-color:#687993;box-shadow:none}
-    .statusbox{background:linear-gradient(150deg,#293444,#1b222d);border:1px solid #526177;border-radius:18px;padding:24px;box-shadow:0 20px 60px #0007;transform:rotate(1deg)}.statushead{display:flex;align-items:center;justify-content:space-between;gap:10px}.status{display:flex;align-items:center;gap:9px;font-weight:900}.dot{width:11px;height:11px;border-radius:50%;background:#d9a441;box-shadow:0 0 14px currentColor}.dot.ok{background:var(--green)}.mode{border:1px solid #a47c38;background:#493a22;color:#f8d995;border-radius:999px;padding:6px 9px;font-size:11px;font-weight:1000;letter-spacing:.08em}.mode.live{border-color:#398d68;background:#173d30;color:#89e6ba}.statusdetail{color:var(--muted);line-height:1.5;margin:14px 0 20px}.fact{display:flex;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding:12px 0;color:var(--muted);font-size:14px}.fact strong{color:var(--white);text-align:right}
-    section.block{margin-top:72px}.sectionhead{display:grid;grid-template-columns:.8fr 1.2fr;gap:26px;align-items:end;margin-bottom:24px}.kicker{color:var(--fire);font-size:12px;font-weight:1000;letter-spacing:.16em;text-transform:uppercase}.sectionhead h2{font-size:clamp(32px,5vw,52px);line-height:1;margin:8px 0 0;letter-spacing:-.04em}.sectionhead p{color:var(--muted);font-size:18px;line-height:1.55;margin:0}
-    .steps{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.step,.card{background:#222936e8;border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 12px 35px #0004}.number{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:#3a2c23;color:var(--sand);font-weight:1000}.step h3,.card h3{margin:16px 0 8px;color:var(--sand);font-size:17px}.step p,.card p{color:var(--muted);line-height:1.5;margin:0;font-size:14px}
-    .callout{margin-top:16px;border:1px solid #806533;background:linear-gradient(100deg,#372c1c,#24252a);border-radius:14px;padding:18px 20px;display:flex;gap:14px;align-items:flex-start}.callout strong{color:var(--sand);display:block;margin-bottom:4px}.callout p{margin:0;color:#c9c3b7;line-height:1.5}.marker{font-size:21px}
-    .twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card h3{font-size:21px;margin-top:0}.list{list-style:none;padding:0;margin:14px 0 0}.list li{position:relative;color:var(--muted);padding:9px 0 9px 25px;border-top:1px solid #343f4f;line-height:1.4}.list li::before{position:absolute;left:2px;color:var(--green);content:"✓";font-weight:1000}.list.never li::before{content:"—";color:var(--fire)}
-    .telemetry{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:18px}.metric b{display:block;color:var(--sky);font-size:18px;margin-bottom:6px}.metric span{color:var(--muted);font-size:13px;line-height:1.4}.codebar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:22px;padding:16px 18px;background:#0d1117;border:1px solid var(--line);border-radius:12px}.codebar code{color:#d8e7f4;overflow-wrap:anywhere}.downloads{color:var(--muted);font-size:14px;margin-top:15px}.downloads a{margin-right:14px}
+    :root{--ink:#11151b;--panel:#222936;--panel2:#1b222d;--sand:#f2c879;--fire:#f07a3f;--sky:#62c9e7;--green:#67d391;--red:#ff8b79;--amber:#e6bd67;--muted:#aab5c4;--line:#3a4556;--white:#f7f3e8}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 72% -8%,#3b506d 0,#1b2029 43%,#10141a 100%);color:var(--white);font-family:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;min-height:100vh}button,input{font:inherit}[hidden]{display:none!important}
+    a{color:var(--sky)}main,.nav{width:min(1080px,calc(100% - 32px));margin:auto}.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0}.brand{display:flex;align-items:center;gap:10px;color:var(--white);font-weight:1000;letter-spacing:.12em;text-decoration:none}.brand svg{display:block}.navlinks{display:flex;gap:20px;flex-wrap:wrap;justify-content:flex-end}.navlinks a{color:var(--muted);font-size:14px;font-weight:800;text-decoration:none}.navlinks a:hover{color:var(--white)}
+    main{padding:42px 0 56px}.hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:30px;align-items:center}.eyebrow{color:var(--sky);font-weight:900;letter-spacing:.18em;font-size:13px}.hero h1{font-size:clamp(58px,10vw,112px);line-height:.82;margin:16px 0 24px;letter-spacing:-.07em;text-transform:uppercase}.accent{color:var(--sand);text-shadow:5px 5px 0 #8b4c32}.lead{font-size:clamp(19px,2.6vw,28px);line-height:1.4;color:#d7dce5;max-width:760px;margin:0}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:32px 0 20px}.button{display:inline-flex;align-items:center;justify-content:center;padding:14px 20px;border:2px solid var(--sand);border-radius:10px;color:var(--ink);background:var(--sand);font-weight:900;text-decoration:none;box-shadow:0 5px 0 #8d6334;transition:.12s;cursor:pointer}.button:hover{transform:translateY(-2px);box-shadow:0 7px 0 #8d6334}.button.secondary{color:#edf5ff;background:transparent;border-color:#687993;box-shadow:none}.button.compact{padding:9px 13px;font-size:13px;box-shadow:none}.button:disabled{cursor:not-allowed;opacity:.55;transform:none}
+    :focus-visible{outline:3px solid var(--sky);outline-offset:3px}.statusbox{background:linear-gradient(150deg,#293444,#1b222d);border:1px solid #526177;border-radius:18px;padding:24px;box-shadow:0 20px 60px #0007;transform:rotate(1deg)}.statushead{display:flex;align-items:center;justify-content:space-between;gap:10px}.status{display:flex;align-items:center;gap:9px;font-weight:900}.dot{width:11px;height:11px;border-radius:50%;background:#d9a441;box-shadow:0 0 14px currentColor}.dot.ok{background:var(--green)}.mode{border:1px solid #a47c38;background:#493a22;color:#f8d995;border-radius:999px;padding:6px 9px;font-size:11px;font-weight:1000;letter-spacing:.08em}.mode.live{border-color:#398d68;background:#173d30;color:#89e6ba}.statusdetail{color:var(--muted);line-height:1.5;margin:14px 0 20px}.fact{display:flex;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding:12px 0;color:var(--muted);font-size:14px}.fact strong{color:var(--white);text-align:right}
+    section.block{margin-top:72px;scroll-margin-top:24px}.sectionhead{display:grid;grid-template-columns:.8fr 1.2fr;gap:26px;align-items:end;margin-bottom:24px}.kicker{color:var(--fire);font-size:12px;font-weight:1000;letter-spacing:.16em;text-transform:uppercase}.sectionhead h2{font-size:clamp(32px,5vw,52px);line-height:1;margin:8px 0 0;letter-spacing:-.04em}.sectionhead p{color:var(--muted);font-size:18px;line-height:1.55;margin:0}
+    .steps{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.step,.card{background:#222936e8;border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 12px 35px #0004}.number{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;background:#3a2c23;color:var(--sand);font-weight:1000}.step h3,.card h3{margin:16px 0 8px;color:var(--sand);font-size:17px}.step p,.card p{color:var(--muted);line-height:1.5;margin:0;font-size:14px}.callout{margin-top:16px;border:1px solid #806533;background:linear-gradient(100deg,#372c1c,#24252a);border-radius:14px;padding:18px 20px;display:flex;gap:14px;align-items:flex-start}.callout strong{color:var(--sand);display:block;margin-bottom:4px}.callout p{margin:0;color:#c9c3b7;line-height:1.5}.marker{font-size:21px}
+    .twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card h3{font-size:21px;margin-top:0}.list{list-style:none;padding:0;margin:14px 0 0}.list li{position:relative;color:var(--muted);padding:9px 0 9px 25px;border-top:1px solid #343f4f;line-height:1.4}.list li::before{position:absolute;left:2px;color:var(--green);content:"✓";font-weight:1000}.list.never li::before{content:"—";color:var(--fire)}.telemetry{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:18px}.metric b{display:block;color:var(--sky);font-size:18px;margin-bottom:6px}.metric span{color:var(--muted);font-size:13px;line-height:1.4}.codebar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:22px;padding:16px 18px;background:#0d1117;border:1px solid var(--line);border-radius:12px}.codebar code{color:#d8e7f4;overflow-wrap:anywhere}.downloads{color:var(--muted);font-size:14px;margin-top:15px}.downloads a{margin-right:14px}
+    .inspector{background:linear-gradient(145deg,#252d3a,#171d26);border:1px solid #526177;border-radius:18px;padding:clamp(18px,4vw,32px);box-shadow:0 18px 55px #0006}.inspect-intro{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:24px}.inspect-intro h3{font-size:25px;margin:0 0 8px;color:var(--sand)}.inspect-intro p{color:var(--muted);line-height:1.55;margin:0;max-width:720px}.privacy-chip{flex:none;border:1px solid #356a78;background:#17333d;color:#aeeaff;padding:7px 10px;border-radius:999px;font-size:12px;font-weight:900}.inspect-form{border:0;padding:0;margin:0}.inspect-form legend{font-weight:900;margin-bottom:14px}.formgrid{display:grid;grid-template-columns:1fr 1fr auto;gap:14px;align-items:end}.field{display:grid;gap:7px}.field label{font-size:13px;font-weight:900;color:#dbe6f5}.field input{width:100%;min-height:46px;background:#0e141c;color:var(--white);border:1px solid #56667d;border-radius:9px;padding:10px 12px}.field input::placeholder{color:#718096}.field-help{color:#8f9eb2;font-size:12px;line-height:1.45;margin:11px 0 0}.inspect-message{min-height:24px;margin:18px 0 0;color:#bcd0e6;font-weight:800}.inspect-message.error{color:var(--red)}
+    .network-result{margin-top:20px;border-top:1px solid var(--line);padding-top:22px}.resulthead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.resulthead h3{margin:0 0 7px;font-size:25px}.resultsub{color:var(--muted);margin:0;overflow-wrap:anywhere}.truth{display:inline-flex;margin-top:9px;border:1px solid #526177;border-radius:999px;padding:7px 10px;color:#d7e3f2;background:#242c38;font-size:12px;font-weight:1000;letter-spacing:.05em}.truth.simulated{border-color:#9b783c;background:#44351f;color:#ffe0a0}.truth.dedicated{border-color:#3d936c;background:#183e30;color:#8ce9ba}.truth.shared{border-color:#9a6546;background:#432a20;color:#ffc29f}.resultactions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.inspect-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.inspect-card{background:#161c25;border:1px solid var(--line);border-radius:13px;padding:17px;min-width:0}.inspect-card.wide{grid-column:1/-1}.inspect-card h4{margin:0 0 12px;color:var(--sky);font-size:17px}.inspect-card-note{color:#8f9eb2;font-size:12px;line-height:1.45;margin:-5px 0 12px}.fact-list{display:grid;gap:10px;margin:0}.fact-item{background:#1e2632;border:1px solid #344052;border-radius:9px;padding:11px;min-width:0}.fact-item.stale{border-color:#9b783c;background:#30291e}.fact-item dt{font-size:12px;font-weight:900;color:#a9b9cc;margin:0 0 5px}.fact-item dd{margin:0}.fact-value{color:var(--white);font-weight:850;line-height:1.4;overflow-wrap:anywhere}.fact-meta{color:#8998ab;font-size:11px;line-height:1.45;margin-top:5px;overflow-wrap:anywhere}.fact-item.stale .fact-value::before{content:"STALE · ";color:var(--amber)}.result-footnote{margin:16px 0 0;padding:13px 15px;border-left:3px solid var(--sky);background:#17222d;color:#aebdce;font-size:13px;line-height:1.55}
     footer{margin-top:72px;padding-top:22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:18px;color:#7f8b9d;font-size:13px}.footerlinks{display:flex;gap:16px}.footerlinks a{color:#879ebd}
-    @media(max-width:900px){.hero,.sectionhead{grid-template-columns:1fr}.statusbox{transform:none}.steps{grid-template-columns:repeat(2,1fr)}.step:last-child{grid-column:span 2}.telemetry{grid-template-columns:repeat(2,1fr)}}
-    @media(max-width:620px){main{padding-top:26px}.navlinks{display:none}.hero h1{font-size:64px}.steps,.twocol,.telemetry{grid-template-columns:1fr}.step:last-child{grid-column:auto}.codebar,footer{align-items:flex-start;flex-direction:column}.statushead{align-items:flex-start;flex-direction:column}.sectionhead p{font-size:16px}}
+    @media(max-width:900px){.hero,.sectionhead{grid-template-columns:1fr}.statusbox{transform:none}.steps{grid-template-columns:repeat(2,1fr)}.step:last-child{grid-column:span 2}.telemetry{grid-template-columns:repeat(2,1fr)}.formgrid{grid-template-columns:1fr 1fr}.formgrid .button{grid-column:1/-1}.inspect-grid{grid-template-columns:1fr}.inspect-card.wide{grid-column:auto}}
+    @media(max-width:620px){main{padding-top:26px}.navlinks{display:none}.hero h1{font-size:64px}.steps,.twocol,.telemetry,.formgrid{grid-template-columns:1fr}.step:last-child,.formgrid .button{grid-column:auto}.codebar,footer,.inspect-intro,.resulthead{align-items:flex-start;flex-direction:column}.statushead{align-items:flex-start;flex-direction:column}.sectionhead p{font-size:16px}.privacy-chip{white-space:normal}.resultactions{justify-content:flex-start}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.button{transition:none}.button:hover{transform:none}}
   </style>
 </head>
 <body>
   <nav class="nav" aria-label="Main navigation">
     <a class="brand" href="/"><svg width="28" height="28" viewBox="0 0 128 128" aria-hidden="true"><rect x="5" y="5" width="118" height="118" rx="26" fill="#1b222d" stroke="#3a4556" stroke-width="2"/><polygon points="64,18 74.33,39.05 96.53,31.47 88.95,53.67 110,64 88.95,74.33 96.53,96.53 74.33,88.95 64,110 53.67,88.95 31.47,96.53 39.05,74.33 18,64 39.05,53.67 31.47,31.47 53.67,39.05" transform="translate(5,5)" fill="#8b4c32"/><polygon points="64,18 74.33,39.05 96.53,31.47 88.95,53.67 110,64 88.95,74.33 96.53,96.53 74.33,88.95 64,110 53.67,88.95 31.47,96.53 39.05,74.33 18,64 39.05,53.67 31.47,31.47 53.67,39.05" fill="#f2c879"/><circle cx="64" cy="64" r="19" fill="#f07a3f"/><circle cx="64" cy="64" r="9" fill="#1b222d"/></svg>SPURFIRE</a>
-    <div class="navlinks"><a href="#lobby">The lobby</a><a href="#network">Network</a><a href="#privacy">Your data</a><a href="#download">Download</a></div>
+    <div class="navlinks"><a href="#lobby">The lobby</a><a href="#inspect">Inspect one lobby</a><a href="#network">Network</a><a href="#privacy">Your data</a><a href="#download">Download</a></div>
   </nav>
   <main>
     <section class="hero">
@@ -36,7 +38,7 @@
         <p class="lead">High noon. Low ping. Form a temporary posse, ride over the best available peer route, and keep playing when the host drops.</p>
         <div class="actions">
           <a class="button" href="https://github.com/rajsinghtech/spurfire/releases/latest">Download latest build</a>
-          <a class="button secondary" href="#lobby">How lobbies work</a>
+          <a class="button secondary" href="#inspect">Inspect one lobby</a>
           <a class="button secondary" href="https://github.com/rajsinghtech/spurfire">View source</a>
         </div>
         <div class="downloads">Direct: <a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-macos-universal.zip">macOS</a><a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-windows-x86_64.zip">Windows</a><a href="https://github.com/rajsinghtech/spurfire/releases/latest/download/Spurfire-linux-x86_64.tar.gz">Linux</a></div>
@@ -45,7 +47,8 @@
         <div class="statushead"><div class="status"><span id="dot" class="dot"></span><span id="status">Checking Ottawa…</span></div><span id="mode" class="mode">CHECKING</span></div>
         <p id="status-detail" class="statusdetail">Reading the public control-plane capability report.</p>
         <div class="fact"><span>Gameplay path</span><strong>Peer to peer</strong></div>
-        <div class="fact"><span>Lobby network</span><strong>Temporary tailnet</strong></div>
+        <div class="fact"><span>Real isolation path</span><strong>Dedicated lobby tailnet</strong></div>
+        <div class="fact"><span>Control membership</span><strong>Never joins the tailnet</strong></div>
         <div class="fact"><span>Authority</span><strong>Deterministic migration</strong></div>
         <div class="fact"><span>Source version</span><strong>Release candidate v0.2.0</strong></div>
       </aside>
@@ -54,46 +57,101 @@
     <section id="lobby" class="block">
       <div class="sectionhead">
         <div><div class="kicker">Inside a lobby</div><h2>A temporary posse, not a game server.</h2></div>
-        <p>The control plane introduces the riders and coordinates lifecycle. Once connected, movement, shots, probes, and snapshots travel between players instead of bouncing through Ottawa.</p>
+        <p>The control plane creates, credentials, inspects, reconciles, and deletes the network boundary. It does not join that network. Once connected, gameplay travels between riders instead of bouncing through Ottawa.</p>
       </div>
       <div class="steps">
-        <article class="step"><span class="number">1</span><h3>Create</h3><p>A lobby record fixes capacity and expiry, then prepares an isolated network boundary.</p></article>
+        <article class="step"><span class="number">1</span><h3>Create</h3><p>A lobby record fixes capacity and expiry. Real isolation uses one provider tailnet dedicated to that lobby.</p></article>
         <article class="step"><span class="number">2</span><h3>Join once</h3><p>Each rider gets one short-lived, non-reusable enrollment credential. Organization credentials stay server-side.</p></article>
-        <article class="step"><span class="number">3</span><h3>Connect</h3><p>RustScale gives every peer a private endpoint and chooses direct UDP, peer relay, or DERP.</p></article>
-        <article class="step"><span class="number">4</span><h3>Elect</h3><p>Fresh route, latency, loss, and device measurements produce the same authority winner on every peer.</p></article>
-        <article class="step"><span class="number">5</span><h3>Ride &amp; retire</h3><p>Authority migrates after host loss. Match end deletes the dedicated lobby network and ephemeral nodes.</p></article>
+        <article class="step"><span class="number">3</span><h3>Connect</h3><p>RustScale gives every peer a private endpoint and chooses direct UDP, Peer Relay, or DERP Relay.</p></article>
+        <article class="step"><span class="number">4</span><h3>Elect</h3><p>Fresh route, latency, loss, and device inputs produce a deterministic authority reference.</p></article>
+        <article class="step"><span class="number">5</span><h3>Ride &amp; retire</h3><p>Authority can migrate after host loss. Cleanup is complete only after exact network absence is verified.</p></article>
       </div>
-      <div class="callout"><span class="marker">⚑</span><div><strong>Public preview: zero Tailscale mutations</strong><p>Ottawa currently demonstrates the lobby API in dry-run mode. Public Create/Join UI and real provisioning stay disabled until identity, abuse controls, and encrypted cleanup recovery are deployed.</p></div></div>
+      <div class="callout"><span class="marker" aria-hidden="true">⚑</span><div><strong>Public preview: zero Tailscale mutations</strong><p>Ottawa remains forced dry-run. It simulates dedicated tailnet-per-lobby lifecycle but creates no tailnet and never invents a tailnet DNS name.</p></div></div>
+    </section>
+
+    <section id="inspect" class="block">
+      <div class="sectionhead">
+        <div><div class="kicker">Exact-lobby access</div><h2>Inspect one backing network.</h2></div>
+        <p>Enter one exact lobby ID and a separate member or creator capability. There is no public lobby directory, search, or existence oracle. A lobby ID by itself grants nothing.</p>
+      </div>
+      <div class="inspector">
+        <div class="inspect-intro">
+          <div><h3>Selected-lobby network inspector</h3><p>The capability is kept only in this page's memory, sent in the Authorization header, and cleared from the input immediately. It is never placed in a URL or browser storage.</p></div>
+          <span class="privacy-chip">Manual refresh · cached facts only</span>
+        </div>
+        <form id="inspect-form" novalidate autocomplete="off">
+          <fieldset class="inspect-form">
+            <legend>Select exactly one authorized lobby</legend>
+            <div class="formgrid">
+              <div class="field">
+                <label for="inspect-lobby-id">Lobby ID</label>
+                <input id="inspect-lobby-id" name="lobby_id" type="text" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="36" placeholder="123e4567-e89b-42d3-a456-426614174000" aria-describedby="inspect-help" required>
+              </div>
+              <div class="field">
+                <label for="inspect-capability">Lobby capability</label>
+                <input id="inspect-capability" name="capability" type="password" autocapitalize="none" autocomplete="off" spellcheck="false" minlength="43" maxlength="1024" placeholder="Paste capability" aria-describedby="inspect-help" required>
+              </div>
+              <button id="inspect-submit" class="button" type="submit">Inspect lobby</button>
+            </div>
+            <p id="inspect-help" class="field-help">Use a capability delivered out of band. Do not paste an auth key, OAuth credential, node key, or bearer token. Inspection performs a cached read and cannot trigger provider work or cleanup.</p>
+          </fieldset>
+        </form>
+        <p id="inspect-message" class="inspect-message" role="status" aria-live="polite">No lobby selected.</p>
+
+        <article id="network-result" class="network-result" aria-labelledby="network-result-title" hidden>
+          <div class="resulthead">
+            <div>
+              <h3 id="network-result-title" tabindex="-1">Selected lobby network</h3>
+              <p id="network-result-subtitle" class="resultsub"></p>
+              <span id="network-truth" class="truth"></span>
+            </div>
+            <div class="resultactions">
+              <button id="inspect-refresh" class="button secondary compact" type="button">Refresh cached view</button>
+              <button id="inspect-forget" class="button secondary compact" type="button">Forget capability</button>
+            </div>
+          </div>
+
+          <div class="inspect-grid">
+            <section class="inspect-card" aria-labelledby="backing-title"><h4 id="backing-title">Backing &amp; lifecycle</h4><p class="inspect-card-note">The useful topology value is the complete tailnet DNS name/FQDN. In <code>tail….ts.net</code>, only <code>.net</code> is the TLD.</p><dl id="backing-facts" class="fact-list"></dl></section>
+            <section class="inspect-card" aria-labelledby="peer-title"><h4 id="peer-title">Peers &amp; freshness</h4><p class="inspect-card-note">Roster, provider enrollment, online metadata, and fresh reporters are deliberately separate counts.</p><dl id="peer-facts" class="fact-list"></dl></section>
+            <section class="inspect-card" aria-labelledby="route-title"><h4 id="route-title">Directional routes</h4><p class="inspect-card-note">Rows are directional. Peer Relay and DERP Relay are distinct, and no reverse path is inferred.</p><dl id="route-facts" class="fact-list"></dl></section>
+            <section class="inspect-card" aria-labelledby="quality-title"><h4 id="quality-title">Application quality</h4><p class="inspect-card-note">RTT means application nonce/reply RTT only. Unknown measurements stay unknown, never zero.</p><dl id="quality-facts" class="fact-list"></dl></section>
+            <section class="inspect-card wide" aria-labelledby="authority-title"><h4 id="authority-title">Authority</h4><p class="inspect-card-note">Formula output, accepted heartbeat receipt, and peer-reported match authority are separate facts. Reports are not ranked proof.</p><dl id="authority-facts" class="fact-list"></dl></section>
+            <section class="inspect-card wide" aria-labelledby="cleanup-title"><h4 id="cleanup-title">Cleanup</h4><p class="inspect-card-note">Destroyed lobby state or a delete acknowledgement alone does not prove a dedicated tailnet is absent.</p><dl id="cleanup-facts" class="fact-list"></dl></section>
+          </div>
+          <p class="result-footnote">No packet capture is used. Provider observations are coarse metadata; current legacy measurements are client-asserted, untrusted claims (participant-report authorization is not implemented); and the control service is not a tailnet member, gameplay peer, relay, witness, or gameplay server.</p>
+        </article>
+      </div>
     </section>
 
     <section id="network" class="block">
       <div class="sectionhead">
-        <div><div class="kicker">Connection truth</div><h2>See how every rider is reached.</h2></div>
-        <p>Hold Tab during a managed P2P session to inspect the private endpoint, active route, application RTT, health, and authority role for each peer.</p>
+        <div><div class="kicker">Connection truth</div><h2>Know how riders are reached.</h2></div>
+        <p>A participant report can describe each directional gameplay route and application quality. It cannot turn a hostname, tailnet membership, or a device count into trusted player identity.</p>
       </div>
       <div class="telemetry">
-        <div class="metric"><b>100.x endpoint</b><span>The private tailnet address and gameplay UDP port—not a public NAT address.</span></div>
-        <div class="metric"><b>DIRECT / RELAY</b><span>Whether traffic is end-to-end, peer-relayed, or carried by a DERP region.</span></div>
-        <div class="metric"><b>RTT + health</b><span>Application probes distinguish a responsive rider from a stale roster row.</span></div>
-        <div class="metric"><b>HOST + epoch</b><span>The current simulation authority and migration generation are explicit.</span></div>
+        <div class="metric"><b>DIRECT</b><span>End-to-end peer traffic without inferring that the reverse direction uses the same route.</span></div>
+        <div class="metric"><b>PEER RELAY</b><span>A RustScale peer-relayed path, labeled precisely rather than as generic relay.</span></div>
+        <div class="metric"><b>DERP RELAY</b><span>A provider relay path, distinct from Peer Relay and not a substitute for application RTT.</span></div>
+        <div class="metric"><b>UNKNOWN / STALE</b><span>A missing or aged observation remains explicit instead of becoming false offline or zero.</span></div>
       </div>
     </section>
 
     <section id="privacy" class="block">
       <div class="sectionhead">
         <div><div class="kicker">Lobby metadata</div><h2>What the lobby knows—and what it does not.</h2></div>
-        <p>The prototype uses pseudonymous, client-generated IDs. It does not yet operate an account system, and that is also why the public mutation API is not enabled.</p>
+        <p>Tailnet FQDNs and private addresses are topology metadata, not credentials, but they still require an authorized audience. This inspector omits private endpoints and operator-only provider identity.</p>
       </div>
       <div class="twocol">
-        <article class="card"><h3>Kept for lobby operation</h3><p>Small, inspectable records needed for roster, election, expiry, and cleanup.</p><ul class="list"><li>Lobby and player UUIDs plus display names</li><li>Horse choice, wire version, and join state</li><li>Route counts, RTT, jitter, loss, and timestamps</li><li>Authority result, lifecycle state, and non-secret cleanup receipts</li></ul></article>
-        <article class="card"><h3>Never placed in lobby state</h3><p>Secrets and unrelated identity data stay outside gameplay records.</p><ul class="list never"><li>No email, password, social profile, or advertising ID</li><li>No organization OAuth or child-tailnet secret</li><li>No durable auth key, bearer token, or node private key</li><li>No permanent server copy of peer-to-peer gameplay packets</li></ul></article>
+        <article class="card"><h3>Visible to an authorized lobby member</h3><p>Bounded, freshness-labeled facts needed to understand one selected session.</p><ul class="list"><li>Lobby and independent network lifecycle</li><li>Tailnet DNS name/FQDN while active or cleanup is pending</li><li>Qualified enrollment, reporter, and route counts</li><li>Application RTT/loss, authority references, and safe cleanup state</li></ul></article>
+        <article class="card"><h3>Never rendered by this inspector</h3><p>Secrets, raw provider inventory, and unrelated topology stay outside the view.</p><ul class="list never"><li>No auth key, OAuth material, bearer token, or node private key</li><li>No raw provider device ID, tag, response, or stable tailnet ID</li><li>No physical/NAT endpoint, private application endpoint, or packet content</li><li>No other lobby, public directory, or operator reconciliation detail</li></ul></article>
       </div>
     </section>
 
     <section id="download" class="block">
       <div class="sectionhead">
         <div><div class="kicker">Ride the prototype</div><h2>Download, inspect, report.</h2></div>
-        <p>The current build is an open development slice. Managed sessions prove real connectivity; public matchmaking and production identity are still upcoming work.</p>
+        <p>The current build is an open development slice. Managed sessions prove real connectivity; public real provisioning stays closed behind its security and recovery gates.</p>
       </div>
       <div class="actions"><a class="button" href="https://github.com/rajsinghtech/spurfire/releases/latest">Open latest published release</a><a class="button secondary" href="https://github.com/rajsinghtech/spurfire/blob/main/docs/p2p-networking.md">Read the network design</a></div>
       <div class="codebar"><code>brew install --cask rajsinghtech/tap/spurfire</code><span>macOS via Homebrew</span></div>
@@ -102,27 +160,298 @@
     <footer><span>Control plane only. Gameplay packets travel peer-to-peer. BSD-3-Clause.</span><span class="footerlinks"><a href="/healthz">Health</a><a href="/v1/capabilities">Capabilities</a><a href="https://github.com/rajsinghtech/spurfire">GitHub</a></span></footer>
   </main>
   <script>
-    Promise.all([
-      fetch('/healthz',{cache:'no-store'}).then(r=>r.json()),
-      fetch('/v1/capabilities',{cache:'no-store'}).then(r=>r.json())
-    ]).then(([health,capabilities])=>{
-      const ok=health.status==='ok';
-      document.getElementById('dot').className='dot '+(ok?'ok':'');
-      document.getElementById('status').textContent=ok?'Ottawa control plane online':'Control plane degraded';
-      const mode=document.getElementById('mode');
-      if(capabilities.dry_run){
-        mode.textContent='DRY-RUN PREVIEW';
-        document.getElementById('status-detail').textContent='Lobby lifecycle is available for safe API previews; no real tailnet or enrollment key is created.';
-      }else{
-        mode.textContent=health.provisioning_ready?'PROVISIONING READY':'PROVISIONING PAUSED';
-        mode.className='mode '+(health.provisioning_ready?'live':'');
-        document.getElementById('status-detail').textContent=health.provisioning_ready?'The configured lobby network provider is ready.':'New network provisioning is paused while existing sessions remain peer-hosted.';
+    (()=>{
+      'use strict';
+
+      const byId=id=>document.getElementById(id);
+      const form=byId('inspect-form');
+      const lobbyInput=byId('inspect-lobby-id');
+      const capabilityInput=byId('inspect-capability');
+      const submitButton=byId('inspect-submit');
+      const refreshButton=byId('inspect-refresh');
+      const forgetButton=byId('inspect-forget');
+      const message=byId('inspect-message');
+      const result=byId('network-result');
+      const resultTitle=byId('network-result-title');
+      const state={lobbyId:null,capability:null,controller:null,hasView:false};
+      const lobbyPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const capabilityPattern=/^[A-Za-z0-9_-]{43,1024}$/;
+      const listIds=['backing-facts','peer-facts','route-facts','quality-facts','authority-facts','cleanup-facts'];
+
+      const labels={
+        control_store:'Control store',provider_api:'Provider API',participant_report:'Participant report',derived:'Derived',none:'None',
+        authoritative:'Authoritative in stated scope',observed:'Observed',reported:'Reported',unknown:'Unknown',current:'Current',fresh:'Fresh',stale:'Stale',not_applicable:'Not applicable',
+        dry_run:'Dry run',shared_tailnet:'Shared-tailnet compatibility',tailnet_per_lobby:'Tailnet per lobby',simulated:'Simulated',shared:'Shared',dedicated:'Dedicated',
+        peer_relay:'Peer Relay',derp_relay:'DERP Relay',direct:'Direct',unavailable:'Unavailable',
+        never_observed:'Never observed',unsupported:'Unsupported',permission_denied:'Permission denied',timeout:'Timed out',source_error:'Source error',conflict:'Conflicting evidence',reconciliation_pending:'Reconciliation pending',stale_beyond_retention:'Stale beyond retention'
+      };
+
+      function label(value){
+        if(typeof value!=='string')return 'Unknown';
+        return labels[value]||value.replaceAll('_',' ');
       }
-    }).catch(()=>{
-      document.getElementById('status').textContent='Control plane unavailable';
-      document.getElementById('mode').textContent='OFFLINE';
-      document.getElementById('status-detail').textContent='The game clients and source remain available from GitHub.';
-    });
+
+      function scalar(value){
+        if(typeof value==='string'||typeof value==='number')return String(value);
+        if(typeof value==='boolean')return value?'Yes':'No';
+        return 'Unknown';
+      }
+
+      function formatTime(value){
+        if(!Number.isSafeInteger(value)||value<0)return 'Not recorded';
+        const date=new Date(value);
+        if(Number.isNaN(date.getTime()))return `${value} ms since Unix epoch`;
+        return `${date.toISOString()} (${value} ms)`;
+      }
+
+      function factParts(raw,formatter=scalar){
+        const fact=raw&&typeof raw==='object'?raw:{};
+        const known=fact.value!==null&&fact.value!==undefined;
+        let value;
+        if(known){
+          try{value=formatter(fact.value);}catch(_error){value='Unknown';}
+        }else if(fact.freshness==='not_applicable'){
+          value='Not applicable';
+        }else{
+          value=`Unknown — ${label(fact.unknown_reason||'never_observed')}`;
+        }
+        const meta=[
+          `Source: ${label(fact.source||'none')}`,
+          `Assurance: ${label(fact.assurance||'unknown')}`,
+          `Freshness: ${label(fact.freshness||'unknown')}`,
+          `As of: ${formatTime(fact.as_of)}`,
+          `Received: ${formatTime(fact.received_at)}`
+        ];
+        return {value,meta:meta.join(' · '),stale:known&&fact.freshness==='stale'};
+      }
+
+      function appendFact(listId,title,fact,formatter){
+        const list=byId(listId);
+        const parts=factParts(fact,formatter);
+        const item=document.createElement('div');
+        item.className='fact-item';
+        if(parts.stale)item.classList.add('stale');
+        const term=document.createElement('dt');
+        term.textContent=title;
+        const description=document.createElement('dd');
+        const value=document.createElement('div');
+        value.className='fact-value';
+        value.textContent=parts.value;
+        const meta=document.createElement('div');
+        meta.className='fact-meta';
+        meta.textContent=parts.meta;
+        description.append(value,meta);
+        item.append(term,description);
+        list.append(item);
+      }
+
+      function appendCachedField(listId,title,value,servedAt,formatter=scalar){
+        appendFact(listId,title,{value,source:'control_store',assurance:'authoritative',as_of:servedAt,received_at:servedAt,freshness:'current'},formatter);
+      }
+
+      function count(value){return Number.isSafeInteger(value)&&value>=0?String(value):'Unknown';}
+      function milliseconds(value){return Number.isSafeInteger(value)&&value>=0?`${value} ms`:'Unknown';}
+      function ratio(value){return Number.isSafeInteger(value)&&value>=0?`${(value/10).toFixed(1)}% (${value}/1000)`:'Unknown';}
+      function loss(value){return Number.isSafeInteger(value)&&value>=0?`${(value/10000).toFixed(4)}% (${value} ppm)`:'Unknown';}
+      function enumValue(value){return label(typeof value==='string'?value:'unknown');}
+      function fqdn(value){return typeof value==='string'&&value.length?value:'Unknown';}
+      function membership(value){return value===false?'No — lifecycle owner only; not joined':value===true?'Invalid response: membership must be false':'Unknown';}
+
+      function election(value){
+        if(!value||typeof value!=='object')return 'Unknown';
+        return `Winner ${scalar(value.winner_player_id)} · score ${scalar(value.score_milli)} · formula ${scalar(value.formula_version)} · input ${scalar(value.input_hash)} · evaluated ${formatTime(value.evaluated_at)} · input assurance ${label(value.input_assurance)} · degraded ${scalar(value.degraded)}`;
+      }
+
+      function heartbeat(value){
+        if(!value||typeof value!=='object')return 'Unknown';
+        return `Player ${scalar(value.player_id)} · epoch ${scalar(value.epoch)} · input ${scalar(value.input_hash)} · received ${formatTime(value.received_at)}`;
+      }
+
+      function peerAuthority(value){
+        if(!value||typeof value!=='object')return 'Unknown';
+        return `Player ${scalar(value.player_id)} · epoch ${scalar(value.epoch)} · input ${scalar(value.input_hash)} · reporters ${scalar(value.fresh_reporter_count)} · agree ${scalar(value.agreement_count)} · conflict ${scalar(value.conflict_count)} · reported, not ranked proof`;
+      }
+
+      function requireView(view,expectedLobby){
+        if(!view||typeof view!=='object'||view.schema_version!==1)throw new Error('invalid_view');
+        if(typeof view.lobby_id!=='string'||view.lobby_id.toLowerCase()!==expectedLobby)throw new Error('wrong_lobby');
+        if(!view.backing||!view.counts||!view.routes||!view.application_quality||!view.authority||!view.cleanup)throw new Error('invalid_view');
+        const member=view.backing.control_service_member;
+        if(member&&member.value!==null&&member.value!==false)throw new Error('invalid_membership');
+      }
+
+      function clearLists(){for(const id of listIds)byId(id).replaceChildren();}
+
+      function renderView(view){
+        clearLists();
+        const served=view.served_at;
+        const backing=view.backing;
+        const counts=view.counts;
+        const routes=view.routes;
+        const quality=view.application_quality;
+        const authority=view.authority;
+        const cleanup=view.cleanup;
+
+        byId('network-result-subtitle').textContent=`Lobby ${view.lobby_id} · schema ${view.schema_version} · served ${formatTime(served)}`;
+        const truth=byId('network-truth');
+        truth.textContent=scalar(view.truth_label);
+        truth.className='truth';
+        if(view.truth_label==='SIMULATED — NO TAILNET EXISTS')truth.classList.add('simulated');
+        else if(view.truth_label==='REAL — DEDICATED TAILNET')truth.classList.add('dedicated');
+        else if(view.truth_label==='REAL — SHARED COMPATIBILITY')truth.classList.add('shared');
+
+        appendCachedField('backing-facts','Backing mode',backing.backing_mode,served,enumValue);
+        appendCachedField('backing-facts','Simulates mode',backing.simulates_mode===null?'not_applicable':backing.simulates_mode,served,value=>value==='not_applicable'?'Not applicable':enumValue(value));
+        appendCachedField('backing-facts','Isolation',backing.isolation,served,enumValue);
+        appendCachedField('backing-facts','Network generation',backing.network_generation,served,count);
+        appendCachedField('backing-facts','Network lifecycle',backing.network_lifecycle,served,enumValue);
+        appendFact('backing-facts','Lobby lifecycle',view.lobby_lifecycle,enumValue);
+        appendFact('backing-facts','Tailnet DNS name / FQDN',backing.tailnet_dns_name,fqdn);
+        appendFact('backing-facts','Control service tailnet member',backing.control_service_member,membership);
+
+        appendFact('peer-facts','Roster participants',counts.roster_count,count);
+        appendFact('peer-facts','Provider-enrolled devices',counts.provider_enrolled_device_count,count);
+        appendFact('peer-facts','Provider-online devices',counts.provider_online_device_count,count);
+        appendFact('peer-facts','Fresh participant reporters',counts.fresh_reporter_count,count);
+        appendFact('peer-facts','Fresh directional observations',counts.fresh_directional_observation_count,count);
+
+        appendFact('route-facts','Expected directions',routes.expected_direction_count,count);
+        appendFact('route-facts','Reported directions',routes.reported_direction_count,count);
+        appendFact('route-facts','Direct',routes.direct_count,count);
+        appendFact('route-facts','Peer Relay',routes.peer_relay_count,count);
+        appendFact('route-facts','DERP Relay',routes.derp_relay_count,count);
+        appendFact('route-facts','Unavailable',routes.unavailable_count,count);
+        appendFact('route-facts','Unknown',routes.unknown_count,count);
+        appendFact('route-facts','Reachable known',routes.reachable_known_count,count);
+        appendFact('route-facts','Direct ratio',routes.direct_ratio_milli,ratio);
+
+        appendFact('quality-facts','Application samples',quality.sample_count,count);
+        appendFact('quality-facts','Application RTT median',quality.application_rtt_ms_median,milliseconds);
+        appendFact('quality-facts','Application RTT p95',quality.application_rtt_ms_p95,milliseconds);
+        appendFact('quality-facts','Application RTT worst',quality.application_rtt_ms_worst,milliseconds);
+        appendFact('quality-facts','Application loss median',quality.application_loss_ppm_median,loss);
+
+        appendFact('authority-facts','Deterministic control election',authority.control_election,election);
+        appendFact('authority-facts','Last accepted heartbeat receipt',authority.last_accepted_heartbeat,heartbeat);
+        appendFact('authority-facts','Peer-reported match authority',authority.peer_reported_match_authority,peerAuthority);
+
+        appendCachedField('cleanup-facts','Network lifecycle',cleanup.network_lifecycle,served,enumValue);
+        appendCachedField('cleanup-facts','Participant-safe reason',cleanup.participant_safe_reason,served,enumValue);
+        appendFact('cleanup-facts','Cleanup requested',cleanup.requested_at,formatTime);
+        appendFact('cleanup-facts','Delete acknowledged',cleanup.delete_acknowledged_at,formatTime);
+        appendFact('cleanup-facts','Exact absence confirmed',cleanup.absence_confirmed_at,formatTime);
+
+        result.hidden=false;
+        state.hasView=true;
+      }
+
+      function setBusy(busy){
+        submitButton.disabled=busy;
+        refreshButton.disabled=busy;
+        submitButton.textContent=busy?'Inspecting…':'Inspect lobby';
+      }
+
+      function setMessage(text,error=false){
+        message.textContent=text;
+        message.className=`inspect-message${error?' error':''}`;
+        message.setAttribute('role',error?'alert':'status');
+      }
+
+      async function loadSelectedLobby(){
+        if(!state.lobbyId||!state.capability)return;
+        if(state.controller)state.controller.abort();
+        state.controller=new AbortController();
+        setBusy(true);
+        setMessage('Reading the cached selected-lobby view…');
+        try{
+          const response=await fetch(`/v1/lobbies/${encodeURIComponent(state.lobbyId)}/network`,{
+            method:'GET',
+            headers:{'Accept':'application/json','Authorization':`Spurfire-Capability ${state.capability}`,'Cache-Control':'no-store'},
+            cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',signal:state.controller.signal
+          });
+          if(!response.ok)throw new Error(`http_${response.status}`);
+          const view=await response.json();
+          requireView(view,state.lobbyId);
+          renderView(view);
+          setMessage(`Cached view loaded at ${formatTime(view.served_at)}. Refresh is manual.`);
+          resultTitle.focus();
+        }catch(error){
+          if(error&&error.name==='AbortError')return;
+          if(state.hasView)setMessage('Refresh failed or authorization is no longer valid. The previous snapshot remains displayed; use its freshness labels.',true);
+          else setMessage('Lobby unavailable. The ID may be absent, or the capability may be wrong, expired, revoked, or insufficient. These cases are intentionally indistinguishable.',true);
+        }finally{
+          setBusy(false);
+        }
+      }
+
+      form.addEventListener('submit',event=>{
+        event.preventDefault();
+        const lobbyId=lobbyInput.value.trim().toLowerCase();
+        const capability=capabilityInput.value;
+        if(!lobbyPattern.test(lobbyId)){
+          setMessage('Enter a canonical UUIDv4 lobby ID.',true);
+          lobbyInput.focus();
+          return;
+        }
+        if(!capabilityPattern.test(capability)){
+          setMessage('Enter one base64url lobby capability. Do not enter an auth key or OAuth credential.',true);
+          capabilityInput.focus();
+          return;
+        }
+        if(state.lobbyId!==lobbyId){
+          state.hasView=false;
+          result.hidden=true;
+          clearLists();
+        }
+        state.lobbyId=lobbyId;
+        state.capability=capability;
+        capabilityInput.value='';
+        loadSelectedLobby();
+      });
+
+      refreshButton.addEventListener('click',()=>loadSelectedLobby());
+      forgetButton.addEventListener('click',()=>{
+        if(state.controller)state.controller.abort();
+        state.controller=null;
+        state.capability=null;
+        state.lobbyId=null;
+        state.hasView=false;
+        capabilityInput.value='';
+        lobbyInput.value='';
+        clearLists();
+        result.hidden=true;
+        setBusy(false);
+        setMessage('Capability forgotten. No lobby selected.');
+        lobbyInput.focus();
+      });
+      window.addEventListener('pagehide',()=>{
+        if(state.controller)state.controller.abort();
+        state.capability=null;
+        state.lobbyId=null;
+      });
+
+      Promise.all([
+        fetch('/healthz',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json()),
+        fetch('/v1/capabilities',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json())
+      ]).then(([health,capabilities])=>{
+        const ok=health.status==='ok';
+        byId('dot').className=`dot${ok?' ok':''}`;
+        byId('status').textContent=ok?'Ottawa control plane online':'Control plane degraded';
+        const mode=byId('mode');
+        if(capabilities.dry_run){
+          mode.textContent='DRY-RUN PREVIEW';
+          byId('status-detail').textContent='Lobby lifecycle is available for safe API previews; no real tailnet or enrollment key is created.';
+        }else{
+          mode.textContent=health.provisioning_ready?'PROVIDER CONFIGURED':'PROVIDER PAUSED';
+          mode.className=`mode${health.provisioning_ready?' live':''}`;
+          byId('status-detail').textContent=health.provisioning_ready?'The configured provider adapter reports ready. This does not attest the separate public real-activation gates.':'New network provisioning is paused while existing sessions remain peer-hosted.';
+        }
+      }).catch(()=>{
+        byId('status').textContent='Control plane unavailable';
+        byId('mode').textContent='OFFLINE';
+        byId('status-detail').textContent='The game clients and source remain available from GitHub.';
+      });
+    })();
   </script>
 </body>
 </html>

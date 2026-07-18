@@ -1,15 +1,16 @@
 {{- if .Values.config.dryRun }}
-Spurfire is configured in credential-free dry-run mode. Provider mutations are disabled.
+Spurfire is configured in credential-free dry-run mode. No tailnet exists and provider mutations are disabled.
 {{- else }}
-Spurfire is configured in REAL mode with state on PVC {{ include "spurfire-control.stateClaimName" . }}.
-Do not restart or upgrade while tailnet-per-lobby lobbies are active: child OAuth material is process-local.
-Rotating Secret {{ .Values.tailscale.existingSecret }} requires an explicit, controlled restart.
+Spurfire is configured for PRIVATE, ACTIVATION-CLOSED provider staging with state on PVC {{ include "spurfire-control.stateClaimName" . }}.
+SPURFIRE_REAL_MUTATIONS_ENABLED remains 0. A parent OAuth reference and PVC do not satisfy the capability-auth, encrypted child-credential recovery, or startup-reconciliation gates.
+Do not treat this render as real service activation or expose it through a public route.
 {{- end }}
 
+Alpha maximum active real lobbies: {{ .Values.config.maxActiveRealLobbies }}
 Service: {{ include "spurfire-control.fullname" . }}:{{ .Values.service.port }}
 {{- if .Values.httpRoute.enabled }}
-Public host(s): {{ join ", " .Values.httpRoute.hostnames }}
-WARNING: the prototype API does not authenticate X-Spurfire-Player-Id. Apply an authentication policy before public use.
+Public dry-run host(s): {{ join ", " .Values.httpRoute.hostnames }}
+Only the static inspector shell and public-safe dry-run APIs may be exposed. Real and operator routes require separate authorization and a private listener.
 {{- else }}
 HTTPRoute is disabled. Port-forward for a local health check:
   kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "spurfire-control.fullname" . }} 8080:{{ .Values.service.port }}

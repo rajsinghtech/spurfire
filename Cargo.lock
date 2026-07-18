@@ -3451,10 +3451,13 @@ dependencies = [
  "anyhow",
  "clap",
  "dotenvy",
+ "reqwest",
  "serde",
  "serde_json",
  "spurfire-control",
+ "spurfire-protocol",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

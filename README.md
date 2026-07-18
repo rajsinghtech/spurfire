@@ -23,6 +23,7 @@ scripts/                   API probes and game build/test helpers
 Dockerfile                 Multi-stage, non-root spurfire-server image
 docs/design.md             Product and game design source of truth
 docs/architecture.md       Control/data planes and trust boundaries
+docs/control-plane-network-view.md  Network ownership, inspector, gates, runbook
 docs/lobby-service.md      HTTP routes, lifecycle, dry-run, and operations
 docs/decisions.md          ADR-lite decisions and blocking questions
 docs/tailscale-api.md      Redacted Tailscale probe evidence and verdict
@@ -90,7 +91,7 @@ ghcr.io/rajsinghtech/spurfire-server
 oci://ghcr.io/rajsinghtech/charts/spurfire-control
 ```
 
-The chart defaults to one credential-free dry-run replica with no public route. It includes opt-in Gateway API values for `spurfire.rajsingh.info`; the prototype API must be protected by external authentication before public use. See [docs/deployment.md](docs/deployment.md) for tags, digest/signature verification, Helm installation, existing-Secret real mode, persistence, and restart caveats.
+The chart defaults to one credential-free dry-run replica with no public route. Ottawa deliberately exposes only the forced-dry-run service: public real provisioning remains blocked by capability/abuse controls, encrypted dynamic child-credential recovery, startup reconciliation, and the other activation gates. See [docs/deployment.md](docs/deployment.md) for artifacts and [docs/control-plane-network-view.md](docs/control-plane-network-view.md) for the authoritative activation/runbook contract.
 
 ## Release qualification
 
@@ -102,7 +103,8 @@ Every pull request runs `just check` on Ubuntu, macOS, and Windows plus the boun
 
 - [docs/design.md](docs/design.md) — game design and product source of truth.
 - [docs/architecture.md](docs/architecture.md) — system architecture and boundaries.
-- [docs/lobby-service.md](docs/lobby-service.md) — server routes, state machine, examples, and security limits.
+- [docs/control-plane-network-view.md](docs/control-plane-network-view.md) — dedicated ownership, never-join decision, exact-lobby inspector, telemetry provenance, activation gates, and operator runbook.
+- [docs/lobby-service.md](docs/lobby-service.md) — current/target routes, state machines, examples, and security limits.
 - [docs/deployment.md](docs/deployment.md) — OCI artifacts, Docker, Helm, Gateway API, and operations.
 - [docs/decisions.md](docs/decisions.md) — decisions and open questions.
 - [docs/tailscale-api.md](docs/tailscale-api.md) — current API permission evidence.
@@ -113,4 +115,4 @@ Every pull request runs `just check` on Ubuntu, macOS, and Windows plus the boun
 
 ## Status
 
-The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat (M0–M1), the M2 Saddle Dive implementation, and a native `PeerSession`. M2 is **implementation complete / playtest pending**: deterministic and headless gates do not replace the natural frequency, hit-rate, post-landing-death, notification, and animation checks in `docs/prototype-plan.md`. M3–M5 remain unbuilt. Disposable live probes have verified three Godot peers exchanging sustained gameplay UDP with route classification and application RTT, then deleting the child tailnet. M6 completion work (unified migration, real MatchState handoff, capped-rewind lag compensation, client-driven lobby join, and live landing-page stats), restart recovery, and RustScale's remaining platform/telemetry gaps still block alpha; see `docs/prototype-plan.md` and `docs/decisions.md`.
+The control plane, protocol, CLI, and HTTP lobby prototype implement organization tailnet-per-lobby provisioning with an in-memory, redacted child-secret vault. Organization child create/token/delete is live-proven; child-scoped one-use enrollment is implemented and mock-tested but still needs live end-to-end verification. The main control plane never joins a lobby tailnet. Public real activation remains closed until capability migration, abuse controls, encrypted dynamic recovery/startup reconciliation, and operations gates are complete; Ottawa remains dry-run. Godot 4.7.1 plus Rust GDExtension provides mounted movement/combat (M0–M1), the M2 Saddle Dive implementation, and a native `PeerSession`. M2 is **implementation complete / playtest pending**: deterministic and headless gates do not replace the natural frequency, hit-rate, post-landing-death, notification, and animation checks in `docs/prototype-plan.md`. M3–M5 remain unbuilt. M6 completion work, restart recovery, and RustScale's remaining platform/telemetry gaps still block alpha; see `docs/prototype-plan.md`, `docs/decisions.md`, and `docs/control-plane-network-view.md`.

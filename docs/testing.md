@@ -157,4 +157,27 @@ git status --short
 git diff -- . ':!.env' | rg 'tskey-|Bearer |clientSecret' || true
 ```
 
-No auth key, bearer token, OAuth secret, or generated child credential should appear.
+No auth key, bearer token, OAuth secret, capability plaintext, or generated child credential should appear.
+
+## 8. Control-plane network-view and activation plan
+
+The normative matrix is [control-plane-network-view.md#required-test-plan](control-plane-network-view.md#required-test-plan). It covers exact-lobby capabilities/audience projection, FQDN validation, directional report aggregation, stale/unknown facts, cache-only inspection, one-real-lobby leasing, startup reconciliation, exact-ID cleanup proof, secret canaries, and the never-join dependency gate.
+
+For this workstream, do **not** build on the development Mac and do not run a live provider probe. Push the branch, then validate from a clean credential-free checkout on `ssh ubuntu@raj-builder`; never copy `.env`, OAuth material, auth keys, or capabilities to the builder. Documentation/Helm checks may use:
+
+```bash
+git diff --check origin/main...HEAD
+scripts/check-packaging.sh
+```
+
+Implementation branches additionally run their scoped Rust checks on the Linux builder. Cross-platform compilation, tests, and artifacts run only in GitHub Actions. No test in this slice may create/delete a live tailnet, alter Ottawa, disturb a managed peer session, tag a release, or publish a package.
+
+Before a separate public-real activation review, the evidence bundle must include:
+
+1. passing unit/fault tests for all capability, identity, freshness, lease, reconciliation, and cleanup cases in the normative matrix;
+2. rendered-chart policy evidence that Ottawa remains `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false`;
+3. a clean Linux run with no credentials and passing cross-platform GitHub Actions;
+4. separately approved, credentialed live evidence for restrictive child policy, device-list semantics, Direct/DERP/Peer Relay gameplay paths, and exact-ID cleanup;
+5. exercised operator alerts/runbook for create ambiguity, missing vault material, orphan quarantine, cleanup polling failure, and vault deletion failure.
+
+A live probe passing does not waive an activation gate, and a lobby `DESTROYED` result is not cleanup proof.
