@@ -435,6 +435,11 @@ mod tests {
         let disk = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(!disk.contains("child-id-canary"));
         assert!(!disk.contains("child-secret-canary"));
+        assert!(matches!(
+            EncryptedChildVault::open(&path, &key_path).await,
+            Err(VaultError::Io)
+        ));
+        drop(vault);
         let reopened = EncryptedChildVault::open(&path, &key_path).await.unwrap();
         let (credentials, loaded_version) = reopened.get_exact(&identity).unwrap();
         assert_eq!(loaded_version, version);
