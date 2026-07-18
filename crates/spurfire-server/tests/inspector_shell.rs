@@ -10,9 +10,7 @@ fn inspector_selects_exactly_one_lobby_without_a_directory() {
     assert!(HTML.contains("id=\"inspect-lobby-id\""));
     assert!(HTML.contains("id=\"inspect-capability\""));
     assert!(HTML.contains("A lobby ID by itself grants nothing."));
-    assert!(HTML.contains(
-        "fetch(`/v1/lobbies/${encodeURIComponent(state.lobbyId)}/network`"
-    ));
+    assert!(HTML.contains("fetch(`/v1/lobbies/${encodeURIComponent(state.lobbyId)}/network`"));
     assert!(HTML.contains("'Authorization':`Spurfire-Capability ${state.capability}`"));
 
     assert!(!HTML.contains("/v1/operator/lobbies"));
@@ -87,7 +85,10 @@ fn view_uses_precise_network_truth_and_freshness_terms() {
         "Unknown —",
         "STALE ·",
     ] {
-        assert!(HTML.contains(required), "missing inspector term: {required}");
+        assert!(
+            HTML.contains(required),
+            "missing inspector term: {required}"
+        );
     }
     assert!(HTML.contains("does not join that network"));
     assert!(HTML.contains("not a tailnet member"));

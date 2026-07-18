@@ -5,8 +5,9 @@
 //! capabilities are read from a file or stdin, sent only over HTTPS, and never persisted.
 
 use std::{
-    env, fmt, fs,
+    env, fmt,
     fmt::Write as _,
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -545,10 +546,7 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
     line!("APPLICATION QUALITY (nonce/reply measurements only)");
     line!(
         "  Samples: {}",
-        describe_fact(
-            &view.application_quality.sample_count,
-            ToString::to_string
-        )
+        describe_fact(&view.application_quality.sample_count, ToString::to_string)
     );
     line!(
         "  RTT median: {}",
@@ -575,10 +573,7 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
         "  Loss median: {}",
         describe_fact(
             &view.application_quality.application_loss_ppm_median,
-            |value| format!(
-                "{:.4}% ({value} ppm)",
-                f64::from(*value) / 10_000.0
-            )
+            |value| format!("{:.4}% ({value} ppm)", f64::from(*value) / 10_000.0)
         )
     );
     line!();
@@ -586,7 +581,8 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
     line!("AUTHORITY (inspection never changes gameplay authority)");
     line!(
         "  Deterministic control election: {}",
-        describe_fact(&view.authority.control_election, |value| format!(
+        describe_fact(&view.authority.control_election, |value| {
+            format!(
             "winner {}; score {}; formula {}; input {}; evaluated {}; input assurance {}; degraded {}",
             value.winner_player_id,
             value.score_milli,
@@ -595,7 +591,8 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
             format_unix_millis(value.evaluated_at),
             wire_value(&value.input_assurance),
             value.degraded
-        ))
+        )
+        })
     );
     line!(
         "  Last accepted heartbeat receipt: {}",
@@ -609,9 +606,8 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
     );
     line!(
         "  Peer-reported match authority: {}",
-        describe_fact(
-            &view.authority.peer_reported_match_authority,
-            |value| format!(
+        describe_fact(&view.authority.peer_reported_match_authority, |value| {
+            format!(
                 "player {}; epoch {}; input {}; reporters {}; agree {}; conflict {} (reported, not ranked proof)",
                 value.player_id,
                 value.epoch,
@@ -620,7 +616,7 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
                 value.agreement_count,
                 value.conflict_count
             )
-        )
+        })
     );
     line!();
 
@@ -635,7 +631,9 @@ fn render_inspection(view: &LobbyNetworkView) -> String {
     );
     line!(
         "  Requested: {}",
-        describe_fact(&view.cleanup.requested_at, |value| format_unix_millis(*value))
+        describe_fact(&view.cleanup.requested_at, |value| format_unix_millis(
+            *value
+        ))
     );
     line!(
         "  Delete acknowledged: {}",
@@ -1062,11 +1060,9 @@ mod tests {
         let mut input = Cursor::new(token.as_bytes());
         let capability = read_capability_from(&mut input).unwrap();
         let client = inspection_client().unwrap();
-        let endpoint = inspection_endpoint(
-            "https://control.example",
-            LobbyId::parse(LOBBY_ID).unwrap(),
-        )
-        .unwrap();
+        let endpoint =
+            inspection_endpoint("https://control.example", LobbyId::parse(LOBBY_ID).unwrap())
+                .unwrap();
         let request = build_inspection_request(&client, endpoint, &capability).unwrap();
 
         assert!(!request.url().as_str().contains(&token));
@@ -1116,11 +1112,8 @@ mod tests {
         assert!(rendered.contains("source: provider_api"));
         assert!(rendered.contains("freshness: stale"));
 
-        let unknown = Fact::<u32>::unknown(
-            FactSource::ProviderApi,
-            UnknownReason::Timeout,
-            Some(now),
-        );
+        let unknown =
+            Fact::<u32>::unknown(FactSource::ProviderApi, UnknownReason::Timeout, Some(now));
         let rendered = describe_fact(&unknown, ToString::to_string);
         assert!(rendered.contains("unknown — timeout"));
         assert!(!rendered.starts_with('0'));
