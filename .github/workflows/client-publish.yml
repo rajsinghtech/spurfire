@@ -226,6 +226,7 @@ jobs:
             --expected-sha256 "$EVIDENCE_SHA256" >/dev/null
 
           expected=(
+            Spurfire-linux-arm64.tar.gz
             Spurfire-linux-x86_64.tar.gz
             Spurfire-macos-universal.zip
             Spurfire-windows-x86_64.zip
@@ -285,6 +286,7 @@ jobs:
             --draft \
             --title "Spurfire ${RELEASE_TAG#v}" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
+            release/Spurfire-linux-arm64.tar.gz \
             release/Spurfire-linux-x86_64.tar.gz \
             release/Spurfire-macos-universal.zip \
             release/Spurfire-windows-x86_64.zip \
@@ -306,6 +308,7 @@ jobs:
              ([
                "SHA256SUMS",
                "Spurfire-client.spdx.json",
+               "Spurfire-linux-arm64.tar.gz",
                "Spurfire-linux-x86_64.tar.gz",
                "Spurfire-macos-universal.zip",
                "Spurfire-windows-x86_64.zip"
@@ -346,6 +349,7 @@ jobs:
                ([
                  "SHA256SUMS",
                  "Spurfire-client.spdx.json",
+                 "Spurfire-linux-arm64.tar.gz",
                  "Spurfire-linux-x86_64.tar.gz",
                  "Spurfire-macos-universal.zip",
                  "Spurfire-windows-x86_64.zip"

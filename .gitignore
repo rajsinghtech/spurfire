@@ -16,3 +16,6 @@ dist
 /game/bin/
 *.import
 /game/*_telemetry.csv
+
+# Python bytecode caches
+__pycache__/

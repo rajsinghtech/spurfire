@@ -24,6 +24,7 @@ def load_script(name: str):
 AGGREGATE = load_script("aggregate-playtest.py")
 LIFECYCLE = load_script("check-alpha-lifecycle-evidence.py")
 EVIDENCE = load_script("check-alpha-evidence.py")
+CANDIDATE = load_script("make-alpha-candidate-metadata.py")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -31,6 +32,7 @@ def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
     source = root / "source"
     source.mkdir()
     archives = {
+        "Spurfire-linux-arm64.tar.gz": "linux-arm64",
         "Spurfire-linux-x86_64.tar.gz": "linux-x86_64",
         "Spurfire-macos-universal.zip": "macos-universal",
         "Spurfire-windows-x86_64.zip": "windows-x86_64",
@@ -42,6 +44,15 @@ def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
         return hashlib.sha256((source / name).read_bytes()).hexdigest()
 
     records = {
+        "linux-arm64-trust.json": {
+            "schema_version": 1,
+            "platform": "linux-arm64",
+            "source_sha": SHA,
+            "archive": "Spurfire-linux-arm64.tar.gz",
+            "archive_sha256": archive_sha("Spurfire-linux-arm64.tar.gz"),
+            "launch_smoke_passed": True,
+            "signature": "unsigned_archive",
+        },
         "linux-trust.json": {
             "schema_version": 1,
             "platform": "linux-x86_64",
@@ -278,6 +289,67 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(EVIDENCE.ManifestError):
             EVIDENCE.validate(manifest, version="0.2.0", source_sha=SHA)
 
+    def test_missing_linux_arm64_artifact_blocks_release(self):
+        manifest = self.manifest()
+        manifest["artifacts"] = [
+            item
+            for item in manifest["artifacts"]
+            if item["platform"] != "linux-arm64"
+        ]
+        with self.assertRaises(EVIDENCE.ManifestError):
+            EVIDENCE.validate(manifest, version="0.2.0", source_sha=SHA)
+
+
+class PlatformCoverageTests(unittest.TestCase):
+    """Every GDExtension library registration must have release coverage."""
+
+    REGISTRATION_MAP = {
+        ("linux", "x86_64"): "linux-x86_64",
+        ("linux", "arm64"): "linux-arm64",
+        ("windows", "x86_64"): "windows-x86_64",
+        ("macos", "x86_64"): "macos-universal",
+        ("macos", "arm64"): "macos-universal",
+    }
+
+    def registered_platforms(self) -> set[str]:
+        text = (ROOT / "game" / "bin" / "spurfire.gdextension").read_text(encoding="utf-8")
+        platforms: set[str] = set()
+        in_libraries = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("["):
+                in_libraries = line == "[libraries]"
+                continue
+            if not in_libraries or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            parts = key.split(".")
+            if len(parts) != 3:
+                continue
+            system, _, arch = parts
+            platform = self.REGISTRATION_MAP.get((system, arch))
+            self.assertIsNotNone(platform, f"unmapped GDExtension registration {key}")
+            platforms.add(platform)
+        return platforms
+
+    def test_every_registered_library_has_release_coverage(self):
+        preflight = (ROOT / ".github" / "workflows" / "client-release.yml").read_text(
+            encoding="utf-8"
+        )
+        registered = self.registered_platforms()
+        self.assertTrue(registered)
+        self.assertEqual(registered, set(CANDIDATE.EXPECTED.values()))
+        self.assertEqual(registered, set(EVIDENCE.REQUIRED_PLATFORMS))
+        for platform in sorted(registered):
+            with self.subTest(platform=platform):
+                archive = next(
+                    name
+                    for name, value in CANDIDATE.EXPECTED.items()
+                    if value == platform
+                )
+                self.assertIn(archive, preflight)
+                self.assertIn(CANDIDATE.TRUST_FILES[platform], preflight)
+
 
 class CommandTests(unittest.TestCase):
     def test_release_tag_binding_allows_only_metadata_child_commit(self):
@@ -416,7 +488,7 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(manifest["candidate_mode"], "preflight")
             self.assertFalse(manifest["release_eligible"])
             self.assertEqual(manifest["publication"], "forbidden")
-            self.assertEqual(len(manifest["artifacts"]), 3)
+            self.assertEqual(len(manifest["artifacts"]), 4)
             self.assertTrue((output / "SHA256SUMS").is_file())
             self.assertTrue((output / "candidate.spdx.json").is_file())
 
@@ -442,6 +514,27 @@ class CommandTests(unittest.TestCase):
             self.assertFalse(manifest["candidate_only"])
             self.assertEqual(manifest["blockers"], [])
             self.assertEqual(manifest["publication"], "protected_manual_only")
+
+    def test_missing_linux_arm64_archive_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root)
+            (source / "Spurfire-linux-arm64.tar.gz").unlink()
+            result = run_candidate_metadata(source, root / "output")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("expected client archives", result.stderr)
+
+    def test_tampered_linux_arm64_trust_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_candidate_inputs(root)
+            trust_path = source / "linux-arm64-trust.json"
+            trust = json.loads(trust_path.read_text())
+            trust["launch_smoke_passed"] = False
+            trust_path.write_text(json.dumps(trust), encoding="utf-8")
+            result = run_candidate_metadata(source, root / "output")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("linux-arm64", result.stderr)
 
     def test_tampered_trust_metadata_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -168,6 +168,103 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  linux-arm64:
+    name: Linux ARM64 client
+    needs: metadata
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          key: client-linux-arm64
+
+      - name: Install Godot and export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes libasound2t64 libfontconfig1 libgl1 libxi6 libxcursor1 libxinerama1 libxrandr2 unzip
+          editor="Godot_v${GODOT_RELEASE}_linux.arm64.zip"
+          templates="Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          base_url="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$editor" "$base_url/$editor"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$templates" "$base_url/$templates"
+          echo "de64efe4d936ac0403769e078a73d961a9c647cab04168c5fb5a7fe33728e200a67324ed99368eeb27964e205e72a61e48efb63b52d5de34d12dd6a95ca0fc45  ${editor}" | sha512sum --check
+          echo "${GODOT_TEMPLATE_SHA512}  ${templates}" | sha512sum --check
+          unzip -q "$editor"
+          sudo install -m 0755 "Godot_v${GODOT_RELEASE}_linux.arm64" /usr/local/bin/godot4
+          unzip -q "$templates" -d /tmp/godot-templates
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          cp -R /tmp/godot-templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+
+      - name: Test, build, and export
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-gdext.sh debug
+          scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
+          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
+          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
+          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
+          if ! grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"; then
+            echo '::warning::Candidate lacks the integrated one-lobby Alpha smoke marker; CI remains blocked.'
+          fi
+          scripts/build-gdext.sh release
+          mkdir -p dist/linux-arm64
+          godot4 --headless --path game --export-release "Linux ARM64"
+          test -x dist/linux-arm64/Spurfire.arm64
+          file dist/linux-arm64/Spurfire.arm64 | grep -q 'ELF 64-bit.*aarch64'
+          tar -C dist/linux-arm64 -czf dist/Spurfire-linux-arm64.tar.gz .
+
+      - name: Launch final Linux ARM64 archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          unpack="$RUNNER_TEMP/linux-arm64-final"
+          mkdir -p "$unpack"
+          tar -xzf dist/Spurfire-linux-arm64.tar.gz -C "$unpack"
+          timeout 120 "$unpack/Spurfire.arm64" --headless --audio-driver Dummy --quit-after 30 \
+            2>&1 | tee "$RUNNER_TEMP/linux-arm64-final.log"
+          if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/linux-arm64-final.log"; then
+            echo 'error: final Linux ARM64 client emitted an error' >&2
+            exit 1
+          fi
+          cd dist
+          sha256sum Spurfire-linux-arm64.tar.gz > Spurfire-linux-arm64.tar.gz.sha256
+          archive_sha256="$(sha256sum Spurfire-linux-arm64.tar.gz | cut -d ' ' -f 1)"
+          jq -n --arg source_sha "${{ needs.metadata.outputs.source_sha }}" \
+            --arg archive_sha256 "$archive_sha256" '{
+              schema_version: 1,
+              platform: "linux-arm64",
+              source_sha: $source_sha,
+              archive: "Spurfire-linux-arm64.tar.gz",
+              archive_sha256: $archive_sha256,
+              launch_smoke_passed: true,
+              signature: "unsigned_archive"
+            }' > linux-arm64-trust.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: client-linux-arm64
+          path: |
+            dist/Spurfire-linux-arm64.tar.gz
+            dist/Spurfire-linux-arm64.tar.gz.sha256
+            dist/linux-arm64-trust.json
+          if-no-files-found: error
+          retention-days: 14
+
   windows:
     name: Windows x86_64 client
     needs: metadata
@@ -363,7 +460,7 @@ jobs:
 
   candidate:
     name: Assemble checksummed nonpublishing candidate
-    needs: [metadata, linux, windows, macos]
+    needs: [metadata, linux, linux-arm64, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -394,6 +491,7 @@ jobs:
           set -euo pipefail
           cd candidate
           sha256sum --check Spurfire-linux-x86_64.tar.gz.sha256
+          sha256sum --check Spurfire-linux-arm64.tar.gz.sha256
           sha256sum --check Spurfire-macos-universal.zip.sha256
           sha256sum --check Spurfire-windows-x86_64.zip.sha256
           cd ..
@@ -432,7 +530,7 @@ jobs:
           else
             test "$attest_sha" = "$source_sha"
           fi
-          for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-macos-universal.zip candidate/Spurfire-windows-x86_64.zip; do
+          for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-linux-arm64.tar.gz candidate/Spurfire-macos-universal.zip candidate/Spurfire-windows-x86_64.zip; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$attest_sha"
           done
           rm -rf candidate-metadata
@@ -519,7 +617,7 @@ jobs:
           git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
           [[ "$APPROVED_APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$APPROVED_WINDOWS_CERTIFICATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          for archive in trusted-candidate/Spurfire-linux-x86_64.tar.gz trusted-candidate/Spurfire-macos-universal.zip trusted-candidate/Spurfire-windows-x86_64.zip; do
+          for archive in trusted-candidate/Spurfire-linux-x86_64.tar.gz trusted-candidate/Spurfire-linux-arm64.tar.gz trusted-candidate/Spurfire-macos-universal.zip trusted-candidate/Spurfire-windows-x86_64.zip; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$SOURCE_SHA"
           done
           rm -f trusted-candidate/SHA256SUMS \

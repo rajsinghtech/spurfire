@@ -28,7 +28,12 @@ REQUIRED_GATES = (
     "telemetry_metrics",
     "windows_distribution_trust",
 )
-REQUIRED_PLATFORMS = ("linux-x86_64", "macos-universal", "windows-x86_64")
+REQUIRED_PLATFORMS = (
+    "linux-arm64",
+    "linux-x86_64",
+    "macos-universal",
+    "windows-x86_64",
+)
 
 
 class ManifestError(ValueError):
@@ -91,7 +96,9 @@ def validate(document: dict[str, Any], *, version: str | None, source_sha: str |
         raise ManifestError("artifacts must be an array")
     by_platform = {str(item.get("platform", "")): item for item in artifacts if isinstance(item, dict)}
     if sorted(by_platform) != sorted(REQUIRED_PLATFORMS) or len(artifacts) != len(REQUIRED_PLATFORMS):
-        raise ManifestError("artifacts must contain exactly the three supported platforms")
+        raise ManifestError(
+            f"artifacts must contain exactly the {len(REQUIRED_PLATFORMS)} supported platforms"
+        )
     for platform in REQUIRED_PLATFORMS:
         item = by_platform[platform]
         if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):

@@ -12,6 +12,13 @@
   "artifacts": [
     {
       "launch_smoke_passed": false,
+      "platform": "linux-arm64",
+      "provenance_verified": false,
+      "sbom_present": false,
+      "sha256": ""
+    },
+    {
+      "launch_smoke_passed": false,
       "platform": "linux-x86_64",
       "provenance_verified": false,
       "sbom_present": false,

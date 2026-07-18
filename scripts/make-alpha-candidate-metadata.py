@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED = {
+    "Spurfire-linux-arm64.tar.gz": "linux-arm64",
     "Spurfire-linux-x86_64.tar.gz": "linux-x86_64",
     "Spurfire-macos-universal.zip": "macos-universal",
     "Spurfire-windows-x86_64.zip": "windows-x86_64",
 }
 TRUST_FILES = {
+    "linux-arm64": "linux-arm64-trust.json",
     "linux-x86_64": "linux-trust.json",
     "macos-universal": "macos-trust.json",
     "windows-x86_64": "windows-trust.json",
@@ -131,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if [path.name for path in files] != sorted(EXPECTED):
         print(
-            "error: candidate input must contain exactly the three expected client archives",
+            f"error: candidate input must contain exactly the {len(EXPECTED)} expected client archives",
             file=sys.stderr,
         )
         return 1
@@ -214,6 +216,10 @@ def main(argv: list[str] | None = None) -> int:
             },
             "linux": {
                 "signature": trust["linux-x86_64"].get("signature"),
+                "checksum_present": True,
+            },
+            "linux-arm64": {
+                "signature": trust["linux-arm64"].get("signature"),
                 "checksum_present": True,
             },
         },

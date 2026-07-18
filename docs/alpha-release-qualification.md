@@ -17,9 +17,9 @@ Release/check tooling has credential-free unit tests under `scripts/tests/`. Tes
 
 ## Nonpublishing client candidates
 
-`Client Preflight` builds on GitHub-hosted Linux, Windows, and macOS runners. It never creates a release, tag, package, or deployment. Each platform artifact contains its archive, SHA-256, launch-smoke result, and trust status. The final `alpha-candidate-<sha>` artifact combines:
+`Client Preflight` builds on GitHub-hosted Linux x86_64, Linux ARM64, Windows, and macOS runners. It never creates a release, tag, package, or deployment. Each platform artifact contains its archive, SHA-256, launch-smoke result, and trust status. The Linux ARM64 job natively builds the registered `linux.*.arm64` GDExtension libraries, runs the full headless smoke suite, exports the `Linux ARM64` preset, asserts the exported binary is an aarch64 ELF, and launch-smokes the final archive. The final `alpha-candidate-<sha>` artifact combines:
 
-- all three archives;
+- all four archives;
 - `SHA256SUMS`;
 - `candidate.spdx.json`;
 - `candidate-manifest.json`; and
