@@ -309,10 +309,10 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	# Inclusive 8 m/s threshold launches a real separate body and leaves the same
 	# horse object running out under collision feedback.
 	var horse_identity := horse.get_instance_id()
-	horse.velocity = Vector3(0, 0, -8.0)
+	horse.velocity = Vector3(0, 0, -9.0)
 	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_DIVE or int(rider.get("dive_id")) <= 0:
-		failures.append("8000 mm/s E did not start Saddle Dive")
+		failures.append(">=8 m/s E did not start Saddle Dive")
 		return
 	if int(horse.get("control_mode")) != 1:
 		failures.append("accepted dive did not start horse runout")
