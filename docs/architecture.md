@@ -9,7 +9,7 @@ Public real-network activation is closed. The accepted target and exact gates ar
 ### Control plane (this repository)
 
 - **`spurfire-control`** — typed Tailscale API client for organization child-tailnet creation/listing, narrow auth-key operations, coarse device inventory, and exact child-scoped deletion.
-- **`spurfire-server`** — Axum lobby service for durable control intent, idempotency, credential issuance receipts, deterministic election records, and cleanup. The accepted target adds cached network observations and the protected selected-lobby view. It is not in the gameplay path.
+- **`spurfire-server`** — Axum lobby service for durable control intent, idempotency, credential issuance receipts, deterministic election records, and cleanup. Safe groundwork adds exact provider identity, a singleton real-lobby lease, cached provider observations, and a creator-capability selected-lobby view; complete route authorization/reconciliation remains gated. It is not in the gameplay path.
 - **`spurfire-ctl`** — development/operator HTTP client. It does not persist child OAuth material and must not enroll as a lobby peer.
 - **Dynamic encrypted vault (activation requirement)** — holds one-time child OAuth material under workload identity and audit. The prototype has only a process-local, zeroizing vault, so restart recovery is fail-closed and public real activation is blocked.
 

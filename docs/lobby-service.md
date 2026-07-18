@@ -2,7 +2,7 @@
 
 `spurfire-server` is the prototype HTTP control service. It creates lobby records, mints narrow Tailscale enrollment credentials, publishes deterministic authority elections, and coordinates teardown. Gameplay remains peer-to-peer; the service is not in the gameplay data path and, by D9, never joins a lobby tailnet.
 
-> **Activation status:** public real provisioning is closed. The current exact-lobby routes use client assertions rather than authentication, child credentials are process-local, and the binary does not yet have the required independent default-off real-mutation kill switch. Ottawa is public dry-run only. The accepted target contract and operator runbook are in [control-plane-network-view.md](control-plane-network-view.md).
+> **Activation status:** public real provisioning is closed. Safe groundwork adds an independent default-off real-mutation switch and a creator-capability network view, but legacy lobby routes still use client assertions, capability migration is incomplete, and child credentials remain process-local. The chart rejects enabling real mutations. Ottawa is public dry-run only. The accepted target contract and operator runbook are in [control-plane-network-view.md](control-plane-network-view.md).
 
 ## Start safely
 
@@ -21,10 +21,11 @@ The current prototype can load Tailscale credentials and durable, non-secret sta
 ```sh
 SPURFIRE_BIND_ADDR=127.0.0.1:8080 \
 SPURFIRE_STATE_PATH=.spurfire/server-state.json \
+SPURFIRE_REAL_MUTATIONS_ENABLED=0 \
 cargo run -p spurfire-server
 ```
 
-Do not use that command for a public deployment. In the current binary, valid credentials plus non-dry configuration can reach real provider mutations; there is no independent `SPURFIRE_REAL_MUTATIONS_ENABLED` gate yet. Production activation requires that switch to exist, default false, and gate create/mint/delete independently of credentials and provisioning mode.
+Do not use that command for a public deployment. Safe-groundwork revisions recognize `SPURFIRE_REAL_MUTATIONS_ENABLED`, default it to `0`, and reject real create/mint/delete without it independently of credentials and provisioning mode. Older revisions without that switch are unsuitable for any exposed real configuration. The shipped chart keeps the switch at `0` and deliberately rejects `true`; no current deployment is authorized to enable it.
 
 Current real startup performs bounded, read-only capability probes. Organization-tailnet listing is probed independently from shared-tailnet key/device/ACL scopes. Organization create/token, child-scoped one-use key issuance, and deletion have been live-proven in disposable lifecycles, while shared-tailnet scopes remain blocked for the historical client. Public use remains dry-run until the complete activation checklist passes.
 
@@ -63,7 +64,7 @@ Planned (M6-complete, not yet implemented): a privacy-safe aggregate stats surfa
 
 ## Protected selected-lobby target
 
-These routes are the accepted contract, not a claim that the current public service implements or authorizes them:
+These routes are the accepted contract. Safe groundwork implements the schema, creator-capability cached read, browser/CLI clients, and default-off deployment plumbing; invitation/participant/report/operator routes and capability migration across every legacy route remain activation work. None is authorization for public real mode:
 
 | Method and path | Required identity and behavior |
 |---|---|
@@ -109,11 +110,10 @@ Alpha also adds one durable singleton lease across both real modes. Idempotency 
 | `SPURFIRE_SHARED_TAILNET` | `-` | Tailscale tailnet selector. |
 | `SPURFIRE_STATE_PATH` | `.spurfire/server-state.json` | Single-process JSON state used only in real mode. It stores non-secret tailnet selectors, receipts, and cleanup state—never auth keys, child OAuth credentials, or bearer tokens. |
 | `TS_API_BASE` | none | Normally `https://api.tailscale.com/api/v2`. |
-| `TS_CLIENT_ID` / `TS_CLIENT_SECRET` | none | Server-only organization OAuth credentials used by the current private prototype real mode. |
+| `SPURFIRE_REAL_MUTATIONS_ENABLED` | `0` | Independent fail-closed gate in safe-groundwork revisions. The chart emits `0` and rejects `true`; enabling it remains activation-blocked. |
+| `TS_CLIENT_ID` / `TS_CLIENT_SECRET` | none | Server-only organization OAuth credentials used by private activation-closed staging. |
 
-An absent `.env` is allowed; a malformed or unreadable `.env` fails startup. `.env` and `.spurfire/` are gitignored.
-
-Activation requires a new independent `SPURFIRE_REAL_MUTATIONS_ENABLED` variable that defaults to false. It is deliberately not shown as a usable current option because the binary does not yet implement it. Credentials, `SPURFIRE_DRY_RUN=0`, and a real `SPURFIRE_PROVISIONING_MODE` must never be sufficient on their own after that gate lands.
+An absent `.env` is allowed; a malformed or unreadable `.env` fails startup. `.env` and `.spurfire/` are gitignored. Credentials, `SPURFIRE_DRY_RUN=0`, and a real `SPURFIRE_PROVISIONING_MODE` are never sufficient without the independent switch; the switch is itself never sufficient without every remaining activation gate.
 
 ## Fake-value curl walkthrough
 

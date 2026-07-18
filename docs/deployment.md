@@ -2,7 +2,7 @@
 
 Spurfire publishes the lobby control service as a multi-architecture OCI image and the deployment chart as an OCI Helm artifact. Gameplay traffic remains peer-to-peer, and the control-plane workload never joins a lobby tailnet.
 
-> **Public real activation is closed.** The current chart can express prototype real-mode values, but it does not yet supply the independent kill switch, exact-lobby capability/abuse controls, dynamic encrypted child vault, startup reconciler, singleton lease, or private operator listener required for public use. Ottawa remains public dry-run. See [control-plane-network-view.md](control-plane-network-view.md) for the authoritative gates and runbook.
+> **Public real activation is closed.** Safe deployment groundwork adds an independent kill switch fixed off, one-real-lobby configuration, and fixed inspection freshness values. The chart deliberately rejects enabling real mutations and still does not supply complete lobby-route capability/abuse controls, a dynamic encrypted child vault, startup reconciliation, or a private operator listener. Ottawa remains public dry-run. See [control-plane-network-view.md](control-plane-network-view.md) for the authoritative gates and runbook.
 
 ## Artifact coordinates
 
@@ -60,6 +60,7 @@ docker run --rm \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --tmpfs /var/lib/spurfire:rw,noexec,nosuid,size=16m \
   -e SPURFIRE_DRY_RUN=1 \
+  -e SPURFIRE_REAL_MUTATIONS_ENABLED=0 \
   -e SPURFIRE_PROVISIONING_MODE=dry_run \
   -p 127.0.0.1:8080:8080 \
   spurfire-server:local
@@ -69,7 +70,7 @@ The runtime image is Alpine-based, runs as UID/GID `10001`, and contains only CA
 
 ## Install the Helm chart
 
-The defaults are intentionally safe: one replica, `Recreate`, dry-run, `emptyDir`, ClusterIP, and no public HTTPRoute.
+The defaults are intentionally safe: one replica, `Recreate`, dry-run, `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, one real-lobby slot, fixed inspection freshness values, `emptyDir`, ClusterIP, and no public HTTPRoute. This chart revision rejects setting the real-mutation switch to true.
 
 ```sh
 helm upgrade --install spurfire \
@@ -109,13 +110,13 @@ httpRoute:
     value: /
 ```
 
-Gateway API CRDs and a listener that permits cross-namespace routes must already exist. TLS and DNS are responsibilities of that Gateway deployment.
+Gateway API CRDs and a listener that permits cross-namespace routes must already exist. TLS and DNS are responsibilities of that Gateway deployment. Chart validation permits this public route only with credential-free dry-run and the real-mutation switch off.
 
 **Security boundary:** `X-Spurfire-Player-Id` is currently a client assertion, not authentication. Public routing is disabled by chart default. A public Gateway may serve only the static shell and forced-dry-run API; `/v1/operator/*` must use a separate private listener. Generic external authentication alone does not satisfy the exact-lobby capability, uniform-404, rate-limit, and privacy gates.
 
 ## Prototype real provisioning mode (activation blocked)
 
-The current chart accepts non-dry configuration only with all of the following necessary prototype settings. They are not sufficient for public activation:
+The activation-closed chart can render non-dry provider staging only with all of the following necessary prototype settings. It still emits `SPURFIRE_REAL_MUTATIONS_ENABLED=0`, forbids a public HTTPRoute in that configuration, and therefore cannot perform real mutations. These settings are not sufficient for public activation:
 
 1. an existing Kubernetes Secret with keys `TS_CLIENT_ID` and `TS_CLIENT_SECRET`;
 2. `config.dryRun=false` and a real provisioning mode;
@@ -127,6 +128,8 @@ The chart accepts only the parent organization OAuth Secret name and key names; 
 ```yaml
 config:
   dryRun: false
+  realMutationsEnabled: false
+  maxActiveRealLobbies: 1
   provisioningMode: tailnet_per_lobby
 
 tailscale:
@@ -144,7 +147,7 @@ persistence:
 
 The PVC contains non-secret JSON state and needs a writable directory because state updates use a sibling temporary file followed by an atomic rename. The parent OAuth Secret is not checksummed into the pod template. After rotating it, perform an explicit controlled restart.
 
-Do not apply this example to Ottawa or another public listener. In the current binary, credentials plus non-dry values can reach provider mutations because `SPURFIRE_REAL_MUTATIONS_ENABLED` does not yet exist. Activation requires that independent switch to default false and gate create/mint/delete even when all other settings are real.
+Do not apply this example to Ottawa or another public listener. Safe-groundwork server revisions recognize the independent switch and reject real create/mint/delete while it is false; the chart pins it false and rejects true. Older binary/chart revisions without this contract are unsuitable. A future activation change may make `true` renderable only after every other gate is attested; credentials and non-dry values never suffice.
 
 Do not restart or upgrade the current process-local-vault prototype while child lobbies are active. After restart, retained child-backed lobbies fail closed with `cleanup_pending` and may require exact-ID manual remediation. Production requires a dynamic encrypted child vault with workload identity/audit/backup/CAS/deletion, mutation-closed startup reconciliation across store/vault/lease/exact upstream IDs, and proven create crash-window handling. Dynamic child credentials must never enter JSON, a static Kubernetes Secret, SOPS, rendered Helm output, logs, or metrics. Shared-tailnet mode separately remains blocked until its required scopes are live-verified and still consumes the one-real-lobby quota.
 

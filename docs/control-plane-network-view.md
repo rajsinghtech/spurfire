@@ -14,11 +14,11 @@ This document is the source of truth for dedicated lobby-network ownership, the 
 | Dedicated `tailnet_per_lobby` isolation | Selected real-lobby path |
 | `shared_tailnet` | Separate compatibility path; never represented as dedicated isolation |
 | Child OAuth custody | Process-local and zeroized today; restart fails closed and may require manual remediation |
-| Durable provider identity | Incomplete: the current server retains the DNS selector but discards the provider stable ID |
-| Protected inspector, capability migration, observation cache, real-lobby lease, encrypted vault, and startup reconciler | Approved groundwork/activation work; not a basis for enabling public real mode |
+| Durable provider identity, selected-lobby DTO/cache, creator read capability, one-real-lobby lease, browser/CLI view, and default-off deployment switch | Safe groundwork; older revisions that discard stable ID or lack the switch are unsuitable, and this slice is not a basis for enabling public real mode |
+| Invitation/participant/report authorization, migration of every legacy route, encrypted vault, startup reconciler, private operator listener, and abuse controls | Activation work remains open |
 | Ottawa | Public, credential-free, non-persistent dry-run; no real provider mutation |
 
-The existing server can exercise real provider code when deliberately configured with credentials. That prototype ability is not production authorization. Until every gate in [Activation gates](#activation-gates) is green, public deployments must have no credential path and must force `dry_run`.
+The server can exercise real provider code only when deliberately configured past its independent default-off switch. That private integration ability is not production authorization. The chart fixes the switch off and rejects enabling it. Until every gate in [Activation gates](#activation-gates) is green, public deployments must have no credential path and must force `dry_run`.
 
 ## Invariants
 
@@ -113,7 +113,7 @@ X-Content-Type-Options: nosniff
 
 ### Selection experience
 
-- `GET /inspect` is a static, no-store shell with separate lobby-ID and capability inputs. It embeds no lobby data, uses no third-party assets, keeps the capability in memory, and offers no search/list endpoint.
+- The final `GET /inspect` route is a static, no-store shell with separate lobby-ID and capability inputs. It embeds no lobby data, uses no third-party assets, keeps the capability in memory, and offers no search/list endpoint. Safe-groundwork route integration must converge on this separate path before activation.
 - An authorized participant or creator can inspect only the exact lobby bound to the capability.
 - Operators authenticate to a private listener with mTLS/OIDC or a Kubernetes-authenticated port-forward. A minimal internal list may be used to choose a lobby; the operator then inspects exactly that lobby.
 - The public listener has no real-lobby existence oracle. Aggregate real-network metrics are suppressed when fewer than three real lobbies contribute; the alpha quota of one therefore suppresses them unconditionally.
@@ -126,7 +126,7 @@ The selected-lobby screen begins with one unambiguous truth label:
 
 It then shows backing identity (as allowed for the audience), lobby and network lifecycles, qualified counts, directional routes, application quality, authority layers, freshness, and cleanup. Every value has visible source/assurance/freshness; `UNKNOWN` and `STALE` are first-class display states.
 
-The target CLI equivalent is:
+The safe-groundwork CLI is:
 
 ```sh
 spurfire-ctl lobby inspect --lobby <uuid> --server <https-url> --cap-file <path|-> [--json]
