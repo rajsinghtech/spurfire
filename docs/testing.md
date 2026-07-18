@@ -163,7 +163,7 @@ No auth key, bearer token, OAuth secret, capability plaintext, or generated chil
 
 The normative matrix is [control-plane-network-view.md#required-test-plan](control-plane-network-view.md#required-test-plan). It covers exact-lobby capabilities/audience projection, FQDN validation, directional report aggregation, stale/unknown facts, cache-only inspection, one-real-lobby leasing, startup reconciliation, exact-ID cleanup proof, secret canaries, and the never-join dependency gate.
 
-For this workstream, do **not** build on the development Mac and do not run a live provider probe. Push the branch, then validate from a clean credential-free checkout on `ssh ubuntu@raj-builder`; never copy `.env`, OAuth material, auth keys, or capabilities to the builder. Documentation/Helm checks may use:
+For this workstream, do **not** build on the development Mac and do not run a live provider probe. Push the branch, then validate from a clean credential-free Linux checkout; never copy `.env`, OAuth material, auth keys, or capabilities to any build host. Documentation/Helm checks may use:
 
 ```bash
 git diff --check origin/main...HEAD

@@ -108,8 +108,8 @@ httpRoute:
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: public
-      namespace: home
+      name: public-gateway
+      namespace: gateway-system
   hostnames:
     - spurfire.rajsingh.info
   path:
@@ -146,7 +146,7 @@ tailscale:
 
 persistence:
   enabled: true
-  storageClass: ceph-block-replicated
+  storageClass: standard-rwo # replace with the deployment's RWO class
   accessModes: [ReadWriteOnce]
   size: 1Gi
   retain: true
@@ -194,7 +194,7 @@ The GitHub repository should protect `main` and `v*` tags, require package valid
 
 ## Validation
 
-These checks do not publish. For the control-network workstream, do not build on the development Mac: run the credential-free checks from a clean checkout on `ssh ubuntu@raj-builder`, and use GitHub Actions for cross-platform checks/artifacts. Never copy `.env` or credentials to the builder.
+These checks do not publish. For the control-network workstream, do not build on the development Mac: run credential-free checks from a clean Linux checkout, and use GitHub Actions for cross-platform checks/artifacts. Never copy `.env` or credentials to any build host.
 
 ```sh
 scripts/check-release-metadata.sh

@@ -20,7 +20,7 @@ helm template validate "$chart" \
   --set config.provisioningMode=tailnet_per_lobby \
   --set tailscale.existingSecret=fixture-parent-oauth \
   --set persistence.enabled=true \
-  --set persistence.storageClass=ceph-block-replicated \
+  --set persistence.storageClass=standard-rwo \
   > "$tmp/staged.yaml"
 helm template validate "$chart" \
   --set fullnameOverride=spurfire \
@@ -74,8 +74,8 @@ fi
 
 grep -q '^kind: HTTPRoute$' "$tmp/public-dry-run.yaml"
 grep -q 'spurfire.rajsingh.info' "$tmp/public-dry-run.yaml"
-grep -q 'name: public' "$tmp/public-dry-run.yaml"
-grep -q 'namespace: home' "$tmp/public-dry-run.yaml"
+grep -q 'name: public-gateway' "$tmp/public-dry-run.yaml"
+grep -q 'namespace: gateway-system' "$tmp/public-dry-run.yaml"
 grep -q 'SPURFIRE_DRY_RUN: "1"' "$tmp/public-dry-run.yaml"
 grep -q 'SPURFIRE_REAL_MUTATIONS_ENABLED: "0"' "$tmp/public-dry-run.yaml"
 if grep -q 'TS_CLIENT_ID\|TS_CLIENT_SECRET' "$tmp/public-dry-run.yaml"; then

@@ -2,7 +2,7 @@
 
 Latest verification: 2026-07-16 UTC. API origin is redacted; `.env` sets `TS_API_BASE` to a root ending in `/api/v2`, so paths below are relative to `/api/v2`. OAuth credentials, bearer tokens, child OAuth credentials, and auth keys are never recorded here.
 
-The latest organization-tailnet probe created exactly one disposable resource and deleted it in the same guarded run. Evidence resource: display name `spurfire-probe-1784254715`, stable ID `TtN3u6hGMV11CNTRL`, DNS name `tail9a1c23.ts.net`. It was already deleted before this implementation work began; no additional live mutation was performed for the implementation.
+The latest organization-tailnet probe created exactly one disposable resource and deleted it in the same guarded run. Its display name, stable ID, and DNS name are intentionally redacted; a follow-up organization listing confirmed the exact stable ID was absent. The resource was already deleted before this implementation work began, and no additional live mutation was performed for the implementation.
 
 ## Verified organization authentication and listing
 
@@ -26,7 +26,7 @@ Authorization: Bearer <redacted-organization-token>
 {"tailnets":[...]}
 ```
 
-The response contained 415 existing tailnets at probe time. That count is evidence, not an assumed limit. Probe tooling suppresses entries by default rather than printing the full organization inventory.
+The response contained a non-empty organization inventory at probe time. The exact count and entries are intentionally omitted; probe tooling suppresses entries by default rather than printing the organization inventory.
 
 ## Verified child-tailnet creation
 
@@ -37,7 +37,7 @@ POST /api/v2/organizations/-/tailnets
 Authorization: Bearer <redacted-organization-token>
 Content-Type: application/json
 
-{"displayName":"spurfire-probe-1784254715"}
+{"displayName":"<generated-probe-name>"}
 ```
 
 The call returned success and a typed object containing these fields:
@@ -46,7 +46,7 @@ The call returned success and a typed object containing these fields:
 {
   "id": "<stable-tailnet-id>",
   "dnsName": "<child-dns-name>",
-  "displayName": "spurfire-probe-1784254715",
+  "displayName": "<generated-probe-name>",
   "oauthClient": {
     "id": "<redacted-child-oauth-id>",
     "secret": "<redacted-one-time-child-secret>"
@@ -75,13 +75,13 @@ grant_type=client_credentials&client_id=<redacted-child-id>&client_secret=<redac
 The organization token was not used for deletion. The child token deleted the child by DNS selector:
 
 ```http
-DELETE /api/v2/tailnet/tail9a1c23.ts.net
+DELETE /api/v2/tailnet/<redacted-child-dns-name>
 Authorization: Bearer <redacted-child-token>
 
 200
 ```
 
-A follow-up `GET /api/v2/organizations/-/tailnets` no longer contained stable ID `TtN3u6hGMV11CNTRL`. Spurfire treats a delete-time 404 as idempotent success.
+A follow-up `GET /api/v2/organizations/-/tailnets` no longer contained the exact stored stable ID. Spurfire treats a delete-time 404 as idempotent success.
 
 ## Earlier route probes, retained as negative evidence
 
@@ -124,7 +124,7 @@ GET /api/v2/tailnet/-/acl
 | Capability | Latest status | Evidence |
 |---|---:|---|
 | Organization token exchange | Verified | `POST /oauth/token` succeeded |
-| Organization list | Verified | `GET /organizations/-/tailnets`; 415 entries at probe time |
+| Organization list | Verified | `GET /organizations/-/tailnets`; inventory details intentionally omitted |
 | API-only child create | Verified | `POST /organizations/-/tailnets` with `{displayName}` created exactly one probe |
 | Child token exchange | Verified | Returned child OAuth pair minted a child-scoped token |
 | Child tailnet delete | Verified | `DELETE /tailnet/{dnsName}` with child token; stable ID absent afterward |

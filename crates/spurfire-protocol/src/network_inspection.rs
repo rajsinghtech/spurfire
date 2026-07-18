@@ -485,10 +485,11 @@ pub enum FactValidationError {
 
 /// Validated provider-returned tailnet DNS name/FQDN.
 ///
-/// The canonical value is lowercase ASCII without a trailing root dot. For
-/// `tail9a1c23.ts.net`, `.net` is the TLD; the useful value represented by this
-/// type is the complete `tail9a1c23.ts.net` DNS name/FQDN. This type is topology
-/// metadata, not a credential, and its `Debug` output is intentionally omitted.
+/// The canonical value is lowercase ASCII without a trailing root dot. For the
+/// illustrative `example-tailnet.ts.net`, `.net` is the TLD; the useful value
+/// represented by this type is the complete `example-tailnet.ts.net` DNS
+/// name/FQDN. This type is topology metadata, not a credential, and its `Debug`
+/// output is intentionally omitted.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TailnetDnsName(String);
 
@@ -1991,7 +1992,7 @@ mod tests {
             network_generation: 7,
             network_lifecycle: NetworkLifecycle::Active,
             tailnet_dns_name: Fact::known(
-                TailnetDnsName::parse("Tail9A1C23.TS.NET.").unwrap(),
+                TailnetDnsName::parse("Example-Tailnet.TS.NET.").unwrap(),
                 FactSource::ProviderApi,
                 FactAssurance::Authoritative,
                 Some(now),
@@ -2095,17 +2096,17 @@ mod tests {
 
     #[test]
     fn tailnet_dns_name_is_precise_canonical_fqdn() {
-        let name = TailnetDnsName::parse("Tail9A1C23.TS.NET.").unwrap();
-        assert_eq!(name.as_str(), "tail9a1c23.ts.net");
+        let name = TailnetDnsName::parse("Example-Tailnet.TS.NET.").unwrap();
+        assert_eq!(name.as_str(), "example-tailnet.ts.net");
         assert_eq!(
             serde_json::to_string(&name).unwrap(),
-            r#""tail9a1c23.ts.net""#
+            r#""example-tailnet.ts.net""#
         );
         assert_eq!(
-            serde_json::from_str::<TailnetDnsName>(r#""TAIL9A1C23.TS.NET.""#)
+            serde_json::from_str::<TailnetDnsName>(r#""EXAMPLE-TAILNET.TS.NET.""#)
                 .unwrap()
                 .as_str(),
-            "tail9a1c23.ts.net"
+            "example-tailnet.ts.net"
         );
         assert!(!format!("{name:?}").contains(name.as_str()));
     }
@@ -2355,7 +2356,7 @@ mod tests {
         let mut wire = serde_json::to_value(&view).unwrap();
         assert_eq!(
             wire["backing"]["tailnet_dns_name"]["value"],
-            "tail9a1c23.ts.net"
+            "example-tailnet.ts.net"
         );
         assert!(wire.get("provider_tailnet_id").is_none());
         wire.as_object_mut()

@@ -75,7 +75,7 @@ The alpha real-lobby quota is one across both real modes. Shared compatibility c
 
 ### Metadata and observations
 
-The complete `tailnet_dns_name` is a provider-returned FQDN (for example, `tail9a1c23.ts.net`). Its TLD is `.net`; `.ts.net` is not a TLD. FQDNs and private tailnet addresses are non-secret topology metadata, but capability and retention policy still protect them.
+The complete `tailnet_dns_name` is a provider-returned FQDN (for example, the illustrative `example-tailnet.ts.net`). Its TLD is `.net`; `.ts.net` is not a TLD. FQDNs and private tailnet addresses are non-secret topology metadata, but capability and retention policy still protect them.
 
 Observation does not imply authority:
 
