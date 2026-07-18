@@ -773,7 +773,7 @@ async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
         "child-test.ts.net"
     );
     assert!(view.get("provider_tailnet_id").is_none());
-    assert!(view.to_string().find("TtRouterCNTRL").is_none());
+    assert!(!view.to_string().contains("TtRouterCNTRL"));
 
     let shared_provider = Arc::new(RecordingProvider::available());
     let (shared_app, _, _) = live_app(clock, shared_provider);
