@@ -280,8 +280,12 @@ func _on_lobby_updated(response: Dictionary) -> void:
 		_bridge.apply_projection(response)
 	_try_register_endpoint()
 	_render_waiting()
-	if str(_lobby.get("state", "")) in ["STARTING", "IN_MATCH"] and _screen == Screen.WAITING:
+	var lobby_state := str(_lobby.get("state", ""))
+	if lobby_state in ["STARTING", "IN_MATCH"] and _screen == Screen.WAITING:
 		_start_match()
+	elif _screen == Screen.MATCH and lobby_state in ["CLOSING", "FAILED", "EXPIRED", "DESTROYED"]:
+		_begin_leave()
+		teardown_status.text = "Match ended • closing this lobby session safely…"
 
 func _on_network_updated(response: Dictionary) -> void:
 	_network_view = response
