@@ -1,6 +1,8 @@
 extends Node
 class_name CombatPlayer
 
+signal reload_input_result(accepted: bool, reason: String)
+
 @export var rider: CharacterBody3D
 @export var horse: CharacterBody3D
 @export var controller: Node3D
@@ -24,7 +26,17 @@ func process_combat_tick(tick: int) -> void:
 	if Input.is_action_pressed(&"combat_fire"):
 		_fire_once(tick)
 	if Input.is_action_just_pressed(&"combat_reload") and rifle:
-		rifle.call("request_reload")
+		var accepted := bool(rifle.call("request_reload"))
+		var reason := "" if accepted or controller == null else str(controller.get("last_reject_reason"))
+		reload_input_result.emit(accepted, reason)
+		if (
+			not accepted
+			and controller != null
+			and not controller.has_signal(&"reload_rejected")
+			and combat_hud
+			and combat_hud.has_method("show_reload_rejection")
+		):
+			combat_hud.call("show_reload_rejection", reason)
 	if Input.is_action_just_pressed(&"weapon_dustwalker"):
 		_select_weapon(0)
 	elif Input.is_action_just_pressed(&"weapon_longspur"):

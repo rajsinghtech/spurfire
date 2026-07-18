@@ -47,7 +47,7 @@ Every gameplay milestone follows the established pattern: deterministic Rust ker
 
 **Mechanics in scope:** gait state machine (stand/walk/trot/gallop), accel/decel curves,
 rein turn (rate-limited at speed), drift/power-turn (handbrake), jump, terrain speed factors,
-slope momentum (+15% downhill accel, -15% uphill), camera (chase, speed FOV 70->85).
+slope momentum (+15% downhill accel, -15% uphill), camera (chase, speed FOV 70->78).
 
 **Tuning table:**
 
@@ -449,8 +449,12 @@ and angle; clamp flag; horizontal impulse, vertical pop, launch height, resultin
 total speed, and nominal airtime; landing tick and actual airtime; shot attempts, accepted
 shots, hits, headshots, reversal hits, and damage dealt; landing terrain, quantized slope,
 outcome, and landing damage; damage taken and death within the inclusive landing-through-3s
-window; remount tick/time; and terminal censor reason. It contains no score delta, bond gain,
-credential, seed, or client-claimed style credit.
+window; remount tick/time; and terminal censor reason. The client appends exactly one
+allowlisted finalized/censored row to a per-session JSONL file under `user://logs`; each line
+is flushed so an interrupted session remains parseable and prior sessions are preserved.
+Session rows include a random local session ID, schema, build identifier, and fixed simulation
+rate. They contain no score delta, bond gain, credential, capability, join code, seed,
+endpoint, or client-claimed style credit.
 
 | Metric | Target band | Dial if out of band |
 |---|---|---|

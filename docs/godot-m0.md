@@ -83,7 +83,7 @@ The course uses a curated 208 KB subset of Kenney Nature Kit and Survival Kit pr
 
 ## M0 contract
 
-The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, lateral stepping, archetype attributes, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz.
+The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, lateral stepping, archetype attributes, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz. Godot local physics interpolation is enabled for presentation only; the chase camera and rider pose sample render-time transforms and reset interpolation history across intentional teleports. This does not change native gameplay state or the 60 Hz authority clock.
 
 The measurable exit checks are:
 

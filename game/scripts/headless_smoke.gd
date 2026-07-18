@@ -1,5 +1,7 @@
 extends Node
 
+const CAMERA_RIG_SCRIPT := preload("res://scripts/camera_rig.gd")
+
 const REQUIRED_ACTIONS := [
 	&"move_forward", &"move_back", &"steer_left", &"steer_right",
 	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse", &"scoreboard",
@@ -30,6 +32,7 @@ const STANCE_ON_FOOT := 6
 func _ready() -> void:
 	var failures: Array[String] = []
 	_check_input_map(failures)
+	_check_render_interpolation(failures)
 	_check_network_rider(failures)
 	_check_peer_session(failures)
 	if not ClassDB.class_exists(&"HorseController"):
@@ -80,10 +83,12 @@ func _ready() -> void:
 	elif str(course.get_node("Rider/WeaponController").get("shooter_peer_id")) != bound_player:
 		failures.append("network session identity did not reach combat authority")
 	_check_native_apis(horse, rider, failures)
+	await _exercise_reload_after_remount(course, horse, rider, failures)
 	await _exercise_native_input(course, horse, failures)
 	await _exercise_m2(course, horse, rider, failures)
 	await _exercise_landing_boundaries(course, horse, rider, failures)
 	await _exercise_bridge_caps(course, horse, rider, failures)
+	_check_persisted_telemetry(course, failures)
 	_finish(failures)
 
 func _check_input_map(failures: Array[String]) -> void:
@@ -98,6 +103,71 @@ func _check_input_map(failures: Array[String]) -> void:
 	e_event.physical_keycode = KEY_E
 	if not InputMap.event_is_action(e_event, &"combat_interact"):
 		failures.append("physical E is not mapped to combat_interact")
+
+func _check_render_interpolation(failures: Array[String]) -> void:
+	if int(Engine.physics_ticks_per_second) != 60:
+		failures.append("authoritative simulation is not fixed at 60 Hz")
+	if not bool(ProjectSettings.get_setting("physics/common/physics_interpolation", false)):
+		failures.append("local physics interpolation is not enabled")
+	var p95_speed_by_rate: Dictionary = {}
+	var p95_angular_speed_by_rate: Dictionary = {}
+	for render_hz in [60, 120, 144]:
+		var samples: Array[Transform3D] = []
+		for frame in 10 * render_hz:
+			var physics_time := float(frame) * 60.0 / float(render_hz)
+			var previous_tick := int(floor(physics_time))
+			var fraction := physics_time - float(previous_tick)
+			var previous := _synthetic_physics_transform(previous_tick)
+			var current := _synthetic_physics_transform(previous_tick + 1)
+			samples.append(CAMERA_RIG_SCRIPT.interpolate_render_transform(previous, current, fraction))
+		var speeds: Array[float] = []
+		var angular_speeds: Array[float] = []
+		var repeated_position := 0
+		var repeated_yaw := 0
+		for index in range(1, samples.size()):
+			var distance := samples[index].origin.distance_to(samples[index - 1].origin)
+			var yaw_delta := absf(wrapf(
+				samples[index].basis.get_euler().y - samples[index - 1].basis.get_euler().y,
+				-PI,
+				PI
+			))
+			if distance <= 0.000001:
+				repeated_position += 1
+			if yaw_delta <= 0.0000001:
+				repeated_yaw += 1
+			speeds.append(distance * float(render_hz))
+			angular_speeds.append(yaw_delta * float(render_hz))
+		if render_hz > 60 and (repeated_position > 0 or repeated_yaw > 0):
+			failures.append(
+				"%d Hz sampling repeated position=%d yaw=%d" % [
+					render_hz,
+					repeated_position,
+					repeated_yaw,
+				]
+			)
+		speeds.sort()
+		angular_speeds.sort()
+		var p95_index := clampi(int(ceil(float(speeds.size()) * 0.95)) - 1, 0, speeds.size() - 1)
+		p95_speed_by_rate[render_hz] = speeds[p95_index]
+		p95_angular_speed_by_rate[render_hz] = angular_speeds[p95_index]
+		var median := speeds[int(speeds.size() / 2)]
+		var angular_median := angular_speeds[int(angular_speeds.size() / 2)]
+		if median <= 0.0 or speeds.back() > median * 3.0:
+			failures.append("%d Hz linear sampling retained a staircase spike" % render_hz)
+		if angular_median <= 0.0 or angular_speeds.back() > angular_median * 3.0:
+			failures.append("%d Hz angular sampling retained a staircase spike" % render_hz)
+	if float(p95_speed_by_rate[144]) > float(p95_speed_by_rate[60]) * 1.01:
+		failures.append("144 Hz interpolated p95 linear motion exceeded the 60 Hz bound")
+	if float(p95_angular_speed_by_rate[144]) > float(p95_angular_speed_by_rate[60]) * 1.02:
+		failures.append("144 Hz interpolated p95 angular motion exceeded the 60 Hz bound")
+
+func _synthetic_physics_transform(tick: int) -> Transform3D:
+	var time := float(tick) / 60.0
+	# Constant forward travel plus alternating steering exercises position and yaw
+	# without changing the fixed-step gameplay state.
+	var yaw := 0.24 * sin(time * TAU * 0.75)
+	var position := Vector3(2.0 * sin(time * 0.6), 1.6, -13.0 * time)
+	return Transform3D(Basis(Vector3.UP, yaw), position)
 
 func _check_network_rider(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"NetworkRider"):
@@ -211,6 +281,142 @@ func _check_native_apis(horse: CharacterBody3D, rider: CharacterBody3D, failures
 		if not rider.has_signal(signal_name):
 			failures.append("SaddleDiveController lacks %s signal" % signal_name)
 
+func _exercise_reload_after_remount(
+	course: Node,
+	horse: CharacterBody3D,
+	rider: CharacterBody3D,
+	failures: Array[String]
+) -> void:
+	var controller := course.get_node("Rider/WeaponController")
+	var hud := course.get_node("CombatLayer/CombatHUD") as Control
+	await _wait_physics_frames(5)
+	var initial := controller.call("get_weapon_stats") as Dictionary
+	if int(initial.get("ammo_mag", -1)) != 30 or int(initial.get("ammo_reserve", -1)) != 120:
+		failures.append("reload regression did not start from Dustwalker 30 | 120")
+		return
+
+	# Establish the exact hands-on fixture without a debug ammo setter: fire 13,
+	# reload to consume 13 reserve, then empty the 30-round magazine.
+	var fired_setup := await _fire_mounted_rounds(controller, 13, 8)
+	var setup_reload_accepted := bool(controller.call("request_reload")) if fired_setup == 13 else false
+	if fired_setup != 13 or not setup_reload_accepted:
+		var setup_stats := controller.call("get_weapon_stats") as Dictionary
+		failures.append(
+			"could not establish Dustwalker setup: fired=%d ammo=%d|%d reason=%s" % [
+				fired_setup,
+				int(setup_stats.get("ammo_mag", -1)),
+				int(setup_stats.get("ammo_reserve", -1)),
+				str(controller.get("last_reject_reason")),
+			]
+		)
+		return
+	var setup_start := int(controller.get("current_tick"))
+	await _wait_controller_tick(controller, setup_start + 126, 140)
+	var loaded := controller.call("get_weapon_stats") as Dictionary
+	if int(loaded.get("ammo_mag", -1)) != 30 or int(loaded.get("ammo_reserve", -1)) != 107:
+		failures.append("setup reload did not produce Dustwalker 30 | 107")
+		return
+	var fired_mag := await _fire_mounted_rounds(controller, 30, 8)
+	var empty := controller.call("get_weapon_stats") as Dictionary
+	if fired_mag != 30 or int(empty.get("ammo_mag", -1)) != 0 or int(empty.get("ammo_reserve", -1)) != 107:
+		failures.append("reload regression could not establish exact 0 | 107 fixture")
+		return
+
+	var starts: Array[Vector2i] = []
+	var progress: Array[float] = []
+	var completions: Array[Vector3i] = []
+	var rejections: Array[String] = []
+	controller.reload_started.connect(func(tick, required):
+		starts.append(Vector2i(int(tick), int(required)))
+	)
+	controller.reload_progressed.connect(func(_tick, value, _active, _required):
+		progress.append(float(value))
+	)
+	controller.reload_completed.connect(func(tick, mag, reserve):
+		completions.append(Vector3i(int(tick), int(mag), int(reserve)))
+	)
+	controller.reload_rejected.connect(func(_tick, reason):
+		rejections.append(str(reason))
+	)
+
+	await _wait_until_grounded(horse, 90)
+	horse.velocity = Vector3(0, 0, -9.0)
+	await _press_action_one_tick(&"combat_interact")
+	if int(rider.get("stance_id")) != STANCE_DIVE:
+		failures.append("reload regression could not enter Saddle Dive")
+		return
+	await _press_action_one_tick(&"combat_reload")
+	for _frame in 80:
+		if int(rider.get("stance_id")) != STANCE_DIVE:
+			break
+		await get_tree().physics_frame
+	if int(rider.get("stance_id")) != STANCE_PRONE:
+		failures.append("reload regression did not reach landing recovery")
+		return
+	await _press_action_one_tick(&"combat_reload")
+	for _frame in 100:
+		if int(rider.get("stance_id")) == STANCE_ON_FOOT:
+			break
+		await get_tree().physics_frame
+	for _frame in 150:
+		if bool(horse.get("is_retrievable")):
+			break
+		await get_tree().physics_frame
+	if int(rider.get("stance_id")) != STANCE_ON_FOOT or not bool(horse.get("is_retrievable")):
+		failures.append("reload regression did not reach retrievable on-foot state")
+		return
+	rider.global_position = horse.global_position + Vector3(0, 0, 1.0)
+	await _pulse_action(&"combat_interact")
+	if int(rider.get("stance_id")) != STANCE_MOUNTED:
+		failures.append("reload regression did not remount")
+		return
+
+	# The physical R edge must be acknowledged immediately and complete from
+	# native active ticks exactly 126 ticks later.
+	await _press_action_one_tick(&"combat_reload")
+	await get_tree().process_frame
+	var reload_ring := hud.get_node("%ReloadRing") as ProgressBar
+	if starts.size() != 1 or starts[0].y != 126:
+		failures.append("post-remount physical R did not emit one 126-tick reload start")
+	elif not reload_ring.visible or reload_ring.value <= 0.0:
+		failures.append("post-remount reload HUD was not visible within one render frame")
+	for _frame in 140:
+		if not bool(controller.get("is_reloading")):
+			break
+		await get_tree().physics_frame
+	await get_tree().process_frame
+	if completions.size() != 1:
+		failures.append("post-remount reload did not complete exactly once")
+	else:
+		var completion := completions[0]
+		if completion.x - starts[0].x != 126:
+			failures.append("post-remount reload completed after %d ticks, expected 126" % (completion.x - starts[0].x))
+		if completion.y != 30 or completion.z != 77:
+			failures.append("post-remount reload completed at %d | %d, expected 30 | 77" % [completion.y, completion.z])
+	for index in range(1, progress.size()):
+		if progress[index] + 0.000001 < progress[index - 1]:
+			failures.append("native reload progress regressed")
+			break
+	if reload_ring.visible:
+		failures.append("reload indicator did not clear on native completion")
+	if "airborne" not in rejections or "recovering" not in rejections:
+		failures.append("reload rejection feedback omitted airborne/recovering reasons")
+	var final_stats := controller.call("get_weapon_stats") as Dictionary
+	if int(final_stats.get("ammo_mag", -1)) != 30 or int(final_stats.get("ammo_reserve", -1)) != 77:
+		failures.append("post-remount reload did not retain exact 30 | 77 ammo")
+
+func _fire_mounted_rounds(controller: Node, count: int, cadence_ticks: int) -> int:
+	var accepted := 0
+	var attempts := 0
+	while accepted < count and attempts < count * 2:
+		attempts += 1
+		var tick := int(controller.get("current_tick"))
+		if bool(controller.call("request_fire", controller.global_position, Vector3.BACK, tick)):
+			accepted += 1
+			controller.call("resolve_local_miss")
+		await _wait_controller_tick(controller, tick + cadence_ticks, cadence_ticks + 4)
+	return accepted
+
 func _exercise_native_input(course: Node, horse: CharacterBody3D, failures: Array[String]) -> void:
 	await _wait_physics_frames(5)
 	if not horse.has_method("set_archetype") or not horse.has_method("get_archetype_stats"):
@@ -276,11 +482,35 @@ func _exercise_native_combat(course: Node, failures: Array[String]) -> void:
 	if controller == null or target == null:
 		failures.append("integrated weapon controller or target dummy is missing")
 		return
-	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit", "resolve_local_miss", "set_rider_context", "advance_to_tick"]:
+	for method in ["equip_weapon", "request_fire", "request_reload", "preview_dive_direction", "get_weapon_stats", "resolve_local_hit", "resolve_local_miss", "set_rider_context", "advance_to_tick"]:
 		if not controller.has_method(method):
 			failures.append("MountedWeaponController lacks %s" % method)
+	for signal_name in [&"reload_started", &"reload_progressed", &"reload_completed", &"reload_rejected"]:
+		if not controller.has_signal(signal_name):
+			failures.append("MountedWeaponController lacks %s signal" % signal_name)
 	if not failures.is_empty():
 		return
+	for vector in [
+		{"angle": 0.0, "expected": 0.0, "clamped": false},
+		{"angle": 45.0, "expected": 45.0, "clamped": false},
+		{"angle": -45.0, "expected": -45.0, "clamped": false},
+		{"angle": 75.0, "expected": 75.0, "clamped": false},
+		{"angle": -75.0, "expected": -75.0, "clamped": false},
+		{"angle": 90.0, "expected": 75.0, "clamped": true},
+		{"angle": -90.0, "expected": -75.0, "clamped": true},
+		{"angle": 180.0, "expected": 75.0, "clamped": true},
+	]:
+		var radians := deg_to_rad(float(vector.angle))
+		var chosen := Vector3(-sin(radians), 0.0, -cos(radians))
+		var preview := controller.call(
+			"preview_dive_direction",
+			Vector3(0, 0, -9.0),
+			chosen
+		) as Dictionary
+		if absf(float(preview.get("clamped_angle_degrees", 999.0)) - float(vector.expected)) > 0.01:
+			failures.append("native dive preview disagreed at %.0f degrees" % float(vector.angle))
+		if bool(preview.get("direction_was_clamped", false)) != bool(vector.clamped):
+			failures.append("native dive preview clamp flag disagreed at %.0f degrees" % float(vector.angle))
 	await _wait_physics_frames(20)
 	controller.call("equip_weapon", 0)
 	var origin: Vector3 = controller.global_position
@@ -627,6 +857,53 @@ func _exercise_bridge_caps(
 		failures.append("ordinary mounted-airborne shot became legal")
 	elif str(controller.get("last_reject_reason")) != "airborne":
 		failures.append("ordinary jump did not retain airborne rejection")
+
+func _check_persisted_telemetry(course: Node, failures: Array[String]) -> void:
+	var coordinator := course.get_node("M2Gameplay")
+	coordinator.call("_close_telemetry_session", "headless_smoke")
+	var path := str(coordinator.get("telemetry_log_path"))
+	if path.is_empty() or not FileAccess.file_exists(path):
+		failures.append("secret-free M2 telemetry session was not persisted")
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		failures.append("persisted M2 telemetry session could not be reopened")
+		return
+	var finalized_keys: Dictionary = {}
+	var finalized_count := 0
+	while not file.eof_reached():
+		var line := file.get_line()
+		if line.is_empty():
+			continue
+		var parsed: Variant = JSON.parse_string(line)
+		if not parsed is Dictionary:
+			failures.append("persisted M2 telemetry contains a non-JSONL row")
+			continue
+		var row := parsed as Dictionary
+		if str(row.get("record_type", "")) != "dive_finalized":
+			continue
+		finalized_count += 1
+		var key := "%s:%s:%s" % [
+			str(row.get("authority_epoch", 0)),
+			str(row.get("actor", "")),
+			str(row.get("dive_id", -1)),
+		]
+		if finalized_keys.has(key):
+			failures.append("persisted M2 telemetry duplicated finalized dive %s" % key)
+		finalized_keys[key] = true
+		for required in [
+			"launch_tick", "prelaunch_speed_mmps", "direction_was_clamped",
+			"shots_fired", "shots_hit", "landing_tick", "death_within_3s",
+			"time_to_remount_ticks", "censor_reason"
+		]:
+			if not row.has(required):
+				failures.append("persisted dive row omitted aggregation field %s" % required)
+	var text := FileAccess.get_file_as_string(path).to_lower()
+	for forbidden in ["credential", "capability", "auth_key", "oauth", "join_code", "endpoint", "lobby_seed"]:
+		if forbidden in text:
+			failures.append("persisted M2 telemetry leaked prohibited field %s" % forbidden)
+	if finalized_count == 0:
+		failures.append("persisted M2 telemetry contains no finalized/censored dive")
 
 func _wait_controller_tick(controller: Node, target_tick: int, maximum_frames: int) -> void:
 	for _frame in maximum_frames:
