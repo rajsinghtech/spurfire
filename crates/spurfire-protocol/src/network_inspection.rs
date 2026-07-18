@@ -901,11 +901,6 @@ impl LobbyNetworkView {
         }
 
         self.validate_counts()?;
-        self.validate_routes()?;
-        self.validate_application_quality()?;
-        self.validate_authority()?;
-        self.validate_cleanup()?;
-
         let roster_count = self.counts.roster_count.value.expect("validated above");
         let expected_directions = roster_count
             .checked_mul(roster_count.saturating_sub(1))
@@ -919,6 +914,11 @@ impl LobbyNetworkView {
                 actual: self.routes.expected_direction_count.value,
             });
         }
+
+        self.validate_routes()?;
+        self.validate_application_quality()?;
+        self.validate_authority()?;
+        self.validate_cleanup()?;
 
         if let (Some(samples), Some(reported)) = (
             self.application_quality.sample_count.value,
