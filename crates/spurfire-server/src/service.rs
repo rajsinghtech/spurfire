@@ -113,11 +113,7 @@ impl CachedProviderObservation {
         }
     }
 
-    fn failed(
-        previous: Option<Self>,
-        failure: CachedObservationFailure,
-        at: UnixMillis,
-    ) -> Self {
+    fn failed(previous: Option<Self>, failure: CachedObservationFailure, at: UnixMillis) -> Self {
         Self {
             network_generation: previous.map_or(0, |value| value.network_generation),
             enrolled_device_count: match previous {
