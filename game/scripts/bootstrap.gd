@@ -1,6 +1,6 @@
 extends Control
 
-const MAIN_SCENE := "res://scenes/graybox_course.tscn"
+const MAIN_SCENE := "res://lobby/lobby_shell.tscn"
 
 func _ready() -> void:
 	if not ClassDB.class_exists(&"HorseController"):
@@ -11,8 +11,8 @@ func _ready() -> void:
 		return
 	var packed := load(MAIN_SCENE) as PackedScene
 	if packed == null:
-		push_error("Could not load graybox course: %s" % MAIN_SCENE)
-		$Panel/Margin/VBox/Error.text = "Graybox course failed to load. See debugger output."
+		push_error("Could not load client entry scene: %s" % MAIN_SCENE)
+		$Panel/Margin/VBox/Error.text = "Lobby shell failed to load. See debugger output."
 		return
 	# SceneTree is still attaching the bootstrap scene during _ready(). Defer the
 	# replacement rather than adding another root child while that operation is active.
