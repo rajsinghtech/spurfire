@@ -13,8 +13,10 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
+chacha20poly1305 = "0.10"
 clap.workspace = true
 dotenvy.workspace = true
+getrandom = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 spurfire-control = { path = "../spurfire-control" }

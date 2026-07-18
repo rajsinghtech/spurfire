@@ -12,6 +12,7 @@ pub mod error;
 pub mod provider;
 pub mod service;
 pub mod store;
+pub mod vault;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigError};
@@ -28,3 +29,4 @@ pub use store::{
     CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError,
     StoredCapabilityVerifier, StoredCredential, StoredLobby, StoredNetworkIdentity,
 };
+pub use vault::{ChildVaultIdentity, EncryptedChildVault, VaultError};

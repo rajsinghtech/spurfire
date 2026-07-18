@@ -7,10 +7,15 @@ metadata:
 data:
   SPURFIRE_BIND_ADDR: "0.0.0.0:8080"
   SPURFIRE_DRY_RUN: {{ ternary "1" "0" .Values.config.dryRun | quote }}
+  SPURFIRE_REAL_ADMISSION_ENABLED: {{ ternary "1" "0" .Values.config.realAdmissionEnabled | quote }}
+  SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS: {{ ternary "1" "0" .Values.config.allowLegacyClientAssertions | quote }}
+  SPURFIRE_TRUST_FORWARDED_FOR: {{ ternary "1" "0" .Values.config.trustForwardedFor | quote }}
   SPURFIRE_REAL_MUTATIONS_ENABLED: {{ ternary "1" "0" .Values.config.realMutationsEnabled | quote }}
   SPURFIRE_DRY_RUN_TTL_SECS: {{ .Values.config.dryRunTtlSeconds | quote }}
   SPURFIRE_MAX_PLAYERS: {{ .Values.config.maxPlayers | quote }}
   SPURFIRE_PROVISIONING_MODE: {{ .Values.config.provisioningMode | quote }}
   SPURFIRE_SHARED_TAILNET: {{ .Values.config.sharedTailnet | quote }}
   SPURFIRE_STATE_PATH: {{ .Values.config.statePath | quote }}
+  SPURFIRE_CHILD_VAULT_PATH: {{ .Values.config.childVaultPath | quote }}
+  SPURFIRE_CHILD_VAULT_KEY_FILE: {{ .Values.childVault.mountPath | quote }}
   TS_API_BASE: {{ .Values.tailscale.apiBase | quote }}

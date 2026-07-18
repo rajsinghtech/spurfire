@@ -28,6 +28,16 @@ pub struct Config {
     /// Credentials and a real provisioning mode are insufficient without this
     /// switch. It defaults off and hosted public deployments must keep it off.
     pub real_mutations_enabled: bool,
+    /// Separate product admission gate; provider capability probes never open Create.
+    pub real_admission_enabled: bool,
+    /// Explicit development-only compatibility for legacy asserted-player mutations.
+    pub allow_legacy_client_assertions: bool,
+    /// Trust `X-Forwarded-For` only when the deployment has a known gateway boundary.
+    pub trust_forwarded_for: bool,
+    /// Encrypted dynamic child-vault file (required when real mutations are enabled).
+    pub child_vault_path: PathBuf,
+    /// File containing exactly 32 raw bytes or 64 hex characters; never an env value.
+    pub child_vault_key_path: PathBuf,
     /// Shared tailnet selector passed to Tailscale (`-` means the token's tailnet).
     pub shared_tailnet: String,
     /// Durable non-secret state path used in real mode.
@@ -45,6 +55,11 @@ impl Default for Config {
             provisioning_mode: ProvisioningMode::SharedTailnet,
             force_dry_run: false,
             real_mutations_enabled: false,
+            real_admission_enabled: false,
+            allow_legacy_client_assertions: false,
+            trust_forwarded_for: false,
+            child_vault_path: PathBuf::from(".spurfire/child-vault.json"),
+            child_vault_key_path: PathBuf::from(".spurfire/child-vault.key"),
             shared_tailnet: DEFAULT_SHARED_TAILNET.to_owned(),
             state_path: PathBuf::from(DEFAULT_STATE_PATH),
         }
@@ -61,6 +76,14 @@ impl fmt::Debug for Config {
             .field("provisioning_mode", &self.provisioning_mode)
             .field("force_dry_run", &self.force_dry_run)
             .field("real_mutations_enabled", &self.real_mutations_enabled)
+            .field("real_admission_enabled", &self.real_admission_enabled)
+            .field(
+                "allow_legacy_client_assertions",
+                &self.allow_legacy_client_assertions,
+            )
+            .field("trust_forwarded_for", &self.trust_forwarded_for)
+            .field("child_vault_path", &self.child_vault_path)
+            .field("child_vault_key_path", &"<configured-key-file>")
             .field("shared_tailnet", &"<configured>")
             .field("state_path", &self.state_path)
             .finish()
@@ -121,7 +144,37 @@ impl Config {
             config.real_mutations_enabled =
                 parse_binary_switch(&value, ConfigError::InvalidRealMutationsSwitch)?;
         }
+        if let Some(value) = env_value("SPURFIRE_REAL_ADMISSION_ENABLED")? {
+            config.real_admission_enabled =
+                parse_binary_switch(&value, ConfigError::InvalidRealAdmissionSwitch)?;
+        }
+        if let Some(value) = env_value("SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS")? {
+            config.allow_legacy_client_assertions =
+                parse_binary_switch(&value, ConfigError::InvalidLegacyAssertionsSwitch)?;
+        }
+        if let Some(value) = env_value("SPURFIRE_TRUST_FORWARDED_FOR")? {
+            config.trust_forwarded_for =
+                parse_binary_switch(&value, ConfigError::InvalidTrustedProxySwitch)?;
+        }
+        if let Some(value) = env_value("SPURFIRE_CHILD_VAULT_PATH")? {
+            if value.trim().is_empty() {
+                return Err(ConfigError::InvalidChildVaultPath);
+            }
+            config.child_vault_path = PathBuf::from(value);
+        }
+        if let Some(value) = env_value("SPURFIRE_CHILD_VAULT_KEY_FILE")? {
+            if value.trim().is_empty() {
+                return Err(ConfigError::InvalidChildVaultKeyPath);
+            }
+            config.child_vault_key_path = PathBuf::from(value);
+        }
 
+        if config.real_admission_enabled && !config.real_mutations_enabled {
+            return Err(ConfigError::AdmissionRequiresMutationGate);
+        }
+        if config.allow_legacy_client_assertions && config.real_admission_enabled {
+            return Err(ConfigError::LegacyAssertionsConflictWithAdmission);
+        }
         if config.force_dry_run && config.real_mutations_enabled {
             return Err(ConfigError::ConflictingMutationSwitches);
         }
@@ -131,6 +184,7 @@ impl Config {
         if config.force_dry_run {
             config.provisioning_mode = ProvisioningMode::DryRun;
             config.real_mutations_enabled = false;
+            config.real_admission_enabled = false;
         }
         Ok(config)
     }
@@ -194,6 +248,27 @@ pub enum ConfigError {
     /// Real-mutation switch was neither zero nor one.
     #[error("SPURFIRE_REAL_MUTATIONS_ENABLED must be 0 or 1")]
     InvalidRealMutationsSwitch,
+    /// Product admission switch was invalid.
+    #[error("SPURFIRE_REAL_ADMISSION_ENABLED must be 0 or 1")]
+    InvalidRealAdmissionSwitch,
+    /// Legacy assertion switch was invalid.
+    #[error("SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS must be 0 or 1")]
+    InvalidLegacyAssertionsSwitch,
+    /// Trusted proxy switch was invalid.
+    #[error("SPURFIRE_TRUST_FORWARDED_FOR must be 0 or 1")]
+    InvalidTrustedProxySwitch,
+    /// Admission cannot open while provider mutation remains disabled.
+    #[error("real admission requires SPURFIRE_REAL_MUTATIONS_ENABLED=1")]
+    AdmissionRequiresMutationGate,
+    /// Legacy assertions are forbidden whenever real admission is open.
+    #[error("legacy client assertions conflict with real admission")]
+    LegacyAssertionsConflictWithAdmission,
+    /// Child vault path was empty.
+    #[error("SPURFIRE_CHILD_VAULT_PATH must not be empty")]
+    InvalidChildVaultPath,
+    /// Child vault key path was empty.
+    #[error("SPURFIRE_CHILD_VAULT_KEY_FILE must not be empty")]
+    InvalidChildVaultKeyPath,
     /// Simulation and real mutation cannot both be requested.
     #[error("SPURFIRE_DRY_RUN=1 conflicts with SPURFIRE_REAL_MUTATIONS_ENABLED=1")]
     ConflictingMutationSwitches,

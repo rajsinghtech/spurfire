@@ -300,6 +300,7 @@ fn dry_app(
     let config = Config {
         force_dry_run: true,
         provisioning_mode: ProvisioningMode::DryRun,
+        allow_legacy_client_assertions: true,
         ..Config::default()
     };
     let store = Arc::new(InMemoryStore::new());
@@ -314,6 +315,7 @@ fn live_app(
     let store = Arc::new(InMemoryStore::new());
     let config = Config {
         real_mutations_enabled: true,
+        allow_legacy_client_assertions: true,
         shared_tailnet: "shared-test.ts.net".to_owned(),
         ..Config::default()
     };
@@ -558,7 +560,7 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(created["dry_run"], true);
     assert_eq!(created["planned_actions"], json!([]));
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let network_capability = created["creator_capability"].as_str().unwrap();
+    let network_capability = created["creator_capability"]["token"].as_str().unwrap();
     assert_eq!(get(&app, lobby_id).await.1["state"], "FORMING");
 
     make_ready(
@@ -665,7 +667,7 @@ async fn selected_dry_run_network_view_is_capability_protected_and_never_fake_re
     let (status, created) = create(&app, "create-network-dry", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::CREATED);
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     assert_eq!(capability.len(), 64);
     assert!(capability
         .bytes()
@@ -763,7 +765,7 @@ async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
     )
     .await;
     let dedicated_id = dedicated["lobby_id"].as_str().unwrap();
-    let dedicated_capability = dedicated["creator_capability"].as_str().unwrap();
+    let dedicated_capability = dedicated["creator_capability"]["token"].as_str().unwrap();
     let (_, view) = network(&dedicated_app, dedicated_id, dedicated_capability).await;
     assert_eq!(view["truth_label"], "REAL — DEDICATED TAILNET");
     assert_eq!(view["backing"]["isolation"], "dedicated");
@@ -790,7 +792,7 @@ async fn dedicated_and_shared_views_use_precise_truth_labels_and_fqdn() {
     let (shared_app, _, _) = live_app(clock, shared_provider);
     let (_, shared) = create(&shared_app, "create-network-shared", "shared_tailnet", 2).await;
     let shared_id = shared["lobby_id"].as_str().unwrap();
-    let shared_capability = shared["creator_capability"].as_str().unwrap();
+    let shared_capability = shared["creator_capability"]["token"].as_str().unwrap();
     let (_, view) = network(&shared_app, shared_id, shared_capability).await;
     assert_eq!(view["truth_label"], "REAL — SHARED COMPATIBILITY");
     assert_eq!(view["backing"]["isolation"], "shared");
@@ -823,7 +825,7 @@ async fn provider_failure_before_first_success_preserves_precise_unknown_reason(
     .await;
     let lobby_id_text = created["lobby_id"].as_str().unwrap();
     let lobby_id = spurfire_protocol::LobbyId::parse(lobby_id_text).unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
 
     provider.fail_observations();
     assert!(state.refresh_network_observation(lobby_id).await.is_err());
@@ -840,24 +842,24 @@ async fn provider_failure_before_first_success_preserves_precise_unknown_reason(
 }
 
 #[tokio::test]
-async fn legacy_measurements_supply_fresh_routes_but_never_application_rtt() {
+async fn legacy_measurements_never_become_authenticated_network_truth() {
     let clock = Arc::new(ManualClock::new(UnixMillis::new(2_200_000)));
     let (app, _, _) = dry_app(clock.clone(), Arc::new(DryRunProvider::new()));
     let (_, created) = create(&app, "create-network-routes", "dry_run", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     make_ready(&app, lobby_id, &[(PLAYER_1, 11), (PLAYER_2, 31)]).await;
 
     let (_, fresh) = network(&app, lobby_id, capability).await;
     assert_eq!(fresh["counts"]["fresh_reporter_count"]["value"], 0);
     assert_eq!(
         fresh["counts"]["fresh_directional_observation_count"]["value"],
-        2
+        0
     );
     assert_eq!(fresh["routes"]["expected_direction_count"]["value"], 2);
-    assert_eq!(fresh["routes"]["direct_count"]["value"], 2);
-    assert_eq!(fresh["routes"]["unknown_count"]["value"], 0);
-    assert_eq!(fresh["routes"]["direct_ratio_milli"]["value"], 1000);
+    assert_eq!(fresh["routes"]["direct_count"]["value"], 0);
+    assert_eq!(fresh["routes"]["unknown_count"]["value"], 2);
+    assert!(fresh["routes"]["direct_ratio_milli"]["value"].is_null());
     assert!(fresh["application_quality"]["application_rtt_ms_median"]["value"].is_null());
     assert_eq!(
         fresh["application_quality"]["application_rtt_ms_median"]["unknown_reason"],
@@ -885,7 +887,7 @@ async fn provider_observations_are_cached_bounded_and_fail_stale_not_zero() {
     let (_, created) = create(&app, "create-network-observation", "tailnet_per_lobby", 3).await;
     let lobby_id_text = created["lobby_id"].as_str().unwrap();
     let lobby_id = spurfire_protocol::LobbyId::parse(lobby_id_text).unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
 
     let (_, unknown) = network(&app, lobby_id_text, capability).await;
     assert!(unknown["counts"]["provider_enrolled_device_count"]["value"].is_null());
@@ -962,7 +964,7 @@ async fn real_mutations_default_off_and_singleton_lease_is_atomic() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error["code"], "real_mutations_disabled");
+    assert_eq!(error["code"], "real_admission_closed");
     assert_eq!(disabled_provider.mutation_count(), 0);
     assert!(disabled_store.is_empty().await);
 
@@ -992,7 +994,7 @@ async fn dedicated_cleanup_needs_two_exact_absence_polls_before_lease_release() 
     let (app, state, store) = live_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-cleanup-proof", "tailnet_per_lobby", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     let (status, deleted) = json_request(
         &app,
         Method::DELETE,
@@ -1041,7 +1043,7 @@ async fn identity_or_vault_cleanup_failure_retains_real_lease() {
     )
     .await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     json_request(
         &identity_app,
         Method::DELETE,
@@ -1059,7 +1061,7 @@ async fn identity_or_vault_cleanup_failure_retains_real_lease() {
     let (vault_app, _, vault_store) = live_app(clock.clone(), vault_provider);
     let (_, created) = create(&vault_app, "create-vault-failure", "tailnet_per_lobby", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     json_request(
         &vault_app,
         Method::DELETE,
@@ -1105,6 +1107,7 @@ async fn durable_capability_is_hash_only_and_survives_reopen() {
     let config = Config {
         force_dry_run: true,
         provisioning_mode: ProvisioningMode::DryRun,
+        allow_legacy_client_assertions: true,
         ..Config::default()
     };
     let state = AppState::new(config.clone(), store, Arc::new(DryRunProvider::new()))
@@ -1112,7 +1115,10 @@ async fn durable_capability_is_hash_only_and_survives_reopen() {
     let app = build_router(state);
     let (_, created) = create(&app, "durable-capability", "dry_run", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap().to_owned();
-    let capability = created["creator_capability"].as_str().unwrap().to_owned();
+    let capability = created["creator_capability"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let durable = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(!durable.contains(&capability));
     assert!(!durable.contains("creator_capability\":\""));
@@ -1202,7 +1208,7 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock.clone(), blocked);
     let (_, created) = create(&app, "create-blocked", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     let (_, capabilities) = json_request(&app, Method::GET, "/v1/capabilities", None, &[]).await;
     assert_eq!(capabilities["modes"]["shared_tailnet"], "blocked_scopes");
     assert_eq!(get(&app, lobby_id).await.0, StatusCode::NOT_FOUND);
@@ -1214,7 +1220,7 @@ async fn capabilities_fail_closed_and_mint_403_persists_reason() {
     let (app, _, _) = live_app(clock, failing.clone());
     let (_, created) = create(&app, "create-mint-fail", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     let (status, error) = join(&app, lobby_id, PLAYER_1, "mint-fail").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error["state_reason"], "provisioning_blocked_auth_keys_403");
@@ -1235,7 +1241,7 @@ async fn tailnet_per_lobby_is_idempotent_and_restart_loss_fails_closed() {
     let (status, created) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::CREATED);
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     let (status, replay) = create(&app, "create-child", "tailnet_per_lobby", 2).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["lobby_id"], created["lobby_id"]);
@@ -1267,7 +1273,7 @@ async fn creator_authorization_and_request_dry_run_cannot_mutate_live_lobby() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-authz", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
 
     let (status, error) = json_request(
         &app,
@@ -1359,7 +1365,7 @@ async fn leave_revokes_key_and_removes_roster_entry() {
     let (app, _, _) = live_app(clock, provider.clone());
     let (_, created) = create(&app, "create-leave", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     join(&app, lobby_id, PLAYER_2, "leave-join").await;
 
     let (status, left) = json_request(
@@ -1389,7 +1395,7 @@ async fn readiness_stales_at_sixty_seconds_and_start_times_out() {
     let (app, state, _) = dry_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-time", "dry_run", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     make_ready(&app, lobby_id, &[(PLAYER_1, 10), (PLAYER_2, 20)]).await;
     assert_eq!(get(&app, lobby_id).await.1["state"], "READY");
     clock.advance(59_999);
@@ -1440,7 +1446,7 @@ async fn idle_ttl_expires_and_mixed_formula_or_major_wire_cannot_start() {
     let (app, state, _) = live_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-expiry", "shared_tailnet", 2).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     clock.advance(10 * 60 * 1_000);
     assert!(!state.cleanup_expired_now().await.is_empty());
     assert_eq!(
@@ -1499,7 +1505,7 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
     let (app, _, _) = dry_app(clock.clone(), provider);
     let (_, created) = create(&app, "create-migration", "dry_run", 3).await;
     let lobby_id = created["lobby_id"].as_str().unwrap();
-    let capability = created["creator_capability"].as_str().unwrap();
+    let capability = created["creator_capability"]["token"].as_str().unwrap();
     make_ready(
         &app,
         lobby_id,
@@ -1626,4 +1632,130 @@ fn server_manifest_cannot_gain_tailnet_membership_or_gameplay_runtime_dependenci
 fn test_ids_remain_distinct() {
     assert_ne!(PLAYER_1, PLAYER_2);
     assert_ne!(PLAYER_3, PLAYER_4);
+}
+
+#[tokio::test]
+async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(9_000_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let store = Arc::new(InMemoryStore::new());
+    let config = Config {
+        real_mutations_enabled: true,
+        real_admission_enabled: true,
+        provisioning_mode: ProvisioningMode::TailnetPerLobby,
+        shared_tailnet: "shared-test.ts.net".to_owned(),
+        ..Config::default()
+    };
+    let state = AppState::new(config, store, provider).with_clock(clock.clone());
+    assert!(state.reconcile_startup().await);
+    let grant = state
+        .issue_real_create_grant(UnixMillis::new(9_600_000))
+        .await
+        .unwrap();
+    let app = build_router(state);
+    let grant_authorization = format!("Spurfire-Capability {}", grant.expose_token());
+    let create_body = json!({
+        "display_name":"Secure High Noon",
+        "max_players":2,
+        "provisioning_mode":"tailnet_per_lobby"
+    });
+    let (created_status, created) = json_request(
+        &app,
+        Method::POST,
+        "/v1/lobbies",
+        Some(create_body.clone()),
+        &[
+            ("idempotency-key", "secure-create"),
+            ("x-spurfire-player-id", PLAYER_1),
+            ("authorization", grant_authorization.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(created_status, StatusCode::CREATED);
+    let lobby_id = created["lobby_id"].as_str().unwrap();
+    let creator_capability = created["creator_capability"]["token"].as_str().unwrap();
+
+    let (replay_status, replay) = json_request(
+        &app,
+        Method::POST,
+        "/v1/lobbies",
+        Some(create_body),
+        &[
+            ("idempotency-key", "secure-create"),
+            ("x-spurfire-player-id", PLAYER_1),
+            ("authorization", grant_authorization.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::OK);
+    assert!(replay.get("creator_capability").is_none());
+
+    let creator_authorization = format!("Spurfire-Capability {creator_capability}");
+    let (invitation_status, invitation) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/invitations"),
+        Some(json!({})),
+        &[("authorization", creator_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(invitation_status, StatusCode::CREATED);
+    let invitation_token = invitation["invitation"]["token"].as_str().unwrap();
+    let invitation_authorization = format!("Spurfire-Capability {invitation_token}");
+    let join_body = json!({
+        "player_id":PLAYER_2,
+        "display_name":"Secure Rider",
+        "client_wire_version":"1.0",
+        "authority_formula_version":"election_v1"
+    });
+    let (join_status, joined) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/join"),
+        Some(join_body.clone()),
+        &[
+            ("idempotency-key", "secure-join"),
+            ("authorization", invitation_authorization.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::CREATED);
+    let participant_token = joined["participant_capability"]["token"].as_str().unwrap();
+    let participant_authorization = format!("Spurfire-Capability {participant_token}");
+
+    let (replay_join_status, replay_join) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/join"),
+        Some(join_body),
+        &[
+            ("idempotency-key", "secure-join"),
+            ("authorization", invitation_authorization.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(replay_join_status, StatusCode::OK);
+    assert!(replay_join.get("participant_capability").is_none());
+    assert!(replay_join["join_credential"].get("auth_key").is_none());
+
+    let (wrong_scope_status, wrong_scope) = json_request(
+        &app,
+        Method::DELETE,
+        &format!("/v1/lobbies/{lobby_id}"),
+        None,
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    let (missing_status, missing) = json_request(
+        &app,
+        Method::DELETE,
+        "/v1/lobbies/00000000-0000-4000-8000-000000000099",
+        None,
+        &[("authorization", participant_authorization.as_str())],
+    )
+    .await;
+    assert_eq!(wrong_scope_status, StatusCode::NOT_FOUND);
+    assert_eq!(wrong_scope_status, missing_status);
+    assert_eq!(wrong_scope, missing);
+    assert_eq!(wrong_scope["code"], "lobby_not_found");
 }

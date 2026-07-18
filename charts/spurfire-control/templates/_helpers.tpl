@@ -64,7 +64,13 @@ app.kubernetes.io/part-of: spurfire
 {{/* Fail early on unsafe or contradictory mode combinations. */}}
 {{- define "spurfire-control.validateValues" -}}
 {{- if .Values.config.realMutationsEnabled -}}
-{{- fail "config.realMutationsEnabled=true is activation-closed until capability authorization, encrypted dynamic child-credential recovery, startup reconciliation, and a separate activation review are complete" -}}
+{{- fail "config.realMutationsEnabled=true remains activation-closed pending private live cleanup/reconciliation proof and a separate activation review" -}}
+{{- end -}}
+{{- if .Values.config.realAdmissionEnabled -}}
+{{- fail "config.realAdmissionEnabled=true is activation-closed" -}}
+{{- end -}}
+{{- if .Values.config.allowLegacyClientAssertions -}}
+{{- fail "legacy asserted-player authorization is forbidden in the chart" -}}
 {{- end -}}
 {{- if ne (int .Values.config.maxActiveRealLobbies) 1 -}}
 {{- fail "config.maxActiveRealLobbies must remain 1 during alpha" -}}
@@ -74,6 +80,9 @@ app.kubernetes.io/part-of: spurfire
 {{- end -}}
 {{- if and .Values.config.dryRun (not (empty .Values.tailscale.existingSecret)) -}}
 {{- fail "credential-free dry-run requires tailscale.existingSecret to be empty" -}}
+{{- end -}}
+{{- if and .Values.config.dryRun (not (empty .Values.childVault.existingSecret)) -}}
+{{- fail "credential-free dry-run requires childVault.existingSecret to be empty" -}}
 {{- end -}}
 {{- if and (not .Values.config.dryRun) (eq .Values.config.provisioningMode "dry_run") -}}
 {{- fail "config.provisioningMode=\"dry_run\" requires config.dryRun=true" -}}
