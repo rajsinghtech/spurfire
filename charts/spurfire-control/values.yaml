@@ -17,16 +17,36 @@ serviceAccount:
 
 config:
   dryRun: true
+  # Independent provider-mutation kill switch. This chart revision is
+  # activation-closed and rejects true until the auth, encrypted child-
+  # credential recovery, and startup-reconciliation gates are implemented.
+  realMutationsEnabled: false
+  # Alpha safety invariant: shared compatibility mode cannot bypass this cap.
+  maxActiveRealLobbies: 1
   dryRunTtlSeconds: 300
   maxPlayers: 16
   provisioningMode: dry_run
   sharedTailnet: "-"
   statePath: /var/lib/spurfire/server-state.json
 
+# Cached one-lobby network-summary timing contract. Collection is performed by
+# background workers; an inspection GET must never trigger provider I/O.
+networkSummary:
+  deviceInventory:
+    refreshSeconds: 15
+    freshForSeconds: 30
+  organizationPresence:
+    refreshSeconds: 60
+    freshForSeconds: 120
+  participantReports:
+    freshForSeconds: 15
+    retentionSeconds: 60
+
 tailscale:
   apiBase: https://api.tailscale.com/api/v2
-  # Real mode reads OAuth credentials from this pre-existing Secret. The chart
-  # never accepts or renders credential values.
+  # Activation-closed non-dry-run staging reads parent OAuth credentials from
+  # this pre-existing Secret. The chart never accepts or renders values and
+  # this is not a vault for dynamically generated child OAuth material.
   existingSecret: ""
   clientIdKey: TS_CLIENT_ID
   clientSecretKey: TS_CLIENT_SECRET
@@ -45,8 +65,8 @@ service:
   annotations: {}
   port: 80
 
-# Gateway API must already be installed. Public routing is opt-in because the
-# prototype API uses client-asserted identity rather than authentication.
+# Gateway API must already be installed. Public routing is opt-in and chart
+# validation restricts it to credential-free dry-run mode.
 httpRoute:
   enabled: false
   annotations: {}
