@@ -14,6 +14,7 @@ var _dust_amount := 0.0
 var _phase := 0.0
 var _was_airborne := false
 var _landing_flash := 0.0
+var _bad_landing_flash := 0.0
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -43,14 +44,16 @@ func apply_telemetry(data: Dictionary) -> void:
 	_was_airborne = airborne
 	queue_redraw()
 
-func _on_dive_landed(_dive_id: int, _bad: bool, _slope: float, _terrain: String) -> void:
+func _on_dive_landed(_dive_id: int, bad: bool, _slope: float, _terrain: String) -> void:
 	_landing_flash = 1.0
+	_bad_landing_flash = 1.0 if bad else 0.0
 	queue_redraw()
 
 func _process(delta: float) -> void:
 	_phase = fmod(_phase + delta * lerpf(0.4, 2.4, _speed_fraction), 1.0)
 	_landing_flash = move_toward(_landing_flash, 0.0, delta * 2.8)
-	if _speed_fraction > 0.12 or _lateral_fraction > 0.05 or _landing_flash > 0.01:
+	_bad_landing_flash = move_toward(_bad_landing_flash, 0.0, delta * 1.8)
+	if _speed_fraction > 0.12 or _lateral_fraction > 0.05 or _landing_flash > 0.01 or _bad_landing_flash > 0.01:
 		queue_redraw()
 
 func _draw() -> void:
@@ -83,6 +86,6 @@ func _draw_dust_puffs() -> void:
 		var drift := Vector2(cos(angle) * 105.0, sin(angle) * 24.0)
 		var pulse := fmod(_phase * 1.7 + float(index) * 0.19, 1.0)
 		var radius := lerpf(5.0, 17.0, pulse) * amount
-		var color := dust_color
-		color.a = (1.0 - pulse) * amount * 0.28
+		var color := dust_color.lerp(Color("ff5c35"), _bad_landing_flash)
+		color.a = (1.0 - pulse) * amount * lerpf(0.28, 0.48, _bad_landing_flash)
 		draw_circle(center + drift * pulse, radius, color)

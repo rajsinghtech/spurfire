@@ -22,8 +22,6 @@ func _ready() -> void:
 ## shared absolute tick and before rider/horse collision resolution.
 func process_combat_tick(tick: int) -> void:
 	if Input.is_action_pressed(&"combat_fire"):
-		if rider and rider.has_method("record_shot_attempt"):
-			rider.call("record_shot_attempt", tick)
 		_fire_once(tick)
 	if Input.is_action_just_pressed(&"combat_reload") and rifle:
 		rifle.call("request_reload")

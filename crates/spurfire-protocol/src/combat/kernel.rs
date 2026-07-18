@@ -1,6 +1,6 @@
 //! Pure fixed-tick combat state, deterministic spread, and authority validation.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 use std::f64::consts::{PI, TAU};
 
 use serde::{Deserialize, Serialize};
@@ -1709,20 +1709,27 @@ impl CombatAuthority {
             .finish_saddle_dive(dive_id, landing_tick)
     }
 
-    /// Registers one shooter with one full selected rifle.
+    /// Registers one shooter with one full selected rifle. Re-registering an
+    /// existing shooter is mutation-free so replay/cadence/ammo/dive state can
+    /// never be reset by a reconnect or duplicate registration message.
     pub fn register_shooter(&mut self, shooter_peer_id: PlayerId, weapon_id: WeaponId) -> bool {
-        let kernel =
-            CombatKernel::with_weapon(self.tick_rate, self.lobby_seed, shooter_peer_id, weapon_id)
+        match self.shooters.entry(shooter_peer_id) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                let kernel = CombatKernel::with_weapon(
+                    self.tick_rate,
+                    self.lobby_seed,
+                    shooter_peer_id,
+                    weapon_id,
+                )
                 .expect("authority tick rate is valid");
-        self.shooters
-            .insert(
-                shooter_peer_id,
-                AuthorityShooter {
+                entry.insert(AuthorityShooter {
                     kernel,
                     last_command_tick: None,
-                },
-            )
-            .is_none()
+                });
+                true
+            }
+        }
     }
 
     /// Immutable shooter kernel for snapshots/tests.
@@ -2480,6 +2487,51 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_registration_cannot_reset_replay_ammo_or_dive_state() {
+        let shooter = player(1);
+        let muzzle = QuantizedOrigin::new(0, 1_600, 0);
+        let mut authority = CombatAuthority::new(60, LOBBY_SEED).unwrap();
+        assert!(authority.register_shooter(shooter, WeaponId::Dustwalker));
+        let mut targets = TargetRegistry::new(60).unwrap();
+        let shot = command(
+            &authority,
+            shooter,
+            WeaponId::Dustwalker,
+            100,
+            muzzle,
+            forward(),
+        );
+        let first = authority.validate_shot(
+            &shot,
+            SimulationTick::new(100),
+            rider_snapshot(shooter, 100, muzzle),
+            &mut targets,
+        );
+        assert_eq!(first.result.outcome, ShotOutcome::Miss);
+
+        let preserved = authority.clone();
+        assert!(!authority.register_shooter(shooter, WeaponId::Rattler));
+        assert_eq!(authority, preserved);
+        let replay = authority.validate_shot(
+            &shot,
+            SimulationTick::new(100),
+            rider_snapshot(shooter, 100, muzzle),
+            &mut targets,
+        );
+        assert_eq!(
+            replay.result.rejection_reason,
+            Some(ShotRejectionReason::TickReplay)
+        );
+        assert_eq!(
+            authority
+                .shooter_kernel(shooter)
+                .expect("shooter remains registered")
+                .equipped_weapon(),
+            WeaponId::Dustwalker
+        );
+    }
+
+    #[test]
     fn authority_rejects_invalid_vectors_tick_bounds_replays_and_origin_leash() {
         let shooter = player(1);
         let muzzle = QuantizedOrigin::new(0, 1_600, 0);
@@ -2979,6 +3031,46 @@ mod tests {
         assert_eq!(
             kernel.request_fire(SimulationTick::new(10), forward(), prone),
             Err(ShotRejectionReason::Dismounted)
+        );
+    }
+
+    #[test]
+    fn launch_captures_current_prelaunch_handling_without_advancing_the_clock() {
+        let mut kernel = kernel(60, WeaponId::Dustwalker);
+        let mut previous = riding();
+        previous.gait = CombatGait::Walk;
+        previous.planar_speed_mmps = 2_000;
+        previous.gait_top_speed_mmps = 14_000;
+        kernel
+            .advance_to(SimulationTick::new(9), previous)
+            .unwrap();
+
+        let mut current = previous;
+        current.gait = CombatGait::Gallop;
+        current.planar_speed_mmps = 14_000;
+        current.yaw_rate_millidegrees_per_second = 60_000;
+        current.ads = true;
+        // Equal-tick installation changes only authoritative handling. The
+        // launch call still owns progression/cancellation through tick 10.
+        kernel
+            .advance_to(SimulationTick::new(9), current)
+            .unwrap();
+        let dive_id = DiveId::new(44).unwrap();
+        kernel
+            .begin_saddle_dive(
+                dive_id,
+                SimulationTick::new(10),
+                WeaponId::Dustwalker,
+                [0, -14_000],
+                45,
+            )
+            .unwrap();
+        assert_eq!(
+            kernel
+                .dive_fire_context()
+                .expect("dive context opened")
+                .launch_handling,
+            current
         );
     }
 

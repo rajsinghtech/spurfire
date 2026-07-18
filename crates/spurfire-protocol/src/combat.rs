@@ -687,6 +687,13 @@ impl CombatGait {
     }
 }
 
+/// Conservative stance used when loading pre-M2 persisted shot telemetry.
+/// Unknown grants no fire, reload, target-geometry, or style capability.
+#[must_use]
+pub const fn legacy_shot_telemetry_stance() -> RiderStance {
+    RiderStance::Unknown(RiderStance::UNKNOWN_ID)
+}
+
 /// Integer-only per-shot telemetry safe to persist or compare bit-for-bit.
 ///
 /// Lobby seeds, OAuth material, join credentials, auth keys, and client claims
@@ -709,7 +716,9 @@ pub struct ShotTelemetry {
     pub sway_millidegrees: u32,
     /// Rewound gait.
     pub gait: CombatGait,
-    /// Rewound logical stance.
+    /// Rewound logical stance. Pre-M2 persisted rows default conservatively to
+    /// unknown rather than inventing mounted capability.
+    #[serde(default = "legacy_shot_telemetry_stance")]
     pub stance: RiderStance,
     /// Rewound planar speed in millimetres per second.
     pub speed_mmps: u32,
@@ -903,6 +912,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ShotTelemetry>(&encoded).unwrap(),
             telemetry
+        );
+
+        let mut legacy = serde_json::to_value(&telemetry).unwrap();
+        legacy
+            .as_object_mut()
+            .expect("telemetry is an object")
+            .remove("stance");
+        let decoded: ShotTelemetry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            decoded.stance,
+            RiderStance::Unknown(RiderStance::UNKNOWN_ID)
         );
     }
 

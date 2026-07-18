@@ -29,6 +29,10 @@ func _ready() -> void:
 	_ramp("Ramp15", Vector3(7, 0.5, 14), Vector3(28, 1.8, 12), -15.0, Color(0.34, 0.34, 0.38))
 	_ramp("Ramp25", Vector3(7, 0.5, 14), Vector3(38, 3.15, 12), -25.0, Color(0.38, 0.34, 0.34))
 	_ramp("Face45", Vector3(7, 0.6, 10), Vector3(48, 3.55, 12), -45.0, Color(0.42, 0.25, 0.22))
+	# M2 authored landing fixtures pin the strict >30° bad-landing boundary in
+	# real CharacterBody3D collision smoke, not only protocol normal vectors.
+	_ramp("Landing30", Vector3(7, 0.5, 10), Vector3(58, 2.72, 12), -30.0, Color(0.34, 0.42, 0.34))
+	_ramp("Landing31", Vector3(7, 0.5, 10), Vector3(68, 2.81, 12), -31.0, Color(0.48, 0.28, 0.22))
 	_ramp("Descent25", Vector3(7, 0.5, 14), Vector3(38, 3.15, -8), 25.0, Color(0.38, 0.34, 0.34))
 
 	# Jump lane: three 1 m fences, plus an elevated ledge/drop.

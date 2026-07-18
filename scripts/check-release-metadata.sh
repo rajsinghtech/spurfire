@@ -83,6 +83,10 @@ grep -Fqi 'playtest pending' "$notes" || {
   echo "error: $notes must say that observational playtesting is pending" >&2
   exit 1
 }
+grep -Fq '| M2 | Saddle Dive | **implementation complete / playtest pending** |' docs/prototype-plan.md || {
+  echo "error: docs/prototype-plan.md must keep M2 implementation complete / playtest pending" >&2
+  exit 1
+}
 
 grep -Fq "Release candidate v${version}" crates/spurfire-server/src/landing.html || {
   echo "error: landing page source version does not match $version" >&2

@@ -176,7 +176,7 @@ rotation_degrees = Vector3(90, 0, 0)
 mesh = SubResource("CapsuleMesh_horse")
 
 [node name="SaddleProxy" type="MeshInstance3D" parent="Horse"]
-position = Vector3(0, 1.72, 0.15)
+position = Vector3(0, 1.6, 0.15)
 mesh = SubResource("BoxMesh_saddle")
 
 [node name="NeckProxy" type="MeshInstance3D" parent="Horse"]
@@ -251,8 +251,9 @@ mesh = SubResource("CapsuleMesh_rider")
 position = Vector3(0, 1.82, 0)
 mesh = SubResource("SphereMesh_rider_head")
 
-[node name="WeaponController" type="MountedWeaponController" parent="Rider"]
+[node name="WeaponController" type="MountedWeaponController" parent="Rider" node_paths=PackedStringArray("rider_path")]
 position = Vector3(0.52, 1.12, -0.18)
+rider_path = NodePath("..")
 
 [node name="MountedRifle" parent="Rider/RiderProxy" node_paths=PackedStringArray("controller", "aim_source") instance=ExtResource("10_rifle")]
 position = Vector3(0.52, 1.12, -0.18)
@@ -273,7 +274,7 @@ combat_hud = NodePath("../../CombatLayer/CombatHUD")
 [node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "telemetry_source")]
 script = ExtResource("2_camera")
 target = NodePath("../Rider")
-telemetry_source = NodePath("../Horse")
+telemetry_source = NodePath("../Rider")
 
 [node name="PitchPivot" type="Node3D" parent="CameraRig"]
 
@@ -288,12 +289,13 @@ position = Vector3(0.4, 0, 0)
 current = true
 fov = 70.0
 
-[node name="KillResetZone" type="Area3D" parent="."]
+[node name="KillResetZone" type="Area3D" parent="." node_paths=PackedStringArray("gameplay_coordinator")]
 position = Vector3(0, -25, 0)
 collision_layer = 0
 collision_mask = 1
 monitoring = true
 script = ExtResource("5_kill")
+gameplay_coordinator = NodePath("../M2Gameplay")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="KillResetZone"]
 shape = SubResource("BoxShape_kill")
@@ -312,7 +314,8 @@ layer = 5
 visible = false
 horse_path = NodePath("../../Horse")
 
-[node name="PeerSession" type="PeerSession" parent="."]
+[node name="PeerSession" type="PeerSession" parent="." node_paths=PackedStringArray("gameplay_rider_path")]
+gameplay_rider_path = NodePath("../Rider")
 
 [node name="RemoteRider" type="NetworkRider" parent="."]
 visible = false
@@ -442,16 +445,17 @@ theme_override_font_sizes/font_size = 28
 text = "FLYING DISMOUNT"
 horizontal_alignment = 1
 
-[node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse")]
+[node name="HUD" type="CanvasLayer" parent="." node_paths=PackedStringArray("horse", "rider")]
 layer = 2
 script = ExtResource("3_hud")
 horse = NodePath("../Horse")
+rider = NodePath("../Rider")
 
 [node name="Panel" type="PanelContainer" parent="HUD"]
 offset_left = 20.0
 offset_top = 20.0
-offset_right = 470.0
-offset_bottom = 210.0
+offset_right = 510.0
+offset_bottom = 235.0
 
 [node name="Margin" type="MarginContainer" parent="HUD/Panel"]
 layout_mode = 2
@@ -478,15 +482,22 @@ text = "Idle  |  0.00 m/s  0.0 km/h  |  slope 0.0°"
 layout_mode = 2
 text = "surface: flat   airborne: false   turn radius: 0.0 m"
 
+[node name="RemountHint" type="Label" parent="HUD/Panel/Margin/VBox"]
+visible = false
+layout_mode = 2
+theme_override_colors/font_color = Color(0.95, 0.76, 0.3, 1)
+theme_override_font_sizes/font_size = 16
+text = "E — REMOUNT"
+
 [node name="SpeedGraph" type="Control" parent="HUD/Panel/Margin/VBox"]
-custom_minimum_size = Vector2(420, 70)
+custom_minimum_size = Vector2(460, 70)
 layout_mode = 2
 mouse_filter = 2
 script = ExtResource("4_graph")
 
 [node name="Help" type="Label" parent="HUD"]
 offset_left = 20.0
-offset_top = 225.0
-offset_right = 560.0
-offset_bottom = 290.0
+offset_top = 250.0
+offset_right = 600.0
+offset_bottom = 315.0
 text = "W/S ride  •  A/D steer/sidestep  •  E dismount / Saddle Dive / remount  •  Mouse1 fire\nMouse2 aim  •  R reload  •  4/5/6 rifles  •  T reset  •  Hold TAB peer routes"

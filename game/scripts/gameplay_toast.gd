@@ -41,4 +41,7 @@ func _show_next() -> void:
 		return
 	label.text = _queue.pop_front()
 	label.visible = true
-	_remaining = maxf(display_seconds, 0.1)
+	# Burst events (for example a headshot reversal) remain attributable without
+	# leaving the final notification several seconds behind the action.
+	var backlog_scale := 1.0 + float(_queue.size())
+	_remaining = maxf(display_seconds / backlog_scale, 0.35)

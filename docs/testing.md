@@ -60,7 +60,7 @@ Repository policy:
 - Run the pinned Godot 4.7.1 import from the isolated implementation worktree, then commit each genuinely new `file.gd.uid` with `file.gd`.
 - Never hand-author a UID, copy one from another script/worktree, or regenerate an already tracked sidecar. Duplicate or changed IDs can break `uid://` references.
 - Move, rename, or delete the source and sidecar together. Never commit `game/.godot/`.
-- `game/scripts/multiplayer_replication.gd.uid` and `game/scripts/network_status.gd.uid` predate M2 as untracked files in the primary worktree. The final integrator must generate/review them intentionally in the clean integration worktree; release preparation does not copy them.
+- `game/scripts/multiplayer_replication.gd.uid` and `game/scripts/network_status.gd.uid` predate M2 as untracked files in the primary worktree. M2 integration leaves them untouched; handle either only in a separate, intentional review rather than copying or regenerating them in an isolated M2 worktree.
 
 ## 4. Release qualification
 

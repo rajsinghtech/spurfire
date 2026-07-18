@@ -33,6 +33,9 @@ pub struct NetworkRider {
 
 #[godot_api]
 impl NetworkRider {
+    #[signal]
+    fn stance_changed(previous_id: i64, current_id: i64, tick: i64, dive_id: i64);
+
     /// Insert a strictly newer authoritative snapshot. Every u8 stance is
     /// transport-valid; future values remain conservative and unknown.
     #[func]
@@ -63,7 +66,7 @@ impl NetworkRider {
         if !self.clock_started {
             self.render_tick = target_tick;
             self.clock_started = true;
-            self.assign_stance(stance);
+            self.assign_stance(stance, tick);
         } else {
             let drift = target_tick - self.render_tick;
             // Recover immediately after a control/path stall. Without this guard,
@@ -91,7 +94,7 @@ impl NetworkRider {
     /// positional snap threshold.
     #[func]
     fn reconciliation(
-        &self,
+        &mut self,
         tick: i64,
         predicted_position: Vector3,
         authoritative_position: Vector3,
@@ -143,6 +146,9 @@ impl NetworkRider {
             "authoritative_stance_id",
             i64::from(authoritative_stance.as_u8()),
         );
+        if correction.stance_mismatch {
+            self.assign_stance(authoritative_stance, tick);
+        }
         result
     }
 }
@@ -187,7 +193,7 @@ impl INode3D for NetworkRider {
             return;
         };
         self.extrapolating = sample.extrapolated;
-        self.assign_stance(sample.state.stance);
+        self.assign_stance(sample.state.stance, sample.state.tick);
         if self.auto_apply {
             self.base_mut().set_position(Vector3::new(
                 sample.state.position_m[0],
@@ -202,9 +208,19 @@ impl INode3D for NetworkRider {
 }
 
 impl NetworkRider {
-    fn assign_stance(&mut self, stance: RiderStance) {
-        self.stance_id = i64::from(stance.as_u8());
+    fn assign_stance(&mut self, stance: RiderStance, tick: u64) {
+        let previous = self.stance_id;
+        let current = i64::from(stance.as_u8());
+        self.stance_id = current;
         self.stance_known = stance.is_known();
+        if previous != current {
+            self.signals().stance_changed().emit(
+                previous,
+                current,
+                i64::try_from(tick).unwrap_or(i64::MAX),
+                -1,
+            );
+        }
     }
 }
 

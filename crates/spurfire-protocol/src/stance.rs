@@ -78,6 +78,19 @@ impl RiderStance {
         !matches!(self, Self::Unknown(_))
     }
 
+    /// Whether the enum variant is the canonical representation of its wire ID.
+    /// `Unknown(1..=6)` is rejected on serialization so it cannot become a known
+    /// gameplay-capable stance after a wire round trip.
+    #[must_use]
+    pub const fn is_canonical(self) -> bool {
+        match self {
+            Self::Unknown(value) => {
+                value < Self::MOUNTED_ID || value > Self::ON_FOOT_STANDING_ID
+            }
+            _ => true,
+        }
+    }
+
     /// Whether the logical rider remains attached to a horse.
     #[must_use]
     pub const fn is_mounted(self) -> bool {
@@ -123,6 +136,11 @@ impl Serialize for RiderStance {
     where
         S: Serializer,
     {
+        if !self.is_canonical() {
+            return Err(serde::ser::Error::custom(
+                "noncanonical unknown rider stance aliases a known ID",
+            ));
+        }
         serializer.serialize_u8(self.as_u8())
     }
 }
@@ -193,6 +211,17 @@ mod tests {
                 "accepted {malformed}"
             );
         }
+    }
+
+    #[test]
+    fn noncanonical_unknown_aliases_never_serialize_as_known_stances() {
+        for known_id in RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID {
+            let alias = RiderStance::Unknown(known_id);
+            assert!(!alias.is_canonical());
+            assert!(serde_json::to_string(&alias).is_err());
+        }
+        assert!(RiderStance::Unknown(0).is_canonical());
+        assert!(RiderStance::Unknown(200).is_canonical());
     }
 
     #[test]

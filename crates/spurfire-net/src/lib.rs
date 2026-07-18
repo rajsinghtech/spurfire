@@ -95,7 +95,7 @@ pub enum CodecError {
 }
 
 pub fn encode(envelope: &Envelope) -> Result<Vec<u8>, CodecError> {
-    validate_payload(&envelope.payload)?;
+    validate_local_payload(&envelope.payload)?;
     let encoded =
         serde_json::to_vec(envelope).map_err(|error| CodecError::Malformed(error.to_string()))?;
     if encoded.len() > MAX_DATAGRAM_BYTES {
@@ -113,17 +113,51 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
     if !CURRENT_WIRE_VERSION.is_compatible_with(envelope.wire_version) {
         return Err(CodecError::IncompatibleVersion);
     }
-    validate_payload(&envelope.payload)?;
+    validate_remote_payload(&envelope.payload, envelope.wire_version)?;
     Ok(envelope)
 }
 
-fn validate_payload(payload: &PeerPayload) -> Result<(), CodecError> {
+fn validate_local_payload(payload: &PeerPayload) -> Result<(), CodecError> {
+    validate_stance(payload)?;
     if matches!(
         payload,
         PeerPayload::RiderInput { buttons, .. } if *buttons & RIDER_INPUT_RESERVED_MASK != 0
     ) {
         return Err(CodecError::Malformed(
             "rider input contains reserved button bits".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_remote_payload(
+    payload: &PeerPayload,
+    sender_version: WireVersion,
+) -> Result<(), CodecError> {
+    validate_stance(payload)?;
+    // Wire 1.1 requires its unassigned bits to be zero. A newer same-major
+    // sender may assign those bits additively; old readers retain the packet
+    // even though they do not interpret the future input capability.
+    if sender_version.minor() <= CURRENT_WIRE_VERSION.minor()
+        && matches!(
+            payload,
+            PeerPayload::RiderInput { buttons, .. } if *buttons & RIDER_INPUT_RESERVED_MASK != 0
+        )
+    {
+        return Err(CodecError::Malformed(
+            "rider input contains reserved button bits".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stance(payload: &PeerPayload) -> Result<(), CodecError> {
+    if matches!(
+        payload,
+        PeerPayload::RiderSnapshot { stance, .. } if !stance.is_canonical()
+    ) {
+        return Err(CodecError::Malformed(
+            "rider snapshot contains a noncanonical stance".to_owned(),
         ));
     }
     Ok(())
@@ -549,11 +583,32 @@ mod tests {
             decode(&serde_json::to_vec(&major).unwrap()),
             Err(CodecError::IncompatibleVersion)
         );
-        let mut future_minor = envelope(PeerPayload::Heartbeat);
+        let mut future_minor = envelope(PeerPayload::RiderInput {
+            throttle_milli: 0,
+            steer_milli: 0,
+            buttons: 1 << 2,
+        });
         future_minor.wire_version = WireVersion::new(1, 99);
         assert_eq!(
             decode(&serde_json::to_vec(&future_minor).unwrap()).unwrap(),
             future_minor
         );
+        assert!(matches!(
+            encode(&future_minor),
+            Err(CodecError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn noncanonical_unknown_stance_aliases_are_rejected_before_transport() {
+        for known_id in RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID {
+            let aliased = envelope(PeerPayload::RiderSnapshot {
+                position_mm: [0; 3],
+                velocity_mmps: [0; 3],
+                yaw_millidegrees: 0,
+                stance: RiderStance::Unknown(known_id),
+            });
+            assert!(matches!(encode(&aliased), Err(CodecError::Malformed(_))));
+        }
     }
 }

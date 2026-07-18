@@ -1,7 +1,5 @@
 //! Thin Godot `CharacterBody3D` adapter for the deterministic M2 kernels.
 
-use std::collections::BTreeMap;
-
 use godot::classes::{CharacterBody3D, CollisionShape3D, ICharacterBody3D, Node, Node3D, Object};
 use godot::prelude::*;
 use spurfire_protocol::{
@@ -9,9 +7,10 @@ use spurfire_protocol::{
     DiveId, DiveInstrumentationRow, GameplayEventKind, GameplayEventRow, HitZone, LandingOutcome,
     LandingTerrain, PlayerId, QuantizedDirection, QuantizedOrigin, RiderMotionObservation,
     RiderStance, SaddleDiveCommand, SaddleDiveEffects, SaddleDiveKernel, SaddleDiveState,
-    SaddleDiveTickInput, ShotAttributionLedger, ShotOutcome, ShotResult, SimulationTick, WeaponId,
-    BAD_LANDING_DAMAGE, DIRECTION_UNITS, MOVEMENT_SCALE_FULL_MILLI, MOVEMENT_SCALE_PRONE_MILLI,
-    MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2, SADDLE_DIVE_TICK_RATE_HZ,
+    SaddleDiveTickInput, ShotResultAttribution, SimulationTick, WeaponId, BAD_LANDING_DAMAGE,
+    DIRECTION_UNITS, MIN_DIVE_SPEED_MMPS, MOVEMENT_SCALE_FULL_MILLI,
+    MOVEMENT_SCALE_PRONE_MILLI, MOVEMENT_SCALE_RECOVERY_MILLI, SADDLE_DIVE_GRAVITY_MMPS2,
+    SADDLE_DIVE_TICK_RATE_HZ,
 };
 
 use crate::horse_controller::HorseController;
@@ -62,13 +61,11 @@ pub struct SaddleDiveController {
     can_reload: bool,
 
     kernel: SaddleDiveKernel,
-    shot_ledger: ShotAttributionLedger,
-    accepted_shots: BTreeMap<SimulationTick, AcceptedShotMetadata>,
     chosen_forward: Vector3,
     move_input: Vector2,
     mounted_grounded: bool,
     motion_begun: bool,
-    damage_sequence: u64,
+    death_signal_emitted: bool,
 }
 
 #[godot_api]
@@ -103,6 +100,10 @@ impl SaddleDiveController {
     #[signal]
     fn rider_died(tick: i64);
 
+    /// Camera/HUD presentation row for the logical rider currently followed.
+    #[signal]
+    fn telemetry_updated(telemetry: VarDictionary);
+
     /// Begin one shared absolute gameplay tick. Movement is resolved separately
     /// after same-tick combat through `resolve_motion`.
     #[func]
@@ -119,6 +120,9 @@ impl SaddleDiveController {
             return false;
         };
         let Some(horse) = self.horse() else {
+            return false;
+        };
+        let Some(mut weapon) = self.weapon_controller() else {
             return false;
         };
         if self.kernel.state() == SaddleDiveState::Mounted {
@@ -139,13 +143,39 @@ impl SaddleDiveController {
         };
         let actor = self.kernel.actor();
         let authority_epoch = self.kernel.authority_epoch();
+        let horse_velocity_mmps = quantized_velocity(horse_snapshot.velocity);
+        if self.kernel.state() == SaddleDiveState::Mounted {
+            let mounted_stance = if horse_snapshot.grounded {
+                RiderStance::Mounted
+            } else {
+                RiderStance::MountedAirborne
+            };
+            if !weapon
+                .bind_mut()
+                .synchronize_authoritative_stance(mounted_stance, None)
+            {
+                return false;
+            }
+            let launch_candidate = interact_pressed
+                && horse_snapshot.grounded
+                && planar_speed_squared_mmps(horse_velocity_mmps)
+                    >= u128::from(MIN_DIVE_SPEED_MMPS).pow(2);
+            if launch_candidate
+                && (!weapon
+                    .bind()
+                    .can_begin_authoritative_dive(tick, weapon_id)
+                    || !horse.bind().can_start_authoritative_runout())
+            {
+                return false;
+            }
+        }
         let input = SaddleDiveTickInput {
             tick,
             interact_pressed,
             chosen_direction: quantized_direction(chosen_direction),
             horse_grounded: horse_snapshot.grounded,
             horse_position,
-            horse_velocity_mmps: quantized_velocity(horse_snapshot.velocity),
+            horse_velocity_mmps,
             horse_gait: combat_gait(horse_snapshot.gait),
             equipped_weapon: weapon_id,
             rider_position,
@@ -194,7 +224,9 @@ impl SaddleDiveController {
             if self.kernel.state() != SaddleDiveState::SaddleDiveAirborne
                 && !self.base().is_on_floor()
             {
-                velocity.y -= SADDLE_DIVE_GRAVITY_MMPS2 as f32 / SADDLE_DIVE_TICK_RATE_HZ as f32;
+                velocity.y -= SADDLE_DIVE_GRAVITY_MMPS2 as f32
+                    / 1_000.0
+                    / SADDLE_DIVE_TICK_RATE_HZ as f32;
                 self.base_mut().set_velocity(velocity);
             }
             descending = velocity.y <= 0.0;
@@ -232,161 +264,52 @@ impl SaddleDiveController {
         true
     }
 
+    /// Apply one authority-issued damage observation. The stable sequence is
+    /// part of the replay key; re-delivery mutates neither health nor telemetry.
     #[func]
-    pub fn record_shot_attempt(&mut self, tick: i64) {
-        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
-            return;
-        };
-        let effects = self.kernel.record_shot_attempt(tick);
-        self.process_effects(effects);
-        self.refresh_runtime_properties();
-    }
-
-    /// Retain authority acceptance metadata before local geometry resolution.
-    #[func]
-    pub fn record_accepted_shot(
+    pub fn apply_external_damage(
         &mut self,
         tick: i64,
-        weapon_id: i64,
-        accepted_shot_index: i64,
+        observation_sequence: i64,
+        amount: i64,
     ) -> bool {
-        let (Ok(tick_value), Ok(weapon_id), Ok(accepted_index)) = (
+        let (Ok(tick_value), Ok(sequence), Ok(amount)) = (
             u64::try_from(tick),
-            WeaponId::try_from(weapon_id),
-            u64::try_from(accepted_shot_index),
+            u64::try_from(observation_sequence),
+            u16::try_from(amount),
         ) else {
             return false;
         };
-        let tick = SimulationTick::new(tick_value);
-        let stance = self.kernel.stance();
-        let dive_id = if stance == RiderStance::SaddleDiveAirborne {
-            self.kernel.current_dive_id()
-        } else {
-            None
-        };
-        let prelaunch = dive_id
-            .and_then(|id| self.kernel.instrumentation_row(id))
-            .map_or([0; 2], |row| row.prelaunch_velocity_mmps);
-        let gait = dive_id
-            .and_then(|id| self.kernel.instrumentation_row(id))
-            .map_or_else(
-                || {
-                    self.horse().map_or(CombatGait::Idle, |horse| {
-                        combat_gait(horse.bind().m2_snapshot().gait)
-                    })
-                },
-                |row| row.launch_gait,
-            );
-        let shot = AcceptedShotMetadata {
-            shooter: self.kernel.actor(),
-            tick,
-            accepted_shot_index: accepted_index,
-            weapon_id,
-            stance,
-            gait,
-            dive_id,
-            prelaunch_horizontal_velocity_mmps: prelaunch,
-        };
-        if !self.shot_ledger.record_accepted(shot) {
-            return false;
-        }
-        self.accepted_shots.insert(tick, shot);
-        let effects = self.kernel.record_accepted_shot(shot);
-        self.process_effects(effects);
-        true
-    }
-
-    /// Apply one authority result dictionary and derive all M2 style events from
-    /// retained acceptance metadata, never from client claims.
-    #[func]
-    pub fn record_authority_result(&mut self, result: VarDictionary) -> bool {
-        let Some(tick_value) =
-            dictionary_i64(&result, "tick").and_then(|value| u64::try_from(value).ok())
-        else {
-            return false;
-        };
-        let tick = SimulationTick::new(tick_value);
-        let Some(accepted) = self.accepted_shots.get(&tick).copied() else {
-            return false;
-        };
-        let outcome = match dictionary_string(&result, "outcome")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "hit" => ShotOutcome::Hit,
-            "miss" => ShotOutcome::Miss,
-            "reject" => ShotOutcome::Reject,
-            _ => return false,
-        };
-        let hit_zone = match dictionary_string(&result, "hit_zone")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "head" => Some(HitZone::Head),
-            "body" => Some(HitZone::Body),
-            "" => None,
-            _ => return false,
-        };
-        let target_id = dictionary_i64(&result, "target_id")
-            .filter(|value| *value >= 0)
-            .and_then(|value| u64::try_from(value).ok())
-            .map(spurfire_protocol::EntityId);
-        let damage = dictionary_i64(&result, "damage")
-            .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(0);
-        let resolved_direction =
-            dictionary_vector3(&result, "resolved_direction").and_then(quantized_direction);
-        let shot_result = ShotResult {
-            tick,
-            shooter_peer_id: self.kernel.actor(),
-            weapon_id: accepted.weapon_id,
-            outcome,
-            rejection_reason: None,
-            resolved_direction,
-            target_id,
-            hit_zone,
-            damage,
-            distance_mm: None,
-            eliminated: false,
-        };
-        let attribution = self
-            .shot_ledger
-            .observe_result(self.kernel.authority_epoch(), &shot_result);
-        if attribution.duplicate || attribution.accepted_shot.is_none() {
-            return false;
-        }
-        let effects = self.kernel.record_authority_result(&attribution);
-        self.process_effects(effects);
-        true
-    }
-
-    #[func]
-    pub fn apply_external_damage(&mut self, tick: i64, amount: i64) -> bool {
-        let (Ok(tick_value), Ok(amount)) = (u64::try_from(tick), u16::try_from(amount)) else {
-            return false;
-        };
-        self.damage_sequence = self.damage_sequence.saturating_add(1);
         let health_before = self.kernel.rider_health();
         let effects = self.kernel.apply_external_damage(DamageObservation {
             id: DamageObservationId {
                 authority_epoch: self.kernel.authority_epoch(),
                 actor: self.kernel.actor(),
                 tick: SimulationTick::new(tick_value),
-                sequence: self.damage_sequence,
+                sequence,
             },
             amount,
         });
         let changed = self.kernel.rider_health() != health_before;
         self.process_effects(effects);
         if health_before > 0 && self.kernel.rider_health() == 0 {
-            self.signals()
-                .rider_died()
-                .emit(i64::try_from(tick_value).unwrap_or(i64::MAX));
+            self.emit_rider_death_once(SimulationTick::new(tick_value));
         }
         self.refresh_runtime_properties();
         changed
+    }
+
+    /// Close observation windows only after the authority adapter has processed
+    /// every original observation through this tick.
+    #[func]
+    pub fn settle_observations_through(&mut self, tick: i64) -> bool {
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return false;
+        };
+        let effects = self.kernel.settle_observations_through(tick);
+        self.process_effects(effects);
+        self.refresh_runtime_properties();
+        true
     }
 
     #[func]
@@ -398,9 +321,7 @@ impl SaddleDiveController {
         let effects = self.kernel.observe_death(SimulationTick::new(tick_value));
         self.process_effects(effects);
         if was_alive {
-            self.signals()
-                .rider_died()
-                .emit(i64::try_from(tick_value).unwrap_or(i64::MAX));
+            self.emit_rider_death_once(SimulationTick::new(tick_value));
         }
         self.refresh_runtime_properties();
         was_alive
@@ -421,15 +342,21 @@ impl SaddleDiveController {
             return false;
         };
         let effects = self.kernel.reset(SimulationTick::new(tick_value));
+        self.current_tick = i64::try_from(tick_value).unwrap_or(i64::MAX);
+        self.motion_begun = false;
         if let Some(mut horse) = self.horse() {
             horse.bind_mut().reset_horse();
         }
         if let Some(mut weapon) = self.weapon_controller() {
-            weapon.bind_mut().complete_remount(tick);
+            if !weapon.bind_mut().complete_remount(tick) {
+                godot_error!("course reset could not restore mounted combat state");
+                return false;
+            }
         }
         self.follow_saddle();
         self.set_collision_enabled(false);
         self.base_mut().set_velocity(Vector3::ZERO);
+        self.death_signal_emitted = false;
         self.process_effects(effects);
         self.refresh_runtime_properties();
         true
@@ -475,13 +402,11 @@ impl ICharacterBody3D for SaddleDiveController {
             can_reload: true,
             kernel: SaddleDiveKernel::new(SADDLE_DIVE_TICK_RATE_HZ, actor, 0)
                 .expect("M2 tick rate is nonzero"),
-            shot_ledger: ShotAttributionLedger::default(),
-            accepted_shots: BTreeMap::new(),
             chosen_forward: Vector3::FORWARD,
             move_input: Vector2::ZERO,
             mounted_grounded: true,
             motion_begun: false,
-            damage_sequence: 0,
+            death_signal_emitted: false,
         }
     }
 
@@ -499,6 +424,15 @@ impl ICharacterBody3D for SaddleDiveController {
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
         self.kernel = SaddleDiveKernel::new(SADDLE_DIVE_TICK_RATE_HZ, actor, authority_epoch)
             .expect("M2 tick rate is nonzero");
+        if let Some(mut weapon) = self.weapon_controller() {
+            if !weapon
+                .bind_mut()
+                .bind_session_identity(actor, authority_epoch)
+            {
+                godot_error!("MountedWeaponController rejected initial rider identity binding");
+            }
+        }
+        self.death_signal_emitted = false;
         self.base_mut().set_up_direction(Vector3::UP);
         self.base_mut().set_floor_max_angle(80.0_f32.to_radians());
         self.base_mut().set_floor_snap_length(0.12);
@@ -518,6 +452,121 @@ impl SaddleDiveController {
     fn weapon_controller(&self) -> Option<Gd<MountedWeaponController>> {
         self.base()
             .try_get_node_as::<MountedWeaponController>(&self.weapon_controller_path)
+    }
+
+    pub(crate) fn can_accept_authority_shot(
+        &self,
+        tick: SimulationTick,
+        stance: RiderStance,
+        dive_id: Option<DiveId>,
+        weapon_id: WeaponId,
+    ) -> bool {
+        if self.kernel.current_tick() != Some(tick)
+            || self.kernel.stance() != stance
+            || self.kernel.current_dive_id() != dive_id
+        {
+            return false;
+        }
+        match (stance, dive_id) {
+            (RiderStance::Mounted, None) => true,
+            (RiderStance::SaddleDiveAirborne, Some(id)) => self
+                .kernel
+                .instrumentation_row(id)
+                .is_some_and(|row| row.launch_weapon == weapon_id && row.landing_tick.is_none()),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn record_authority_shot_attempt(&mut self, tick: SimulationTick) {
+        let effects = self.kernel.record_shot_attempt(tick);
+        self.process_effects(effects);
+        self.refresh_runtime_properties();
+    }
+
+    pub(crate) fn record_authority_accepted_shot(
+        &mut self,
+        shot: AcceptedShotMetadata,
+    ) -> bool {
+        if shot.shooter != self.kernel.actor()
+            || !self.can_accept_authority_shot(
+                shot.tick,
+                shot.stance,
+                shot.dive_id,
+                shot.weapon_id,
+            )
+        {
+            return false;
+        }
+        if shot.dive_id.is_none() {
+            return shot.stance == RiderStance::Mounted;
+        }
+        let effects = self.kernel.record_accepted_shot(shot);
+        let accepted = !effects.telemetry_updates.is_empty();
+        self.process_effects(effects);
+        self.refresh_runtime_properties();
+        accepted
+    }
+
+    pub(crate) fn record_attributed_authority_result(
+        &mut self,
+        attribution: &ShotResultAttribution,
+    ) -> bool {
+        let Some(shot) = attribution.accepted_shot else {
+            return false;
+        };
+        if attribution.duplicate || shot.shooter != self.kernel.actor() {
+            return false;
+        }
+        let effects = self.kernel.record_authority_result(attribution);
+        let accepted = shot.dive_id.is_none()
+            || !effects.telemetry_updates.is_empty()
+            || !effects.events.is_empty();
+        self.process_effects(effects);
+        self.refresh_runtime_properties();
+        accepted
+    }
+
+    pub(crate) fn bind_session_identity(
+        &mut self,
+        actor: PlayerId,
+        authority_epoch: u64,
+    ) -> bool {
+        if self.kernel.actor() == actor && self.kernel.authority_epoch() == authority_epoch {
+            return true;
+        }
+        if self.kernel.state() != SaddleDiveState::Mounted
+            || self.kernel.instrumentation_rows().next().is_some()
+        {
+            return false;
+        }
+        let Some(mut weapon) = self.weapon_controller() else {
+            return false;
+        };
+        if !weapon
+            .bind_mut()
+            .bind_session_identity(actor, authority_epoch)
+        {
+            return false;
+        }
+        let Ok(kernel) = SaddleDiveKernel::new(SADDLE_DIVE_TICK_RATE_HZ, actor, authority_epoch)
+        else {
+            return false;
+        };
+        self.kernel = kernel;
+        self.actor_id = GString::from(&actor.to_canonical_string());
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        self.motion_begun = false;
+        self.death_signal_emitted = false;
+        self.refresh_runtime_properties();
+        true
+    }
+
+    fn emit_rider_death_once(&mut self, tick: SimulationTick) {
+        if self.death_signal_emitted {
+            return;
+        }
+        self.death_signal_emitted = true;
+        self.signals().rider_died().emit(tick_i64(tick));
     }
 
     fn follow_saddle(&mut self) {
@@ -572,29 +621,20 @@ impl SaddleDiveController {
     }
 
     fn process_effects(&mut self, effects: SaddleDiveEffects) {
+        if !self.prepare_authoritative_combat(&effects) {
+            godot_error!("Saddle Dive authority adapters diverged; refusing presentation effects");
+            return;
+        }
+
         for command in &effects.commands {
             match *command {
-                SaddleDiveCommand::StartHorseRunout {
-                    dive_id,
-                    tick,
-                    horse_velocity_mmps,
-                    ..
-                } => {
-                    if let Some(mut horse) = self.horse() {
-                        horse.bind_mut().start_dive_runout(tick_i64(tick));
-                    }
-                    if let Some(row) = self.kernel.instrumentation_row(dive_id) {
-                        if let Some(mut weapon) = self.weapon_controller() {
-                            weapon.bind_mut().begin_saddle_dive(
-                                dive_id_i64(dive_id),
-                                tick_i64(tick),
-                                Vector2::new(
-                                    horse_velocity_mmps[0] as f32 / 1_000.0,
-                                    horse_velocity_mmps[2] as f32 / 1_000.0,
-                                ),
-                                i64::try_from(row.nominal_airtime_ticks).unwrap_or(i64::MAX),
-                            );
-                        }
+                SaddleDiveCommand::StartHorseRunout { tick, .. } => {
+                    let started = self
+                        .horse()
+                        .is_some_and(|mut horse| horse.bind_mut().start_dive_runout(tick_i64(tick)));
+                    if !started {
+                        godot_error!("preflighted horse runout failed at tick {}", tick.as_u64());
+                        return;
                     }
                 }
                 SaddleDiveCommand::DetachRider {
@@ -614,7 +654,10 @@ impl SaddleDiveController {
                             );
                         }
                     } else if let Some(mut horse) = self.horse() {
-                        horse.bind_mut().stop_for_dismount(tick_i64(tick));
+                        if !horse.bind_mut().stop_for_dismount(tick_i64(tick)) {
+                            godot_error!("ordinary dismount could not stop the existing horse");
+                            return;
+                        }
                     }
                 }
                 SaddleDiveCommand::ApplyRiderDamage(command) => {
@@ -627,13 +670,17 @@ impl SaddleDiveController {
                     if command.amount != BAD_LANDING_DAMAGE {
                         godot_error!("unexpected Saddle Dive landing damage command");
                     }
+                    if health_after == 0 {
+                        self.emit_rider_death_once(command.tick);
+                    }
                 }
                 SaddleDiveCommand::AttachRider { tick, .. } => {
-                    if let Some(mut horse) = self.horse() {
-                        horse.bind_mut().complete_remount(tick_i64(tick));
-                    }
-                    if let Some(mut weapon) = self.weapon_controller() {
-                        weapon.bind_mut().complete_remount(tick_i64(tick));
+                    let remounted = self
+                        .horse()
+                        .is_some_and(|mut horse| horse.bind_mut().complete_remount(tick_i64(tick)));
+                    if !remounted {
+                        godot_error!("range-checked remount could not restore horse control");
+                        return;
                     }
                     self.follow_saddle();
                     self.set_collision_enabled(false);
@@ -655,11 +702,6 @@ impl SaddleDiveController {
             match (transition.from, transition.to) {
                 (SaddleDiveState::SaddleDiveAirborne, SaddleDiveState::LandingProne) => {
                     if let Some(id) = transition.dive_id {
-                        if let Some(mut weapon) = self.weapon_controller() {
-                            weapon
-                                .bind_mut()
-                                .finish_saddle_dive(dive_id_i64(id), tick_i64(transition.tick));
-                        }
                         if let Some(row) = self.kernel.instrumentation_row(id).cloned() {
                             let bad = row.landing_outcome == Some(LandingOutcome::Bad);
                             let terrain = GString::from(
@@ -706,6 +748,87 @@ impl SaddleDiveController {
             let payload = instrumentation_dictionary(row);
             self.signals().dive_telemetry_finalized().emit(&payload);
         }
+    }
+
+    fn prepare_authoritative_combat(&mut self, effects: &SaddleDiveEffects) -> bool {
+        for command in &effects.commands {
+            match *command {
+                SaddleDiveCommand::StartHorseRunout {
+                    dive_id,
+                    tick,
+                    horse_velocity_mmps,
+                    ..
+                } => {
+                    let Some(row) = self.kernel.instrumentation_row(dive_id) else {
+                        return false;
+                    };
+                    let Some(mut weapon) = self.weapon_controller() else {
+                        return false;
+                    };
+                    if !weapon.bind_mut().begin_saddle_dive(
+                        dive_id_i64(dive_id),
+                        tick_i64(tick),
+                        Vector2::new(
+                            horse_velocity_mmps[0] as f32 / 1_000.0,
+                            horse_velocity_mmps[2] as f32 / 1_000.0,
+                        ),
+                        i64::try_from(row.nominal_airtime_ticks).unwrap_or(i64::MAX),
+                    ) {
+                        return false;
+                    }
+                }
+                SaddleDiveCommand::AttachRider { tick, .. } => {
+                    let Some(mut weapon) = self.weapon_controller() else {
+                        return false;
+                    };
+                    if !weapon.bind_mut().complete_remount(tick_i64(tick)) {
+                        return false;
+                    }
+                }
+                SaddleDiveCommand::DetachRider { .. }
+                | SaddleDiveCommand::ApplyRiderDamage(_) => {}
+            }
+        }
+
+        for transition in &effects.transitions {
+            let current = stance_for_state(transition.to, self.mounted_grounded);
+            let current_dive = if current == RiderStance::SaddleDiveAirborne {
+                transition.dive_id
+            } else {
+                None
+            };
+            let already_applied = matches!(
+                (transition.from, transition.to),
+                (SaddleDiveState::Mounted, SaddleDiveState::SaddleDiveAirborne)
+                    | (SaddleDiveState::OnFootReady, SaddleDiveState::Mounted)
+            );
+            if already_applied {
+                continue;
+            }
+            let Some(mut weapon) = self.weapon_controller() else {
+                return false;
+            };
+            if matches!(
+                (transition.from, transition.to),
+                (SaddleDiveState::SaddleDiveAirborne, SaddleDiveState::LandingProne)
+            ) {
+                let Some(id) = transition.dive_id else {
+                    return false;
+                };
+                if !weapon
+                    .bind_mut()
+                    .finish_saddle_dive(dive_id_i64(id), tick_i64(transition.tick))
+                {
+                    return false;
+                }
+            } else if !weapon
+                .bind_mut()
+                .synchronize_authoritative_stance(current, current_dive)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     fn emit_gameplay_event(&mut self, event: &GameplayEventRow) {
@@ -782,6 +905,35 @@ impl SaddleDiveController {
         self.can_reload = stance == RiderStance::Mounted;
         self.rider_health = i64::from(self.kernel.rider_health());
         self.airtime_seconds = self.current_airtime_seconds();
+        self.emit_camera_telemetry(stance);
+    }
+
+    fn emit_camera_telemetry(&mut self, stance: RiderStance) {
+        let Some(horse) = self.horse() else {
+            return;
+        };
+        let snapshot = horse.bind().m2_snapshot();
+        let planar_speed = f64::from(
+            (self.base().get_velocity().x * self.base().get_velocity().x
+                + self.base().get_velocity().z * self.base().get_velocity().z)
+                .sqrt(),
+        );
+        let (speed_mps, speed_fraction, yaw_rate_degrees) = if stance.is_mounted() {
+            (
+                f64::from(snapshot.velocity.length()),
+                snapshot.speed_fraction,
+                snapshot.yaw_rate_degrees,
+            )
+        } else {
+            let top_speed = finite_positive_or(snapshot.gallop_speed_mps, 13.0);
+            (planar_speed, (planar_speed / top_speed).clamp(0.0, 1.0), 0.0)
+        };
+        let mut telemetry = VarDictionary::new();
+        telemetry.set("speed_mps", speed_mps);
+        telemetry.set("speed_fraction", speed_fraction.clamp(0.0, 1.0));
+        telemetry.set("yaw_rate_degs", yaw_rate_degrees);
+        telemetry.set("stance_id", i64::from(stance.as_u8()));
+        self.signals().telemetry_updated().emit(&telemetry);
     }
 
     fn current_airtime_seconds(&self) -> f64 {
@@ -867,6 +1019,12 @@ fn finite_planar_or_full(value: Vector3) -> Option<Vector3> {
 
 fn quantized_origin(value: Vector3) -> Option<QuantizedOrigin> {
     QuantizedOrigin::from_meters(f64::from(value.x), f64::from(value.y), f64::from(value.z)).ok()
+}
+
+fn planar_speed_squared_mmps(value: [i32; 3]) -> u128 {
+    let x = i128::from(value[0]);
+    let z = i128::from(value[2]);
+    (x * x + z * z) as u128
 }
 
 fn quantized_velocity(value: Vector3) -> [i32; 3] {
@@ -1173,25 +1331,6 @@ fn set_optional_bool(result: &mut VarDictionary, key: &str, value: Option<bool>)
     } else {
         result.set(key, &Variant::nil());
     }
-}
-
-fn dictionary_i64(dictionary: &VarDictionary, key: &str) -> Option<i64> {
-    dictionary
-        .get(key)
-        .and_then(|value| value.try_to::<i64>().ok())
-}
-
-fn dictionary_string(dictionary: &VarDictionary, key: &str) -> Option<String> {
-    dictionary
-        .get(key)
-        .and_then(|value| value.try_to::<GString>().ok())
-        .map(|value| value.to_string())
-}
-
-fn dictionary_vector3(dictionary: &VarDictionary, key: &str) -> Option<Vector3> {
-    dictionary
-        .get(key)
-        .and_then(|value| value.try_to::<Vector3>().ok())
 }
 
 fn tick_i64(tick: SimulationTick) -> i64 {

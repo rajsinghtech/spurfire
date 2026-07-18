@@ -29,6 +29,9 @@ pub(crate) struct HorseM2Snapshot {
     pub grounded: bool,
     pub gait: i64,
     pub retrievable: bool,
+    pub speed_fraction: f64,
+    pub yaw_rate_degrees: f64,
+    pub gallop_speed_mps: f64,
 }
 
 /// Godot adapter for the pure locomotion kernel.
@@ -439,7 +442,14 @@ impl HorseController {
             grounded: self.base().is_on_floor(),
             gait: self.current_gait,
             retrievable: self.runout_kernel.is_retrievable(),
+            speed_fraction: self.speed_fraction,
+            yaw_rate_degrees: self.yaw_rate_degrees,
+            gallop_speed_mps: self.gallop_speed,
         }
+    }
+
+    pub(crate) fn can_start_authoritative_runout(&self) -> bool {
+        self.runout_kernel.state() == HorseRunoutState::PlayerControlled
     }
 
     fn simulate_external_tick(&mut self, tick: SimulationTick) -> bool {
@@ -469,16 +479,28 @@ impl HorseController {
                 if runout.state == HorseRunoutState::Runout {
                     self.base_mut().move_and_slide();
                 }
-                let position = self.base().get_global_position();
+                let mut position = self.base().get_global_position();
                 let resolved_velocity = self.base().get_velocity();
                 let Some(position_mm) = quantized_origin(position) else {
                     return false;
                 };
-                let transition = self
-                    .runout_kernel
-                    .resolve_motion(tick, position_mm, quantized_velocity(resolved_velocity))
-                    .ok()
-                    .flatten();
+                let clamped_position_mm = self.runout_kernel.clamp_motion_position(position_mm);
+                if clamped_position_mm != position_mm {
+                    position.x = clamped_position_mm.x as f32 / 1_000.0;
+                    position.z = clamped_position_mm.z as f32 / 1_000.0;
+                    self.base_mut().set_global_position(position);
+                }
+                let transition = match self.runout_kernel.resolve_motion(
+                    tick,
+                    clamped_position_mm,
+                    quantized_velocity(resolved_velocity),
+                ) {
+                    Ok(transition) => transition,
+                    Err(error) => {
+                        godot_error!("horse runout collision feedback rejected: {error}");
+                        return false;
+                    }
+                };
                 self.kernel.resolve_motion(
                     from_godot_vector(position),
                     from_godot_vector(resolved_velocity),

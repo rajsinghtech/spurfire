@@ -844,11 +844,11 @@ impl RiderHealthKernel {
         true
     }
 
-    /// Explicit course reset; this is not a normal retrieval path.
+    /// Explicit course reset; this is not a normal retrieval path. Replay keys
+    /// remain match-lifetime so an old authority observation cannot damage the
+    /// reset life a second time.
     pub fn reset(&mut self) {
         self.health = PROTOTYPE_RIDER_HEALTH;
-        self.landing_commands.clear();
-        self.external_observations.clear();
     }
 
     fn apply_amount(&mut self, amount: u16) -> RiderHealthApplication {
@@ -894,6 +894,7 @@ struct DiveRecord {
     attempt_ticks: BTreeSet<SimulationTick>,
     accepted_shots: BTreeMap<SimulationTick, AcceptedShotMetadata>,
     resolved_shots: BTreeSet<SimulationTick>,
+    attributed_damage_observations: BTreeSet<DamageObservationId>,
     finalized: bool,
 }
 
@@ -930,6 +931,8 @@ pub struct SaddleDiveKernel {
     landing: Option<LandingState>,
     rider_position: QuantizedOrigin,
     health: RiderHealthKernel,
+    damage_observations: BTreeMap<DamageObservationId, u16>,
+    observation_watermark: Option<SimulationTick>,
     rows: BTreeMap<DiveId, DiveRecord>,
 }
 
@@ -959,6 +962,8 @@ impl SaddleDiveKernel {
             landing: None,
             rider_position: QuantizedOrigin::default(),
             health: RiderHealthKernel::default(),
+            damage_observations: BTreeMap::new(),
+            observation_watermark: None,
             rows: BTreeMap::new(),
         })
     }
@@ -1048,7 +1053,6 @@ impl SaddleDiveKernel {
 
         let mut effects = SaddleDiveEffects::default();
         self.advance_recovery_boundaries(input.tick, &mut effects);
-        self.resolve_elapsed_death_windows(input.tick, &mut effects);
 
         let interact_edge = input.interact_pressed && !self.previous_interact_level;
         self.previous_interact_level = input.interact_pressed;
@@ -1088,6 +1092,25 @@ impl SaddleDiveKernel {
         }
 
         Ok(self.tick_output(input.tick, interact_consumed, effects))
+    }
+
+    /// Advances the authority observation watermark after every damage/death
+    /// observation through `tick` has been processed. Timer progression alone
+    /// never closes the inclusive three-second window, which keeps an original
+    /// boundary-tick observation attributable even when gameplay ticks advance
+    /// before its authority delivery.
+    pub fn settle_observations_through(&mut self, tick: SimulationTick) -> SaddleDiveEffects {
+        let mut effects = SaddleDiveEffects::default();
+        if self.current_tick.is_none_or(|current| tick > current)
+            || self
+                .observation_watermark
+                .is_some_and(|watermark| tick <= watermark)
+        {
+            return effects;
+        }
+        self.observation_watermark = Some(tick);
+        self.resolve_elapsed_death_windows(tick, &mut effects);
+        effects
     }
 
     /// Feeds collision-resolved rider motion back once for the current tick.
@@ -1161,7 +1184,8 @@ impl SaddleDiveKernel {
         let Some(record) = self.rows.get_mut(&dive_id) else {
             return effects;
         };
-        if shot.tick < record.row.launch_tick
+        if record.finalized
+            || shot.tick < record.row.launch_tick
             || shot.weapon_id != record.row.launch_weapon
             || shot.prelaunch_horizontal_velocity_mmps != record.row.prelaunch_velocity_mmps
             || record
@@ -1188,21 +1212,23 @@ impl SaddleDiveKernel {
         if attribution.result.shooter_peer_id != self.actor || attribution.duplicate {
             return effects;
         }
-        effects.events.extend(attribution.events.iter().cloned());
         let Some(shot) = attribution.accepted_shot else {
             return effects;
         };
         let Some(dive_id) = shot.dive_id else {
+            effects.events.extend(attribution.events.iter().cloned());
             return effects;
         };
         let Some(record) = self.rows.get_mut(&dive_id) else {
             return effects;
         };
-        if record.accepted_shots.get(&shot.tick) != Some(&shot)
+        if record.finalized
+            || record.accepted_shots.get(&shot.tick) != Some(&shot)
             || !record.resolved_shots.insert(shot.tick)
         {
             return effects;
         }
+        effects.events.extend(attribution.events.iter().cloned());
         if attribution.result.outcome == ShotOutcome::Hit {
             record.row.shots_hit = record.row.shots_hit.saturating_add(1);
             record.row.damage_dealt = record
@@ -1226,6 +1252,7 @@ impl SaddleDiveKernel {
             }
         }
         self.push_update(dive_id, &mut effects);
+        self.maybe_finalize(dive_id, &mut effects);
         effects
     }
 
@@ -1241,7 +1268,9 @@ impl SaddleDiveKernel {
         let Some(application) = self.health.apply_external(observation) else {
             return effects;
         };
-        self.record_damage_in_windows(observation.id.tick, observation.amount, &mut effects);
+        self.damage_observations
+            .insert(observation.id, observation.amount);
+        self.record_damage_in_windows(observation, &mut effects);
         if application.died {
             self.observe_death_internal(observation.id.tick, &mut effects);
         }
@@ -1393,6 +1422,7 @@ impl SaddleDiveKernel {
                 attempt_ticks: BTreeSet::new(),
                 accepted_shots: BTreeMap::new(),
                 resolved_shots: BTreeSet::new(),
+                attributed_damage_observations: BTreeSet::new(),
                 finalized: false,
             },
         );
@@ -1518,8 +1548,15 @@ impl SaddleDiveKernel {
                         .damage_taken_landing_through_3s
                         .saturating_add(u32::from(BAD_LANDING_DAMAGE));
                 }
+                if let Some(death_tick) = record.row.death_tick {
+                    let window = duration_ticks_ceil(self.tick_rate, 3_000);
+                    record.row.death_within_3s =
+                        Some(death_tick <= observation.tick.saturating_add(window));
+                    record.row.censor_reason = Some(DiveCensorReason::DiedBeforeRemount);
+                }
             }
         }
+        self.attribute_retained_damage_for_dive(airborne.dive_id, effects);
 
         if bad {
             let command = RiderDamageCommand {
@@ -1543,6 +1580,7 @@ impl SaddleDiveKernel {
             }
         }
         self.push_update(airborne.dive_id, effects);
+        self.maybe_finalize(airborne.dive_id, effects);
     }
 
     fn advance_recovery_boundaries(
@@ -1608,7 +1646,7 @@ impl SaddleDiveKernel {
                     return None;
                 }
                 let landing = record.row.landing_tick?;
-                (current_tick > landing.saturating_add(observation_ticks)).then_some(*id)
+                (current_tick >= landing.saturating_add(observation_ticks)).then_some(*id)
             })
             .collect();
         for id in ids {
@@ -1661,8 +1699,7 @@ impl SaddleDiveKernel {
 
     fn record_damage_in_windows(
         &mut self,
-        tick: SimulationTick,
-        amount: u16,
+        observation: DamageObservation,
         effects: &mut SaddleDiveEffects,
     ) {
         let observation_ticks = duration_ticks_ceil(self.tick_rate, 3_000);
@@ -1670,19 +1707,62 @@ impl SaddleDiveKernel {
             .rows
             .iter()
             .filter_map(|(id, record)| {
+                if record.finalized
+                    || record
+                        .attributed_damage_observations
+                        .contains(&observation.id)
+                {
+                    return None;
+                }
                 let landing = record.row.landing_tick?;
-                (tick >= landing && tick <= landing.saturating_add(observation_ticks))
-                    .then_some(*id)
+                (observation.id.tick >= landing
+                    && observation.id.tick <= landing.saturating_add(observation_ticks))
+                .then_some(*id)
             })
             .collect();
         for id in ids {
             if let Some(record) = self.rows.get_mut(&id) {
+                if !record
+                    .attributed_damage_observations
+                    .insert(observation.id)
+                {
+                    continue;
+                }
                 record.row.damage_taken_landing_through_3s = record
                     .row
                     .damage_taken_landing_through_3s
-                    .saturating_add(u32::from(amount));
+                    .saturating_add(u32::from(observation.amount));
             }
             self.push_update(id, effects);
+        }
+    }
+
+    fn attribute_retained_damage_for_dive(
+        &mut self,
+        dive_id: DiveId,
+        effects: &mut SaddleDiveEffects,
+    ) {
+        let observations: Vec<_> = self
+            .damage_observations
+            .iter()
+            .map(|(id, amount)| DamageObservation {
+                id: *id,
+                amount: *amount,
+            })
+            .collect();
+        for observation in observations {
+            let before = self
+                .rows
+                .get(&dive_id)
+                .map(|record| record.row.damage_taken_landing_through_3s);
+            self.record_damage_in_windows(observation, effects);
+            let after = self
+                .rows
+                .get(&dive_id)
+                .map(|record| record.row.damage_taken_landing_through_3s);
+            if before != after {
+                self.push_update(dive_id, effects);
+            }
         }
     }
 
@@ -1737,10 +1817,35 @@ impl SaddleDiveKernel {
     }
 
     fn maybe_finalize(&mut self, dive_id: DiveId, effects: &mut SaddleDiveEffects) {
+        let current_tick = self.current_tick;
+        let motion_resolved = self.motion_resolved;
         let should_finalize = self.rows.get(&dive_id).is_some_and(|record| {
-            !record.finalized
-                && (record.row.censor_reason.is_some()
-                    || (record.row.death_within_3s.is_some() && record.row.remount_tick.is_some()))
+            if record.finalized {
+                return false;
+            }
+            let all_accepted_results_settled =
+                record.accepted_shots.len() == record.resolved_shots.len();
+            let terminal = match record.row.censor_reason {
+                Some(
+                    DiveCensorReason::MatchEnded
+                    | DiveCensorReason::Reset
+                    | DiveCensorReason::NotObserved,
+                ) => true,
+                Some(DiveCensorReason::DiedAirborne) => {
+                    all_accepted_results_settled
+                        && (motion_resolved
+                            || current_tick.is_some_and(|tick| {
+                                record.row.death_tick.is_some_and(|death| tick > death)
+                            }))
+                }
+                Some(DiveCensorReason::DiedBeforeRemount) => all_accepted_results_settled,
+                None => {
+                    all_accepted_results_settled
+                        && record.row.death_within_3s.is_some()
+                        && record.row.remount_tick.is_some()
+                }
+            };
+            terminal
         });
         if !should_finalize {
             return;
@@ -1938,6 +2043,9 @@ pub enum HorseRunoutError {
     /// Resolve repeated for one tick.
     #[error("motion_already_resolved")]
     MotionAlreadyResolved,
+    /// Collision feedback exceeded the movement request for this tick.
+    #[error("motion_exceeds_maximum_step")]
+    MotionExceedsMaximumStep,
     /// Only an idle horse can complete remount.
     #[error("not_retrievable")]
     NotRetrievable,
@@ -1953,6 +2061,7 @@ pub struct HorseRunoutKernel {
     motion_resolved: bool,
     initial_planar_velocity_mmps: [i32; 2],
     last_position: QuantizedOrigin,
+    current_maximum_step_mm: u32,
     cumulative_travel_mm: u32,
 }
 
@@ -1970,6 +2079,7 @@ impl HorseRunoutKernel {
             motion_resolved: false,
             initial_planar_velocity_mmps: [0; 2],
             last_position: QuantizedOrigin::default(),
+            current_maximum_step_mm: 0,
             cumulative_travel_mm: 0,
         })
     }
@@ -2008,6 +2118,7 @@ impl HorseRunoutKernel {
         self.motion_resolved = false;
         self.initial_planar_velocity_mmps = [velocity_mmps[0], velocity_mmps[2]];
         self.last_position = position;
+        self.current_maximum_step_mm = 0;
         self.cumulative_travel_mm = 0;
         Ok(HorseRunoutTransition {
             from: HorseRunoutState::PlayerControlled,
@@ -2029,6 +2140,7 @@ impl HorseRunoutKernel {
         self.motion_resolved = false;
         self.initial_planar_velocity_mmps = [0; 2];
         self.last_position = position;
+        self.current_maximum_step_mm = 0;
         self.cumulative_travel_mm = 0;
         HorseRunoutTransition {
             from: previous,
@@ -2095,6 +2207,7 @@ impl HorseRunoutKernel {
         } else {
             ([0; 3], 0)
         };
+        self.current_maximum_step_mm = maximum_step_mm;
         Ok(HorseRunoutTickOutput {
             state: self.state,
             requested_velocity_mmps: velocity,
@@ -2102,6 +2215,21 @@ impl HorseRunoutKernel {
             cumulative_travel_mm: self.cumulative_travel_mm,
             transition,
         })
+    }
+
+    /// Clamps collision feedback to this tick's requested planar step. Adapters
+    /// apply the returned position to the real horse body before resolution so
+    /// the 25 m cap constrains world position, not only telemetry accounting.
+    #[must_use]
+    pub fn clamp_motion_position(&self, position: QuantizedOrigin) -> QuantizedOrigin {
+        if self.state != HorseRunoutState::Runout {
+            return position;
+        }
+        clamp_origin_to_planar_step(
+            self.last_position,
+            position,
+            self.current_maximum_step_mm,
+        )
     }
 
     /// Records one collision-resolved horse movement and stops at the cap.
@@ -2117,12 +2245,16 @@ impl HorseRunoutKernel {
         if self.motion_resolved {
             return Err(HorseRunoutError::MotionAlreadyResolved);
         }
-        self.motion_resolved = true;
         if self.state != HorseRunoutState::Runout {
+            self.motion_resolved = true;
             self.last_position = position;
             return Ok(None);
         }
         let travelled = rounded_planar_distance(self.last_position, position);
+        if travelled > self.current_maximum_step_mm {
+            return Err(HorseRunoutError::MotionExceedsMaximumStep);
+        }
+        self.motion_resolved = true;
         let remaining = HORSE_MAX_TRAVEL_MM.saturating_sub(self.cumulative_travel_mm);
         self.cumulative_travel_mm = self
             .cumulative_travel_mm
@@ -2152,11 +2284,44 @@ impl HorseRunoutKernel {
         self.current_tick = None;
         self.motion_resolved = false;
         self.initial_planar_velocity_mmps = [0; 2];
+        self.current_maximum_step_mm = 0;
         Ok(HorseRunoutTransition {
             from: HorseRunoutState::IdleRetrievable,
             to: HorseRunoutState::PlayerControlled,
             tick,
         })
+    }
+}
+
+fn clamp_origin_to_planar_step(
+    origin: QuantizedOrigin,
+    requested: QuantizedOrigin,
+    maximum_step_mm: u32,
+) -> QuantizedOrigin {
+    let distance = rounded_planar_distance(origin, requested);
+    if distance <= maximum_step_mm {
+        return requested;
+    }
+    if maximum_step_mm == 0 {
+        return QuantizedOrigin::new(origin.x, requested.y, origin.z);
+    }
+    let dx = i128::from(requested.x) - i128::from(origin.x);
+    let dz = i128::from(requested.z) - i128::from(origin.z);
+    let mut scaled_step = maximum_step_mm;
+    loop {
+        let x = origin.x.saturating_add(saturating_i128_to_i32(div_round_half_away(
+            dx * i128::from(scaled_step),
+            i128::from(distance),
+        )));
+        let z = origin.z.saturating_add(saturating_i128_to_i32(div_round_half_away(
+            dz * i128::from(scaled_step),
+            i128::from(distance),
+        )));
+        let clamped = QuantizedOrigin::new(x, requested.y, z);
+        if rounded_planar_distance(origin, clamped) <= maximum_step_mm || scaled_step == 0 {
+            return clamped;
+        }
+        scaled_step -= 1;
     }
 }
 
@@ -2655,17 +2820,25 @@ mod tests {
         assert!(!horse.is_retrievable());
         let first = horse.begin_tick(SimulationTick::new(10)).unwrap();
         assert_eq!(first.requested_velocity_mmps, [0, 0, -14_000]);
-        let middle = horse.begin_tick(SimulationTick::new(70)).unwrap();
-        assert_eq!(middle.requested_velocity_mmps, [0, 0, -7_000]);
-        // A collision-shortened winding path accumulates resolved segment length.
         horse
             .resolve_motion(
-                SimulationTick::new(70),
-                QuantizedOrigin::new(3_000, 0, 4_000),
+                SimulationTick::new(10),
+                QuantizedOrigin::new(0, 0, -i32::try_from(first.maximum_step_mm).unwrap()),
                 [0; 3],
             )
             .unwrap();
-        assert_eq!(horse.cumulative_travel_mm(), 5_000);
+        let middle = horse.begin_tick(SimulationTick::new(70)).unwrap();
+        assert_eq!(middle.requested_velocity_mmps, [0, 0, -7_000]);
+        // Collision feedback may shorten and redirect the segment, but its
+        // actual planar displacement remains bounded by the request.
+        horse
+            .resolve_motion(
+                SimulationTick::new(70),
+                QuantizedOrigin::new(60, 0, -314),
+                [0; 3],
+            )
+            .unwrap();
+        assert_eq!(horse.cumulative_travel_mm(), first.maximum_step_mm + 100);
         let stop = horse.begin_tick(SimulationTick::new(130)).unwrap();
         assert_eq!(stop.state, HorseRunoutState::IdleRetrievable);
         assert_eq!(stop.transition.unwrap().tick, SimulationTick::new(130));
@@ -2679,15 +2852,43 @@ mod tests {
                 [0, 0, -100_000],
             )
             .unwrap();
-        capped.begin_tick(SimulationTick::new(1)).unwrap();
-        capped
-            .resolve_motion(
+        let first_cap = capped.begin_tick(SimulationTick::new(1)).unwrap();
+        assert_eq!(
+            capped.resolve_motion(
                 SimulationTick::new(1),
                 QuantizedOrigin::new(20_000, 0, 20_000),
                 [0; 3],
-            )
+            ),
+            Err(HorseRunoutError::MotionExceedsMaximumStep)
+        );
+        assert_eq!(capped.cumulative_travel_mm(), 0);
+        let impossible = QuantizedOrigin::new(20_000, 0, 20_000);
+        let mut position = capped.clamp_motion_position(impossible);
+        assert_ne!(position, impossible);
+        assert!(
+            rounded_planar_distance(QuantizedOrigin::default(), position)
+                <= first_cap.maximum_step_mm
+        );
+        capped
+            .resolve_motion(SimulationTick::new(1), position, [0; 3])
             .unwrap();
+        for tick in 2..=120 {
+            if capped.is_retrievable() {
+                break;
+            }
+            let output = capped.begin_tick(SimulationTick::new(tick)).unwrap();
+            let step = i32::try_from(output.maximum_step_mm).unwrap();
+            position.z -= step;
+            capped
+                .resolve_motion(SimulationTick::new(tick), position, [0; 3])
+                .unwrap();
+        }
         assert_eq!(capped.cumulative_travel_mm(), 25_000);
+        assert_eq!(capped.last_position, position);
+        assert!(
+            rounded_planar_distance(QuantizedOrigin::default(), capped.last_position)
+                <= HORSE_MAX_TRAVEL_MM
+        );
         assert!(capped.is_retrievable());
         assert_eq!(
             capped.complete_remount(SimulationTick::new(2)).unwrap().to,
@@ -2950,6 +3151,75 @@ mod tests {
         assert_eq!(row.landing_damage, 0);
         assert_eq!(row.damage_taken_landing_through_3s, 12);
         assert_eq!(kernel.rider_health(), 79);
+
+        let (mut precontact, precontact_id) = launch_kernel();
+        precontact.begin_tick(tick_input(20, 0, false)).unwrap();
+        precontact.apply_external_damage(damage(20, 9, 5));
+        assert_eq!(
+            precontact
+                .instrumentation_row(precontact_id)
+                .unwrap()
+                .damage_taken_landing_through_3s,
+            0
+        );
+        land(&mut precontact, 20, 30_000, LandingTerrain::Flat);
+        assert_eq!(
+            precontact
+                .instrumentation_row(precontact_id)
+                .unwrap()
+                .damage_taken_landing_through_3s,
+            5
+        );
+    }
+
+    #[test]
+    fn telemetry_waits_for_accepted_results_before_one_final_snapshot() {
+        let (mut kernel, dive_id) = launch_kernel();
+        kernel.begin_tick(tick_input(11, 0, false)).unwrap();
+        let accepted = AcceptedShotMetadata {
+            shooter: player(),
+            tick: SimulationTick::new(11),
+            accepted_shot_index: 1,
+            weapon_id: WeaponId::Dustwalker,
+            stance: RiderStance::SaddleDiveAirborne,
+            gait: CombatGait::Gallop,
+            dive_id: Some(dive_id),
+            prelaunch_horizontal_velocity_mmps: [0, -8_000],
+        };
+        kernel.record_accepted_shot(accepted);
+        land(&mut kernel, 20, 30_000, LandingTerrain::Flat);
+        kernel.begin_tick(tick_input(68, 0, false)).unwrap();
+        let mut remount = tick_input(69, 0, true);
+        remount.horse_retrievable = true;
+        remount.horse_position = remount.rider_position;
+        kernel.begin_tick(remount).unwrap();
+        kernel.begin_tick(tick_input(201, 0, false)).unwrap();
+        let settled = kernel.settle_observations_through(SimulationTick::new(200));
+        assert!(settled.telemetry_finalized.is_empty());
+
+        let mut ledger = ShotAttributionLedger::default();
+        assert!(ledger.record_accepted(accepted));
+        let result = ShotResult {
+            tick: accepted.tick,
+            shooter_peer_id: player(),
+            weapon_id: accepted.weapon_id,
+            outcome: ShotOutcome::Miss,
+            rejection_reason: None,
+            resolved_direction: Some(direction(0)),
+            target_id: None,
+            hit_zone: None,
+            damage: 0,
+            distance_mm: None,
+            eliminated: false,
+        };
+        let finalized = kernel.record_authority_result(&ledger.observe_result(7, &result));
+        assert_eq!(finalized.telemetry_finalized.len(), 1);
+        assert!(
+            kernel
+                .record_authority_result(&ledger.observe_result(7, &result))
+                .telemetry_finalized
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2977,7 +3247,16 @@ mod tests {
         assert_eq!(row.time_to_remount_ticks, Some(49));
         assert!(remount.effects.telemetry_finalized.is_empty());
         let resolved = remounted.begin_tick(tick_input(201, 0, false)).unwrap();
-        assert_eq!(resolved.effects.telemetry_finalized.len(), 1);
+        assert!(resolved.effects.telemetry_finalized.is_empty());
+        assert_eq!(
+            remounted
+                .instrumentation_row(dive_id)
+                .unwrap()
+                .death_within_3s,
+            None
+        );
+        let settled = remounted.settle_observations_through(SimulationTick::new(200));
+        assert_eq!(settled.telemetry_finalized.len(), 1);
         assert_eq!(
             remounted
                 .instrumentation_row(dive_id)
@@ -2985,6 +3264,28 @@ mod tests {
                 .death_within_3s,
             Some(false)
         );
+
+        let (mut delayed_boundary, delayed_id) = launch_kernel();
+        land(&mut delayed_boundary, 20, 30_000, LandingTerrain::Flat);
+        delayed_boundary
+            .begin_tick(tick_input(68, 0, false))
+            .unwrap();
+        let mut delayed_remount = tick_input(69, 0, true);
+        delayed_remount.horse_retrievable = true;
+        delayed_remount.horse_position = delayed_remount.rider_position;
+        delayed_boundary.begin_tick(delayed_remount).unwrap();
+        delayed_boundary
+            .begin_tick(tick_input(201, 0, false))
+            .unwrap();
+        let delayed = delayed_boundary.observe_death(SimulationTick::new(200));
+        assert_eq!(
+            delayed_boundary
+                .instrumentation_row(delayed_id)
+                .unwrap()
+                .death_within_3s,
+            Some(true)
+        );
+        assert_eq!(delayed.telemetry_finalized.len(), 1);
 
         for (reason, action) in [
             (DiveCensorReason::MatchEnded, 0_u8),

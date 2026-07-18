@@ -15,6 +15,8 @@ use spurfire_protocol::{LobbyId, PlayerId, RiderStance};
 use tokio::time::Duration;
 use zeroize::Zeroizing;
 
+use crate::saddle_dive_controller::SaddleDiveController;
+
 enum WorkerCommand {
     Send {
         packet: Vec<u8>,
@@ -143,12 +145,16 @@ fn run_worker(
 pub struct PeerSession {
     #[base]
     base: Base<Node>,
+    #[export]
+    gameplay_rider_path: NodePath,
     #[var(no_set)]
     connection_state: GString,
     #[var(no_set)]
     tailnet_ip: GString,
     #[var(no_set)]
     local_port: i64,
+    #[var(no_set)]
+    local_player_id: GString,
     #[var(no_set)]
     authority_player_id: GString,
     #[var(no_set)]
@@ -170,6 +176,8 @@ impl PeerSession {
     fn connection_failed(message: GString);
     #[signal]
     fn disconnected();
+    #[signal]
+    fn session_identity_bound(local_player_id: GString, authority_epoch: i64);
 
     /// Configure validated application identity and deterministic authority state.
     #[func]
@@ -192,9 +200,26 @@ impl PeerSession {
         let Ok(now_ms) = u64::try_from(now_ms) else {
             return false;
         };
+        let authority_epoch = 1_u64;
+        if let Some(mut rider) = self
+            .base()
+            .try_get_node_as::<SaddleDiveController>(&self.gameplay_rider_path)
+        {
+            if !rider
+                .bind_mut()
+                .bind_session_identity(local_player, authority_epoch)
+            {
+                return false;
+            }
+        }
         self.session = Some(SessionState::new(lobby_id, local_player, authority, now_ms));
+        self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
-        self.authority_epoch = 1;
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        let signal_player = self.local_player_id.clone();
+        self.signals()
+            .session_identity_bound()
+            .emit(&signal_player, self.authority_epoch);
         true
     }
 
@@ -539,9 +564,11 @@ impl INode for PeerSession {
     fn init(base: Base<Node>) -> Self {
         Self {
             base,
+            gameplay_rider_path: NodePath::from("../Rider"),
             connection_state: "offline".into(),
             tailnet_ip: GString::new(),
             local_port: 0,
+            local_player_id: GString::new(),
             authority_player_id: GString::new(),
             authority_epoch: 0,
             session: None,
