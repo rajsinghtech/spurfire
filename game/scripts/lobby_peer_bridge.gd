@@ -369,7 +369,7 @@ func _attempt_migration(now_ms: int) -> void:
 			"position_mm": _vector_mm(state.position as Vector3),
 			"velocity_mmps": _vector_mm(state.velocity as Vector3),
 			"yaw_millidegrees": roundi(float(state.yaw_degrees) * 1000.0),
-			"stance": int(state.stance_id), "health": int(state.get("health", 100)),
+			"stance": int(state.stance_id), "health": int(combat.health),
 			"weapon_id": int(combat.weapon_id),
 			"ammo_magazine": int(combat.ammo_magazine),
 			"ammo_reserve": int(combat.ammo_reserve),
@@ -419,6 +419,7 @@ func _install_checkpoint(checkpoint_json: String) -> void:
 			"velocity": Vector3(float(velocity[0]), float(velocity[1]), float(velocity[2])) / 1000.0,
 			"yaw_degrees": float(row.get("y", 0)) / 1000.0,
 			"stance_id": int(row.get("s", 1)),
+			"health": int(row.get("h", 0)),
 		}
 
 func _vector_mm(value: Vector3) -> Array[int]:
@@ -450,7 +451,8 @@ func _record_authority_combat_state(player_id: String, state: Dictionary) -> voi
 		)
 		muzzle += offset
 	peer_session.record_authority_rider_snapshot(
-		player_id, int(state.tick), muzzle, state.velocity as Vector3, int(state.stance_id)
+		player_id, int(state.tick), muzzle, state.position as Vector3,
+		state.velocity as Vector3, int(state.stance_id)
 	)
 
 func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> void:

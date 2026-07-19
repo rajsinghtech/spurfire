@@ -1312,9 +1312,22 @@ impl TargetRegistry {
         })
     }
 
-    /// Registers a stable target definition.
+    /// Registers a stable target definition at full spawn health.
     pub fn register(&mut self, definition: TargetDefinition) -> Result<(), TargetRegistryError> {
-        if definition.max_health == 0 {
+        self.restore(definition, definition.max_health)
+    }
+
+    /// Restores a stable target definition and authority-owned health.
+    ///
+    /// This is intended for a hash-checked migration checkpoint. Pose history is
+    /// deliberately empty until the successor records its first authoritative
+    /// simulation tick.
+    pub fn restore(
+        &mut self,
+        definition: TargetDefinition,
+        health: u16,
+    ) -> Result<(), TargetRegistryError> {
+        if definition.max_health == 0 || health > definition.max_health {
             return Err(TargetRegistryError::InvalidTarget);
         }
         if self.targets.contains_key(&definition.entity_id) {
@@ -1324,7 +1337,7 @@ impl TargetRegistry {
             definition.entity_id,
             TargetRecord {
                 definition,
-                health: definition.max_health,
+                health,
                 history: VecDeque::new(),
             },
         );

@@ -11,15 +11,18 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use godot::classes::{INode, Node};
 use godot::prelude::*;
+use sha2::{Digest, Sha256};
 use spurfire_net::{
     decode, encode, rustscale::RustScalePeer, AcceptOutcome, MatchCheckpoint, PeerPayload,
     SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, CombatAuthority, CombatGait, LobbyId, LobbySessionProjection, NodeKey,
-    PlayerId, QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
-    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotResult, SimulationTick, TargetRegistry, TeamId, WeaponAmmo, WeaponId,
+    canonical_keyreg_digest, CombatAuthority, CombatGait, EntityId, LobbyId,
+    LobbySessionProjection, NodeKey, PlayerId, QuantizedOrigin,
+    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
+    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
+    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
+    WeaponId,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -31,6 +34,26 @@ use crate::saddle_dive_controller::SaddleDiveController;
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn rider_entity_id(player_id: PlayerId) -> EntityId {
+    let digest = Sha256::digest(player_id.as_bytes());
+    EntityId(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    ))
+}
+
+fn rider_target_definition(player_id: PlayerId) -> TargetDefinition {
+    TargetDefinition {
+        entity_id: rider_entity_id(player_id),
+        owner_peer_id: Some(player_id),
+        // The Alpha is free-for-all. Shooter snapshots use team zero, while
+        // hittable riders use team one; owner exclusion still prevents self hits.
+        team_id: TeamId(1),
+        max_health: 100,
+    }
 }
 
 enum WorkerCommand {
@@ -634,6 +657,20 @@ impl PeerSession {
         {
             return false;
         }
+        let mut combat_targets = match TargetRegistry::new(60) {
+            Ok(targets) => targets,
+            Err(_) => return false,
+        };
+        for player in &allowed_players {
+            // A truncated cryptographic ID collision must fail closed rather
+            // than alias two authority-owned health records.
+            if combat_targets
+                .register(rider_target_definition(*player))
+                .is_err()
+            {
+                return false;
+            }
+        }
         let authority_epoch = 1_u64;
         if let Some(mut rider) = self
             .base()
@@ -665,7 +702,7 @@ impl PeerSession {
                 combat.register_shooter(*player, WeaponId::Dustwalker);
             }
         }
-        self.combat_targets = TargetRegistry::new(60).ok();
+        self.combat_targets = Some(combat_targets);
         self.authority_rider_history.clear();
         self.combat_receipts.clear();
         let signal_player = self.local_player_id.clone();
@@ -796,21 +833,29 @@ impl PeerSession {
         self.make_packet(tick, PeerPayload::ShotCommand { command })
     }
 
-    /// Record authority-simulated muzzle and rider state for one exact tick.
-    /// Client shot commands never contribute any value to this history.
+    /// Record authority-simulated muzzle, target geometry, and rider state for
+    /// one exact tick. Client shot commands never contribute to this history.
     #[func]
     fn record_authority_rider_snapshot(
         &mut self,
         player_id: GString,
         tick: i64,
         muzzle_origin: Vector3,
+        rider_position: Vector3,
         velocity: Vector3,
         stance_id: i64,
     ) -> bool {
         if self.local_player_id.to_string() != self.authority_player_id.to_string() {
             return false;
         }
-        let (Ok(player_id), Ok(tick), Ok(stance_id), Ok(muzzle_origin)) = (
+        let (
+            Ok(player_id),
+            Ok(tick),
+            Ok(stance_id),
+            Ok(muzzle_origin),
+            Ok(body_center),
+            Ok(head_center),
+        ) = (
             PlayerId::parse(&player_id.to_string()),
             u64::try_from(tick).map(SimulationTick::new),
             u8::try_from(stance_id),
@@ -819,7 +864,18 @@ impl PeerSession {
                 f64::from(muzzle_origin.y),
                 f64::from(muzzle_origin.z),
             ),
-        ) else {
+            QuantizedOrigin::from_meters(
+                f64::from(rider_position.x),
+                f64::from(rider_position.y) + 0.8,
+                f64::from(rider_position.z),
+            ),
+            QuantizedOrigin::from_meters(
+                f64::from(rider_position.x),
+                f64::from(rider_position.y) + 1.65,
+                f64::from(rider_position.z),
+            ),
+        )
+        else {
             return false;
         };
         if !self.allowed_players.contains(&player_id) {
@@ -864,6 +920,25 @@ impl PeerSession {
         }
         let history = self.authority_rider_history.entry(player_id).or_default();
         if history.back().is_some_and(|previous| previous.tick >= tick) {
+            return false;
+        }
+        let Some(targets) = self.combat_targets.as_mut() else {
+            return false;
+        };
+        if targets
+            .record_pose(TargetPoseSnapshot {
+                tick,
+                entity_id: rider_entity_id(player_id),
+                stance,
+                body_center,
+                body_half_height_mm: 500,
+                body_radius_mm: 350,
+                head_center,
+                head_radius_mm: 250,
+                active: true,
+            })
+            .is_err()
+        {
             return false;
         }
         history.push_back(snapshot);
@@ -916,6 +991,14 @@ impl PeerSession {
         state.set("weapon_id", i64::from(kernel.equipped_weapon().as_u8()));
         state.set("ammo_magazine", i64::from(ammo.magazine));
         state.set("ammo_reserve", i64::from(ammo.reserve));
+        let Some(health) = self
+            .combat_targets
+            .as_ref()
+            .and_then(|targets| targets.health(rider_entity_id(player_id)))
+        else {
+            return VarDictionary::new();
+        };
+        state.set("health", i64::from(health));
         state.set(
             "last_shot_tick",
             kernel
@@ -985,7 +1068,9 @@ impl PeerSession {
         }
         // Prepare the replacement before election state can mutate. A malformed
         // combat checkpoint therefore fails the migration atomically.
-        let Some(restored_combat) = Self::restore_combat_checkpoint(&checkpoint) else {
+        let Some((restored_combat, restored_targets)) =
+            Self::restore_combat_checkpoint(&checkpoint)
+        else {
             return PackedByteArray::new();
         };
         let Some(secure) = self.secure_session.as_mut() else {
@@ -1006,7 +1091,7 @@ impl PeerSession {
         // The elected sender does not receive its own datagram, so install the
         // exact same state locally before advertising epoch 2.
         self.combat_authority = Some(restored_combat);
-        self.combat_targets = TargetRegistry::new(60).ok();
+        self.combat_targets = Some(restored_targets);
         self.combat_receipts.extend(
             checkpoint
                 .resolved_shots
@@ -1197,9 +1282,11 @@ impl PeerSession {
         );
         if outcome == AcceptOutcome::Accepted {
             if let PeerPayload::MigrationSnapshot { checkpoint, .. } = &envelope.payload {
-                if let Some(restored) = Self::restore_combat_checkpoint(checkpoint) {
-                    self.combat_authority = Some(restored);
-                    self.combat_targets = TargetRegistry::new(60).ok();
+                if let Some((restored_combat, restored_targets)) =
+                    Self::restore_combat_checkpoint(checkpoint)
+                {
+                    self.combat_authority = Some(restored_combat);
+                    self.combat_targets = Some(restored_targets);
                     self.combat_receipts.extend(
                         checkpoint
                             .resolved_shots
@@ -1374,11 +1461,14 @@ impl PeerSession {
             })
     }
 
-    fn restore_combat_checkpoint(checkpoint: &MatchCheckpoint) -> Option<CombatAuthority> {
-        let mut restored = CombatAuthority::new(60, 0).ok()?;
+    fn restore_combat_checkpoint(
+        checkpoint: &MatchCheckpoint,
+    ) -> Option<(CombatAuthority, TargetRegistry)> {
+        let mut restored_combat = CombatAuthority::new(60, 0).ok()?;
+        let mut restored_targets = TargetRegistry::new(60).ok()?;
         for rider in &checkpoint.riders {
             let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok()?;
-            if !restored.restore_shooter(
+            if !restored_combat.restore_shooter(
                 rider.rider_player_id,
                 weapon,
                 WeaponAmmo {
@@ -1391,8 +1481,11 @@ impl PeerSession {
             ) {
                 return None;
             }
+            restored_targets
+                .restore(rider_target_definition(rider.rider_player_id), rider.health)
+                .ok()?;
         }
-        Some(restored)
+        Some((restored_combat, restored_targets))
     }
 
     const fn outcome_code(outcome: AcceptOutcome) -> i64 {
@@ -1635,7 +1728,7 @@ mod tests {
             }],
             resolved_shots: vec![(shooter, 24)],
         };
-        let restored = PeerSession::restore_combat_checkpoint(&checkpoint).unwrap();
+        let (restored, mut targets) = PeerSession::restore_combat_checkpoint(&checkpoint).unwrap();
         let kernel = restored.shooter_kernel(shooter).unwrap();
         assert_eq!(kernel.equipped_weapon(), WeaponId::Longspur);
         assert_eq!(
@@ -1651,6 +1744,23 @@ mod tests {
             Some(SimulationTick::new(25))
         );
         assert_eq!(kernel.shot_index(), 4);
+        let target_id = rider_entity_id(shooter);
+        assert_eq!(targets.health(target_id), Some(82));
+        let center = QuantizedOrigin::from_meters(1.0, 2.0, 3.0).unwrap();
+        assert!(targets
+            .record_pose(TargetPoseSnapshot {
+                tick: SimulationTick::new(31),
+                entity_id: target_id,
+                stance: RiderStance::Mounted,
+                body_center: center,
+                body_half_height_mm: 500,
+                body_radius_mm: 350,
+                head_center: center,
+                head_radius_mm: 250,
+                active: true,
+            })
+            .is_ok());
+        assert_eq!(targets.health(target_id), Some(82));
     }
 
     #[test]
