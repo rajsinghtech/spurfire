@@ -442,6 +442,7 @@ impl LobbyClientState {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
         operation: LobbyOperation,

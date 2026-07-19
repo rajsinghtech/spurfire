@@ -1412,7 +1412,6 @@ fn child_main(scenario: Scenario, node: Node, control: SocketAddr) -> ProofResul
     }
 }
 
-
 fn main() -> ProofResult<()> {
     let mut arguments = env::args().skip(1);
     match arguments.next() {
@@ -1479,4 +1478,3 @@ mod tests {
         assert_eq!(received.0, envelope);
     }
 }
-

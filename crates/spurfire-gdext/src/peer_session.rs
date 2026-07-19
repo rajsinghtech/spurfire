@@ -489,12 +489,11 @@ impl PeerSession {
                     if creator_join {
                         let display = self.creator_join_display.take();
                         let expected = self.creator_join_lobby.take();
-                        if display.is_some() && expected.as_deref() == Some(lobby_id.as_str()) {
-                            self.lobby_client.join_creator(
-                                &lobby_id,
-                                &display.expect("checked"),
-                                invitation,
-                            );
+                        if let Some(display) = display.filter(|_| {
+                            expected.as_deref() == Some(lobby_id.as_str())
+                        }) {
+                            self.lobby_client
+                                .join_creator(&lobby_id, &display, invitation);
                         }
                     } else if copy_invitation(&lobby_id, &invitation).is_ok() {
                         self.signals()
@@ -1656,6 +1655,7 @@ impl PeerSession {
     }
 
     #[func]
+    #[allow(clippy::too_many_arguments)]
     fn register_endpoint(
         &mut self,
         lobby_id: GString,
