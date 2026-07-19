@@ -562,10 +562,24 @@ impl SessionState {
             return authority == self.authority
                 || (authority < self.authority && self.current_authority_is_silent(now_ms));
         }
-        if self.authority_epoch.checked_add(1) != Some(epoch) {
+        if self.authority_epoch.checked_add(1) != Some(epoch)
+            || !self.current_authority_is_silent(now_ms)
+        {
             return false;
         }
-        self.current_authority_is_silent(now_ms)
+        self.deterministic_successor(now_ms) == Some(authority)
+    }
+
+    fn deterministic_successor(&self, now_ms: u64) -> Option<PlayerId> {
+        self.peers
+            .iter()
+            .filter_map(|(player, peer)| {
+                (*player == self.local_player
+                    || (peer.connected
+                        && now_ms.saturating_sub(peer.last_seen_ms) < HEARTBEAT_TIMEOUT_MS))
+                    .then_some(*player)
+            })
+            .min()
     }
 
     fn current_authority_is_silent(&self, now_ms: u64) -> bool {
@@ -1188,27 +1202,20 @@ mod tests {
         );
         assert_eq!(baseline(&session), before);
 
-        // Once the authority is genuinely silent, the exact-step self-
-        // nomination the deterministic election would produce is accepted.
-        let elected = claim(player(3), player(3), 2, 5);
+        // Once the authority is genuinely silent, a higher signed rider still
+        // cannot preempt the deterministic lowest connected successor.
+        let usurp = claim(player(3), player(3), 2, 5);
         assert_eq!(
-            session.accept(&elected, 200 + HEARTBEAT_TIMEOUT_MS),
-            AcceptOutcome::Accepted
-        );
-        assert_eq!(session.authority(), player(3));
-        assert_eq!(session.authority_epoch(), 2);
-        // The installed claim cannot be replayed and a further self-nominated
-        // advance requires the new authority to go silent first.
-        let replay = claim(player(3), player(3), 2, 6);
-        assert_eq!(
-            session.accept(&replay, 200 + HEARTBEAT_TIMEOUT_MS + 1),
-            AcceptOutcome::Accepted
-        );
-        let ratchet = claim(player(3), player(3), 3, 7);
-        assert_eq!(
-            session.accept(&ratchet, 200 + HEARTBEAT_TIMEOUT_MS + 2),
+            session.accept(&usurp, 200 + HEARTBEAT_TIMEOUT_MS),
             AcceptOutcome::InvalidAuthorityClaim
         );
+        assert_eq!(session.authority(), player(1));
+        assert_eq!(session.authority_epoch(), 1);
+        assert_eq!(
+            session.expire_and_migrate(200 + HEARTBEAT_TIMEOUT_MS),
+            Some((player(2), 2))
+        );
+        assert_eq!(session.authority(), player(2));
         assert_eq!(session.authority_epoch(), 2);
     }
 
@@ -1713,7 +1720,7 @@ mod tests {
             session: None,
         };
         let mut session = SessionState::new(lobby(), player(3), player(1), 0);
-        session.add_peer(player(2), 0);
+        session.add_peer(player(2), 3_000);
         session.add_peer(player(3), 3_000);
         let before = session.clone();
         assert_eq!(

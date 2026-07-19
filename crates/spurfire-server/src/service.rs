@@ -3244,6 +3244,7 @@ fn start_response(stored: &StoredLobby, dry_run: bool) -> Result<StartLobbyRespo
             .as_ref()
             .map(|election| election.input_hash)
             .ok_or_else(|| internal_error(dry_run))?,
+        session_generation: stored.session_generation,
         metadata: metadata_for(dry_run),
     })
 }

@@ -664,6 +664,9 @@ pub struct StartLobbyResponse {
     pub authority: AuthoritySummary,
     /// Exact deterministic election input bound to authority heartbeats.
     pub input_hash: InputHash,
+    /// Fresh application session generation created by this start. Clients
+    /// must re-register before entering gameplay in this replay domain.
+    pub session_generation: u64,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
@@ -1088,10 +1091,12 @@ mod tests {
             map_seed: 42,
             authority,
             input_hash: InputHash::from_bytes([7; 32]),
+            session_generation: 3,
             metadata: ResponseMetadata::default(),
         };
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["state"], "STARTING");
+        assert_eq!(value["session_generation"], 3);
         assert!(value.get("dry_run").is_none());
     }
 }

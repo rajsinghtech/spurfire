@@ -119,10 +119,12 @@ func _check_secret_storage_contract(failures: Array[String]) -> void:
 			failures.append("native lobby containment contract omitted: %s" % required)
 
 func _check_control_glue(failures: Array[String]) -> void:
-	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
+	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd").replace("\r\n", "\n")
 	for required in [
 		"submit_measurements", "_stop_peer_transport",
 		"api.capture_create_grant()", "api.capture_join_code()",
+		"and bool(session.get(\"secure\", false))",
+		"_try_register_endpoint(\"\", 0, true)",
 	]:
 		if not shell_source.contains(required):
 			failures.append("lobby shell omitted integration behavior: %s" % required)
@@ -135,6 +137,7 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"_remove_peer(previous_id)", "_latest_inputs.erase(player_id)",
 		"_actor_states.erase(player_id)", "combat_checkpoint_state",
 		"combat_resolved_shots_json", "record_authority_rider_snapshot",
+		"_migration_pending or not local_is_authority", "dive_id",
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)

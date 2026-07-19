@@ -514,6 +514,22 @@ impl SaddleDiveController {
         accepted
     }
 
+    pub(crate) fn advance_authority_epoch(&mut self, authority_epoch: u64) -> bool {
+        if authority_epoch < self.kernel.authority_epoch() {
+            return false;
+        }
+        let Some(mut weapon) = self.weapon_controller() else {
+            return false;
+        };
+        if !weapon.bind_mut().advance_authority_epoch(authority_epoch)
+            || !self.kernel.set_authority_epoch(authority_epoch)
+        {
+            return false;
+        }
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        true
+    }
+
     pub(crate) fn bind_session_identity(&mut self, actor: PlayerId, authority_epoch: u64) -> bool {
         if self.kernel.actor() == actor && self.kernel.authority_epoch() == authority_epoch {
             return true;

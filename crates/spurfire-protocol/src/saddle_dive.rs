@@ -986,6 +986,16 @@ impl SaddleDiveKernel {
         self.authority_epoch
     }
 
+    /// Advances the authority epoch without discarding match-lifetime movement
+    /// and dive instrumentation. Migration never permits an epoch rollback.
+    pub fn set_authority_epoch(&mut self, authority_epoch: u64) -> bool {
+        if authority_epoch < self.authority_epoch {
+            return false;
+        }
+        self.authority_epoch = authority_epoch;
+        true
+    }
+
     /// Most recently begun tick.
     #[must_use]
     pub const fn current_tick(&self) -> Option<SimulationTick> {
@@ -2565,6 +2575,16 @@ mod tests {
         let mut kernel = SaddleDiveKernel::new(60, player(), 7).unwrap();
         let output = kernel.begin_tick(tick_input(10, 8_000, true)).unwrap();
         (kernel, output.dive_id.unwrap())
+    }
+
+    #[test]
+    fn authority_epoch_advances_without_resetting_active_dive() {
+        let (mut kernel, dive_id) = launch_kernel();
+        assert!(kernel.set_authority_epoch(8));
+        assert_eq!(kernel.authority_epoch(), 8);
+        assert_eq!(kernel.current_dive_id(), Some(dive_id));
+        assert!(!kernel.set_authority_epoch(7));
+        assert_eq!(kernel.authority_epoch(), 8);
     }
 
     fn land(

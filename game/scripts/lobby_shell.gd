@@ -293,7 +293,13 @@ func _on_lobby_updated(response_json: String) -> void:
 	_try_register_endpoint()
 	_render_waiting()
 	var lobby_state := str(_lobby.get("state", ""))
-	if lobby_state in ["STARTING", "IN_MATCH"] and _screen == Screen.WAITING:
+	var session := response.get("session", {}) as Dictionary
+	if (
+		lobby_state in ["STARTING", "IN_MATCH"]
+		and _screen == Screen.WAITING
+		and _endpoint_registered
+		and bool(session.get("secure", false))
+	):
 		_start_match()
 	elif _screen == Screen.MATCH and lobby_state in ["CLOSING", "FAILED", "EXPIRED", "DESTROYED"]:
 		_begin_leave()
@@ -322,9 +328,19 @@ func _on_started(response_json: String) -> void:
 	if _leaving:
 		return
 	_authority_input_hash = str(response.get("input_hash", ""))
-	if _bridge:
-		_bridge.apply_projection(response)
-	_start_match()
+	var next_generation := int(response.get("session_generation", 0))
+	if (
+		next_generation <= _session_generation
+		or not peer_session.bind_manifest_key(_manifest_public_key, next_generation)
+		or not peer_session.generate_session_key(next_generation)
+	):
+		_on_peer_failed("start session identity rebind failed")
+		return
+	_session_generation = next_generation
+	_endpoint_registered = false
+	_try_register_endpoint("", 0, true)
+	# Gameplay starts only after a later capability-protected poll projects a
+	# complete secure roster for this exact generation.
 
 func _on_heartbeat(response_json: String) -> void:
 	var response := _public_response(response_json)

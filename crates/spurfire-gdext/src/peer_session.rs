@@ -17,7 +17,7 @@ use spurfire_net::{
     SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, CombatAuthority, CombatGait, EntityId, LobbyId,
+    canonical_keyreg_digest, CombatAuthority, CombatGait, DiveId, EntityId, LobbyId,
     LobbySessionProjection, NodeKey, PlayerId, QuantizedOrigin,
     RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
     RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
@@ -50,6 +50,17 @@ fn rider_entity_id(player_id: PlayerId) -> EntityId {
             .try_into()
             .expect("SHA-256 prefix is eight bytes"),
     ))
+}
+
+fn snapshot_dive_id(stance: RiderStance, raw_dive_id: i64) -> Option<Option<DiveId>> {
+    match stance {
+        RiderStance::SaddleDiveAirborne => u64::try_from(raw_dive_id)
+            .ok()
+            .and_then(DiveId::new)
+            .map(Some),
+        _ if raw_dive_id < 0 => Some(None),
+        _ => None,
+    }
 }
 
 fn rider_target_definition(player_id: PlayerId) -> TargetDefinition {
@@ -905,6 +916,9 @@ impl PeerSession {
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
         self.combat_authority = CombatAuthority::new(60, 0).ok();
         if let Some(combat) = self.combat_authority.as_mut() {
+            if !combat.set_authority_epoch(authority_epoch) {
+                return false;
+            }
             // Multiplayer loadouts are authority-owned. Until signed loadout
             // replication exists, every roster member starts with Dustwalker;
             // a fire command can never select or change this state.
@@ -1053,11 +1067,14 @@ impl PeerSession {
         muzzle_origin: Vector3,
         rider_position: Vector3,
         velocity: Vector3,
-        stance_id: i64,
+        riding_state: PackedInt64Array,
     ) -> bool {
         if self.local_player_id.to_string() != self.authority_player_id.to_string() {
             return false;
         }
+        let [stance_id, raw_dive_id] = riding_state.as_slice() else {
+            return false;
+        };
         let (
             Ok(player_id),
             Ok(tick),
@@ -1068,7 +1085,7 @@ impl PeerSession {
         ) = (
             PlayerId::parse(&player_id.to_string()),
             u64::try_from(tick).map(SimulationTick::new),
-            u8::try_from(stance_id),
+            u8::try_from(*stance_id),
             QuantizedOrigin::from_meters(
                 f64::from(muzzle_origin.x),
                 f64::from(muzzle_origin.y),
@@ -1092,6 +1109,9 @@ impl PeerSession {
             return false;
         }
         let stance = RiderStance::from_u8(stance_id);
+        let Some(dive_id) = snapshot_dive_id(stance, *raw_dive_id) else {
+            return false;
+        };
         let planar_speed = Vector2::new(velocity.x, velocity.z).length();
         if !planar_speed.is_finite() {
             return false;
@@ -1115,7 +1135,7 @@ impl PeerSession {
             team_id: TeamId::default(),
             riding: RidingState {
                 stance,
-                dive_id: None,
+                dive_id,
                 gait,
                 planar_speed_mmps,
                 gait_top_speed_mmps: 13_000,
@@ -1278,8 +1298,11 @@ impl PeerSession {
         }
         // Prepare the replacement before election state can mutate. A malformed
         // combat checkpoint therefore fails the migration atomically.
+        let Some(next_epoch) = checkpoint.source_epoch.checked_add(1) else {
+            return PackedByteArray::new();
+        };
         let Some((restored_combat, restored_targets)) =
-            Self::restore_combat_checkpoint(&checkpoint)
+            Self::restore_combat_checkpoint(&checkpoint, next_epoch)
         else {
             return PackedByteArray::new();
         };
@@ -1295,6 +1318,7 @@ impl PeerSession {
         };
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
+        self.advance_gameplay_epoch(epoch);
         if authority.to_string() != self.local_player_id.to_string() {
             return PackedByteArray::new();
         }
@@ -1490,10 +1514,13 @@ impl PeerSession {
             node_key,
             now_ms,
         );
-        if outcome == AcceptOutcome::Accepted {
-            if let PeerPayload::MigrationSnapshot { checkpoint, .. } = &envelope.payload {
+        let accepted_migration = if outcome == AcceptOutcome::Accepted {
+            if let PeerPayload::MigrationSnapshot {
+                checkpoint, epoch, ..
+            } = &envelope.payload
+            {
                 if let Some((restored_combat, restored_targets)) =
-                    Self::restore_combat_checkpoint(checkpoint)
+                    Self::restore_combat_checkpoint(checkpoint, *epoch)
                 {
                     self.combat_authority = Some(restored_combat);
                     self.combat_targets = Some(restored_targets);
@@ -1503,11 +1530,23 @@ impl PeerSession {
                             .iter()
                             .map(|(shooter, tick)| (checkpoint.source_epoch, *shooter, *tick)),
                     );
+                    Some(*epoch)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        let authority = session.state().authority();
+        let authority_epoch = session.state().authority_epoch();
+        self.authority_player_id = GString::from(&authority.to_string());
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        if let Some(epoch) = accepted_migration {
+            self.advance_gameplay_epoch(epoch);
         }
-        self.authority_player_id = GString::from(&session.state().authority().to_string());
-        self.authority_epoch = i64::try_from(session.state().authority_epoch()).unwrap_or(i64::MAX);
         Self::outcome_code(outcome)
     }
 
@@ -1937,10 +1976,23 @@ impl PeerSession {
             })
     }
 
+    fn advance_gameplay_epoch(&mut self, authority_epoch: u64) {
+        if let Some(mut rider) = self
+            .base()
+            .try_get_node_as::<SaddleDiveController>(&self.gameplay_rider_path)
+        {
+            let _ = rider.bind_mut().advance_authority_epoch(authority_epoch);
+        }
+    }
+
     fn restore_combat_checkpoint(
         checkpoint: &MatchCheckpoint,
+        authority_epoch: u64,
     ) -> Option<(CombatAuthority, TargetRegistry)> {
         let mut restored_combat = CombatAuthority::new(60, 0).ok()?;
+        if !restored_combat.set_authority_epoch(authority_epoch) {
+            return None;
+        }
         let mut restored_targets = TargetRegistry::new(60).ok()?;
         for rider in &checkpoint.riders {
             let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok()?;
@@ -2116,6 +2168,17 @@ mod tests {
     }
 
     #[test]
+    fn airborne_authority_snapshot_requires_and_retains_dive_identity() {
+        let dive = snapshot_dive_id(RiderStance::SaddleDiveAirborne, 7)
+            .expect("valid airborne identity")
+            .expect("airborne dive");
+        assert_eq!(dive.get(), 7);
+        assert_eq!(snapshot_dive_id(RiderStance::SaddleDiveAirborne, -1), None);
+        assert_eq!(snapshot_dive_id(RiderStance::Mounted, -1), Some(None));
+        assert_eq!(snapshot_dive_id(RiderStance::Mounted, 7), None);
+    }
+
+    #[test]
     fn authority_resolution_never_trusts_command_weapon_origin_or_riding_state() {
         let shooter = test_player(1);
         let mut authority = CombatAuthority::new(60, 0).unwrap();
@@ -2219,7 +2282,9 @@ mod tests {
             }],
             resolved_shots: vec![(shooter, 24)],
         };
-        let (restored, mut targets) = PeerSession::restore_combat_checkpoint(&checkpoint).unwrap();
+        let (restored, mut targets) =
+            PeerSession::restore_combat_checkpoint(&checkpoint, 2).unwrap();
+        assert_eq!(restored.authority_epoch(), 2);
         let kernel = restored.shooter_kernel(shooter).unwrap();
         assert_eq!(kernel.equipped_weapon(), WeaponId::Longspur);
         assert_eq!(

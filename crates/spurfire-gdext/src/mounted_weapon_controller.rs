@@ -866,6 +866,14 @@ impl MountedWeaponController {
         true
     }
 
+    pub(crate) fn advance_authority_epoch(&mut self, authority_epoch: u64) -> bool {
+        if authority_epoch < self.authority_epoch {
+            return false;
+        }
+        self.authority_epoch = authority_epoch;
+        true
+    }
+
     pub(crate) fn bind_session_identity(
         &mut self,
         shooter: PlayerId,

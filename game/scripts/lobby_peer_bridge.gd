@@ -21,6 +21,7 @@ var _latest_inputs: Dictionary = {}
 var _actor_states: Dictionary = {}
 var _applied_shot_results: Dictionary = {}
 var _migration_pending := false
+var _last_migration_poll_ms := 0
 
 func configure(nodes: Dictionary, player_id: String) -> bool:
 	peer_session = nodes.get("peer_session") as Node
@@ -115,7 +116,10 @@ func _process(_delta: float) -> void:
 	if peer_session == null or _peers.is_empty() or _quiesced:
 		return
 	var now := Time.get_ticks_msec()
-	if _migration_pending:
+	# A crashed authority cannot send Leave. Poll the native liveness/election
+	# gate on every follower so timeout alone can trigger deterministic migration.
+	if (_migration_pending or not local_is_authority) and now - _last_migration_poll_ms >= 250:
+		_last_migration_poll_ms = now
 		_attempt_migration(now)
 	if now - _last_route_query_ms < 1000:
 		return
@@ -435,6 +439,7 @@ func _record_actor_state(player_id: String, rider: CharacterBody3D, tick: int) -
 	_actor_states[player_id] = {
 		"tick": tick, "position": rider.global_position, "velocity": rider.velocity,
 		"yaw_degrees": rad_to_deg(rider.rotation.y), "stance_id": int(rider.get("stance_id")),
+		"dive_id": int(rider.get("dive_id")),
 	}
 
 func _record_authority_combat_state(player_id: String, state: Dictionary) -> void:
@@ -452,7 +457,8 @@ func _record_authority_combat_state(player_id: String, state: Dictionary) -> voi
 		muzzle += offset
 	peer_session.record_authority_rider_snapshot(
 		player_id, int(state.tick), muzzle, state.position as Vector3,
-		state.velocity as Vector3, int(state.stance_id)
+		state.velocity as Vector3,
+		PackedInt64Array([int(state.stance_id), int(state.get("dive_id", -1))])
 	)
 
 func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> void:
@@ -460,7 +466,7 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 		return
 	var state := _actor_states.get(player_id, {
 		"tick": tick - 1, "position": Vector3.ZERO, "velocity": Vector3.ZERO,
-		"yaw_degrees": 0.0, "stance_id": 1,
+		"yaw_degrees": 0.0, "stance_id": 1, "dive_id": -1,
 	}) as Dictionary
 	var throttle := clampf(float(input.get("throttle_milli", 0)) / 1000.0, -1.0, 1.0)
 	var steer := clampf(float(input.get("steer_milli", 0)) / 1000.0, -1.0, 1.0)
@@ -477,6 +483,7 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 	_actor_states[player_id] = {
 		"tick": tick, "position": position, "velocity": velocity,
 		"yaw_degrees": yaw, "stance_id": stance,
+		"dive_id": int(state.get("dive_id", -1)),
 	}
 
 func _on_route_updated(peer_ip: String, route: String) -> void:

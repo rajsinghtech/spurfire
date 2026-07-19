@@ -637,6 +637,7 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(started["state"], "STARTING");
     assert_eq!(started["map_seed"], 42);
+    assert_eq!(started["session_generation"], 1);
 
     let (status, heartbeat) = json_request(
         &app,
