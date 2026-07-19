@@ -286,7 +286,11 @@ impl LobbyClientState {
         self.participant = None;
         self.player_id = None;
         while self.receiver.try_recv().is_ok() {}
-        let handles = self.workers.lock().map(|mut workers| workers.drain(..).collect::<Vec<_>>()).unwrap_or_default();
+        let handles = self
+            .workers
+            .lock()
+            .map(|mut workers| workers.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
         for handle in handles {
             let _ = handle.join();
         }
