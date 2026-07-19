@@ -40,9 +40,10 @@ Redirects and proxies are disabled, routes are closed, operations are bounded, a
 are streamed into bounded zeroizing buffers.
 
 Invitation sharing remains an explicit OS/human boundary. On supported Linux desktops the native
-client writes the one-use code directly to the platform clipboard helper without routing it through
-Godot. On cancellation/exit it clears only when the current clipboard still exactly matches the copied
-value. Clipboard managers/history, IMEs, accessibility services, key hooks, compositor capture,
+client reads an explicit paste and writes the one-use code directly through platform clipboard helpers
+without routing either through Godot. A consumed paste is cleared immediately, and cancellation/exit
+clears a copied value only when the current clipboard still exactly matches it. Clipboard managers/history,
+IMEs, accessibility services, key hooks, compositor capture,
 crash dumps, allocators, TLS internals, and the pinned RustScale builder may retain copies and cannot
 be promised zeroized. Unsupported clipboard platforms fail closed; there is no claim of OS clipboard
 zeroization. Product-readiness gates remain server-controlled and credentialed human qualification

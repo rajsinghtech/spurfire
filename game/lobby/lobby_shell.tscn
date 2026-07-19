@@ -107,7 +107,7 @@ text = "ONE-USE ALPHA GRANT"
 custom_minimum_size = Vector2(0, 42)
 layout_mode = 2
 focus_mode = 2
-tooltip_text = "Click, then type the one-use grant. Native masked capture stores no Godot text."
+tooltip_text = "Click, then type or explicitly paste the one-use grant. Native masked capture stores no Godot text."
 
 [node name="JoinCodeLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2
@@ -117,7 +117,7 @@ text = "POSSE CODE"
 custom_minimum_size = Vector2(0, 42)
 layout_mode = 2
 focus_mode = 2
-tooltip_text = "Click, then type the one-use posse code. Native masked capture stores no Godot text."
+tooltip_text = "Click, then type or explicitly paste the one-use posse code. Native masked capture stores no Godot text."
 
 [node name="Actions" type="HBoxContainer" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2

@@ -923,6 +923,22 @@ fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
 }
 
 #[cfg(target_os = "linux")]
+fn native_clipboard_read() -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
+    for (program, arguments) in [
+        ("wl-paste", &["--no-newline"][..]),
+        ("xclip", &["-selection", "clipboard", "-o"][..]),
+    ] {
+        let Ok(output) = Command::new(program).args(arguments).output() else {
+            continue;
+        };
+        if output.status.success() {
+            return Ok(Zeroizing::new(output.stdout));
+        }
+    }
+    Err(NativeLobbyError::Clipboard)
+}
+
+#[cfg(target_os = "linux")]
 fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyError> {
     for (reader, read_arguments, clearer, clear_arguments) in [
         (
@@ -964,6 +980,11 @@ fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyE
 
 #[cfg(not(target_os = "linux"))]
 fn native_clipboard_write(_value: &[u8]) -> Result<(), NativeLobbyError> {
+    Err(NativeLobbyError::Clipboard)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn native_clipboard_read() -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
     Err(NativeLobbyError::Clipboard)
 }
 
@@ -1038,15 +1059,37 @@ impl IControl for NativeSecretInput {
         let Ok(key) = event.try_cast::<InputEventKey>() else {
             return;
         };
-        if !key.is_pressed()
-            || key.is_echo()
-            || key.is_ctrl_pressed()
-            || key.is_meta_pressed()
-            || key.is_alt_pressed()
-        {
+        if !key.is_pressed() || key.is_echo() || key.is_alt_pressed() {
             return;
         }
         let unicode = key.get_unicode();
+        let paste_requested = (key.is_ctrl_pressed() || key.is_meta_pressed())
+            && matches!(unicode, 22 | 86 | 118);
+        if paste_requested {
+            if let Ok(mut pasted) = native_clipboard_read() {
+                while pasted.first().is_some_and(u8::is_ascii_whitespace) {
+                    pasted.remove(0);
+                }
+                while pasted.last().is_some_and(u8::is_ascii_whitespace) {
+                    pasted.pop();
+                }
+                if pasted.len() <= 640
+                    && pasted.iter().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b':' | b'.')
+                    })
+                {
+                    let _ = native_clipboard_clear_if_matches(&pasted);
+                    self.bytes.zeroize();
+                    self.bytes = pasted;
+                }
+            }
+            self.base_mut().accept_event();
+            self.base_mut().queue_redraw();
+            return;
+        }
+        if key.is_ctrl_pressed() || key.is_meta_pressed() {
+            return;
+        }
         if unicode == 8 || unicode == 127 {
             if let Some(last) = self.bytes.last_mut() {
                 last.zeroize();
