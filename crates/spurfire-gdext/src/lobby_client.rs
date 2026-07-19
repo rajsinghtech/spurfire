@@ -70,7 +70,7 @@ impl LobbyOperation {
 }
 
 #[derive(Clone, Copy)]
-enum Route<'a> {
+pub(crate) enum Route<'a> {
     Readiness,
     Create,
     Lobby(&'a str),
@@ -111,7 +111,6 @@ impl Route<'_> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeLobbyError {
-    Cancelled,
     Client,
     Deadline,
     Route,
@@ -128,7 +127,6 @@ pub(crate) enum NativeLobbyError {
 impl NativeLobbyError {
     pub(crate) const fn code(self) -> &'static str {
         match self {
-            Self::Cancelled => "cancelled",
             Self::Client => "transport",
             Self::Deadline => "deadline",
             Self::Route => "route",
