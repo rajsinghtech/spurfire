@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     lobby_client::{
-        copy_invitation, route_for, safe_error, unix_millis, LobbyClientState, LobbyEvent,
+        route_for, safe_error, unix_millis, LobbyClientState, LobbyEvent,
         LobbyOperation, NativeLobbyError, NativeSecretInput,
     },
     saddle_dive_controller::SaddleDiveController,
@@ -495,7 +495,10 @@ impl PeerSession {
                             self.lobby_client
                                 .join_creator(&lobby_id, &display, invitation);
                         }
-                    } else if copy_invitation(&lobby_id, &invitation).is_ok() {
+                    } else if self
+                        .lobby_client
+                        .copy_invitation(&lobby_id, &invitation)
+                        .is_ok()
                         self.signals()
                             .invitation_copied()
                             .emit(&GString::from(&lobby_id));

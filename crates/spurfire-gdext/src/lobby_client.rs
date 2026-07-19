@@ -222,6 +222,7 @@ pub(crate) struct LobbyClientState {
     player_id: Option<String>,
     creator: Option<SecretBytes>,
     participant: Option<SecretBytes>,
+    copied_invitation: Option<Zeroizing<Vec<u8>>>,
     sender: Sender<LobbyEvent>,
     receiver: Receiver<LobbyEvent>,
     cancellation: Arc<AtomicU64>,
@@ -237,6 +238,7 @@ impl Default for LobbyClientState {
             player_id: None,
             creator: None,
             participant: None,
+            copied_invitation: None,
             sender,
             receiver,
             cancellation: Arc::new(AtomicU64::new(1)),
@@ -271,6 +273,20 @@ impl LobbyClientState {
         self.participant = Some(participant);
     }
 
+    pub(crate) fn copy_invitation(
+        &mut self,
+        lobby_id: &str,
+        invitation: &SecretBytes,
+    ) -> Result<(), NativeLobbyError> {
+        let code = assemble_invitation(lobby_id, invitation)?;
+        if let Some(previous) = self.copied_invitation.take() {
+            let _ = native_clipboard_clear_if_matches(&previous);
+        }
+        native_clipboard_write(&code)?;
+        self.copied_invitation = Some(code);
+        Ok(())
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
@@ -285,6 +301,9 @@ impl LobbyClientState {
         self.creator = None;
         self.participant = None;
         self.player_id = None;
+        if let Some(value) = self.copied_invitation.take() {
+            let _ = native_clipboard_clear_if_matches(&value);
+        }
         while self.receiver.try_recv().is_ok() {}
         let handles = self
             .workers
@@ -859,10 +878,10 @@ pub(crate) fn parse_join_code(
     Ok((lobby_id, invitation))
 }
 
-pub(crate) fn copy_invitation(
+fn assemble_invitation(
     lobby_id: &str,
     invitation: &SecretBytes,
-) -> Result<(), NativeLobbyError> {
+) -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
     LobbyId::parse(lobby_id).map_err(|_| NativeLobbyError::Route)?;
     let mut code = Zeroizing::new(Vec::with_capacity(
         JOIN_PREFIX.len() + 36 + 1 + invitation.as_bytes().len(),
@@ -871,7 +890,7 @@ pub(crate) fn copy_invitation(
     code.extend_from_slice(lobby_id.as_bytes());
     code.push(b':');
     code.extend_from_slice(invitation.as_bytes());
-    native_clipboard_write(&code)
+    Ok(code)
 }
 
 #[cfg(target_os = "linux")]
@@ -903,9 +922,49 @@ fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
     Err(NativeLobbyError::Clipboard)
 }
 
+#[cfg(target_os = "linux")]
+fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyError> {
+    for (reader, read_arguments, clearer, clear_arguments) in [
+        ("wl-paste", &["--no-newline"][..], "wl-copy", &["--clear"][..]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-o"][..],
+            "xclip",
+            &["-selection", "clipboard"][..],
+        ),
+    ] {
+        let Ok(output) = Command::new(reader).args(read_arguments).output() else {
+            continue;
+        };
+        let actual = Zeroizing::new(output.stdout);
+        if output.status.success() && actual.as_slice() == expected {
+            let mut child = Command::new(clearer)
+                .args(clear_arguments)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| NativeLobbyError::Clipboard)?;
+            drop(child.stdin.take());
+            return child
+                .wait()
+                .ok()
+                .filter(std::process::ExitStatus::success)
+                .map(|_| ())
+                .ok_or(NativeLobbyError::Clipboard);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn native_clipboard_write(_value: &[u8]) -> Result<(), NativeLobbyError> {
     Err(NativeLobbyError::Clipboard)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn native_clipboard_clear_if_matches(_expected: &[u8]) -> Result<(), NativeLobbyError> {
+    Ok(())
 }
 
 /// Rust-backed masked input. It stores no Godot text property and emits no
