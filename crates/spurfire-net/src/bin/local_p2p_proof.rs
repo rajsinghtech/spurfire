@@ -1412,6 +1412,38 @@ fn child_main(scenario: Scenario, node: Node, control: SocketAddr) -> ProofResul
     }
 }
 
+
+fn main() -> ProofResult<()> {
+    let mut arguments = env::args().skip(1);
+    match arguments.next() {
+        None => {
+            run_two_peer_proof()?;
+            run_migration_proof()
+        }
+        Some(mode) if mode == "--child" => {
+            let scenario = arguments
+                .next()
+                .ok_or_else(|| proof_error("child scenario is required"))?
+                .parse::<Scenario>()
+                .map_err(proof_error)?;
+            let node = arguments
+                .next()
+                .ok_or_else(|| proof_error("child node is required"))?
+                .parse::<Node>()
+                .map_err(proof_error)?;
+            let control = arguments
+                .next()
+                .ok_or_else(|| proof_error("child control address is required"))?
+                .parse::<SocketAddr>()?;
+            if arguments.next().is_some() {
+                return Err(proof_error("unexpected child proof arguments"));
+            }
+            child_main(scenario, node, control)
+        }
+        Some(_) => Err(proof_error("usage: spurfire-local-p2p-proof")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1448,33 +1480,3 @@ mod tests {
     }
 }
 
-fn main() -> ProofResult<()> {
-    let mut arguments = env::args().skip(1);
-    match arguments.next() {
-        None => {
-            run_two_peer_proof()?;
-            run_migration_proof()
-        }
-        Some(mode) if mode == "--child" => {
-            let scenario = arguments
-                .next()
-                .ok_or_else(|| proof_error("child scenario is required"))?
-                .parse::<Scenario>()
-                .map_err(proof_error)?;
-            let node = arguments
-                .next()
-                .ok_or_else(|| proof_error("child node is required"))?
-                .parse::<Node>()
-                .map_err(proof_error)?;
-            let control = arguments
-                .next()
-                .ok_or_else(|| proof_error("child control address is required"))?
-                .parse::<SocketAddr>()?;
-            if arguments.next().is_some() {
-                return Err(proof_error("unexpected child proof arguments"));
-            }
-            child_main(scenario, node, control)
-        }
-        Some(_) => Err(proof_error("usage: spurfire-local-p2p-proof")),
-    }
-}
