@@ -7,13 +7,19 @@ cd "$repo_root"
 
 for name in \
   TS_CLIENT_ID TS_CLIENT_SECRET TS_API_BASE TS_API_BASE_URL TS_API_TOKEN TS_AUTHKEY \
-  TAILSCALE_AUTHKEY SPURFIRE_CAPABILITY GH_TOKEN GITHUB_TOKEN
+  TAILSCALE_AUTHKEY SPURFIRE_CAPABILITY SPURFIRE_JOIN_CODE GH_TOKEN GITHUB_TOKEN
 do
   if [[ -n "${!name+x}" ]]; then
     echo "error: $name must be unset for the credential-free process proof" >&2
     exit 1
   fi
 done
+while IFS= read -r name; do
+  if [[ "$name" =~ ^SPURFIRE_.*(TOKEN|KEY)$ ]]; then
+    echo "error: secret-like $name must be unset for the credential-free process proof" >&2
+    exit 1
+  fi
+done < <(compgen -e)
 
 command -v timeout >/dev/null 2>&1 || {
   echo "error: timeout is required for the bounded process proof" >&2
@@ -48,8 +54,8 @@ timeout --kill-after=5s 60s env -i \
   "$proof_bin" 2>&1 | tee "$proof_log"
 
 required=(
-  'SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1'
-  'SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true'
+  'SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true combat=authority_once result_dedup=true authority=a epoch=1'
+  'SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c checkpoint=hash_checked riders=2 combat_receipts=retained continued_play=true'
 )
 for marker in "${required[@]}"; do
   count="$(grep -Fxc "$marker" "$proof_log" || true)"

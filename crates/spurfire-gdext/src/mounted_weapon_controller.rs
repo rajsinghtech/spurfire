@@ -6,8 +6,9 @@ use spurfire_protocol::{
     clamp_launch_direction, effective_spread_millidegrees, AcceptedShotMetadata, CombatGait,
     CombatKernel, DiveContextError, DiveFireRejection, DiveId, EntityId, FireRejection, HitZone,
     PlayerId, QuantizedDirection, QuantizedOrigin, ReloadStartError, RiderStance, RidingState,
-    ShotAttributionLedger, ShotOutcome, ShotRejectionReason, ShotResult, ShotTelemetry,
-    SimulationTick, WeaponAmmo, WeaponId, WeaponStats, DIRECTION_UNITS, ORIGIN_LEASH_MM,
+    ShotAttributionLedger, ShotCommand, ShotOutcome, ShotRejectionReason, ShotResult,
+    ShotTelemetry, SimulationTick, WeaponAmmo, WeaponId, WeaponStats, DIRECTION_UNITS,
+    ORIGIN_LEASH_MM,
 };
 
 use crate::saddle_dive_controller::SaddleDiveController;
@@ -88,6 +89,7 @@ pub struct MountedWeaponController {
     authority_epoch: u64,
     shot_ledger: ShotAttributionLedger,
     pending_local_shot: Option<PendingLocalShot>,
+    pending_wire_command: Option<ShotCommand>,
 }
 
 #[godot_api]
@@ -540,6 +542,15 @@ impl MountedWeaponController {
             distance_mm: None,
         };
         self.last_telemetry = telemetry_dictionary(&telemetry);
+        self.pending_wire_command = Some(ShotCommand {
+            tick,
+            shooter_peer_id: self.kernel.shooter_peer_id(),
+            weapon_id: prepared.weapon_id,
+            origin: origin_quantized,
+            direction: prepared.resolved_direction,
+            spread_seed: seed,
+            claimed_target: None,
+        });
         self.pending_local_shot = Some(PendingLocalShot {
             tick,
             weapon_id: prepared.weapon_id,
@@ -631,6 +642,26 @@ impl MountedWeaponController {
     /// Godot supplies only target/zone/distance evidence from its physics ray. Damage and range
     /// are derived from the locked native weapon row. Networked matches replace this bridge with
     /// `CombatAuthority::validate_shot` over authority snapshots.
+    /// Consume the native command exactly once for signed network delivery.
+    #[func]
+    pub fn take_pending_shot_command_json(&mut self) -> GString {
+        self.pending_wire_command
+            .take()
+            .map_or_else(GString::new, |command| {
+                let encoded = serde_json::to_string(&command).unwrap_or_default();
+                GString::from(&encoded)
+            })
+    }
+
+    /// Apply one authority-signed result. Native attribution deduplicates it.
+    #[func]
+    pub fn apply_authority_result_json(&mut self, result_json: GString) -> bool {
+        let Ok(result) = serde_json::from_str::<ShotResult>(&result_json.to_string()) else {
+            return false;
+        };
+        self.apply_authority_result(&result)
+    }
+
     #[func]
     pub fn resolve_local_hit(
         &mut self,
@@ -741,6 +772,7 @@ impl INode3D for MountedWeaponController {
             authority_epoch: 0,
             shot_ledger: ShotAttributionLedger::default(),
             pending_local_shot: None,
+            pending_wire_command: None,
         }
     }
 

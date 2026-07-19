@@ -118,6 +118,16 @@ func _check_control_glue(failures: Array[String]) -> void:
 	var bridge_source := FileAccess.get_file_as_string("res://scripts/lobby_peer_bridge.gd")
 	if not bridge_source.contains("configure_roster_session"):
 		failures.append("lobby peer bridge omitted exact-roster session binding")
+	for required in [
+		"dispatch_packet_with_source", "rider_player_id", "_simulate_remote_actor",
+		"_apply_shot_result_once", "begin_authority_migration", "poll_migration",
+	]:
+		if not bridge_source.contains(required):
+			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)
+	if bridge_source.contains("accept_packet_with_source(") or bridge_source.contains("decode_packet(packet"):
+		failures.append("secure bridge retained split packet acceptance/decoding")
+	if shell_source.contains("Host left • ending this Alpha match"):
+		failures.append("authority loss still tears down implemented M2 play")
 
 func _check_cleanup_truth(failures: Array[String]) -> void:
 	var pending := {"backing": {"network_lifecycle": "VERIFYING_ABSENCE"}}

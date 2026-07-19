@@ -40,8 +40,18 @@ Before real readiness can ever return true, replace `lobby_http_client.gd` with 
 `lobby_client.rs` fixed-origin HTTPS worker and feed the key directly into the RustScale worker.
 Until then the explicit product-readiness gates must remain false.
 
-The smallest bridge distributes endpoints and authoritative snapshots, but it does not yet
-simulate distinct remote horses from rider inputs or network authoritative combat results. It
-therefore cannot qualify one coherent peer-authoritative M2 match. No code here authorizes hosted
-real mutations, adds control-service gameplay membership, publishes an artifact, or changes the
-`v0.2.0` release gate.
+## Invited-friends M2 source path
+
+The signed bridge now admits and dispatches each datagram atomically in native code. The authority
+consumes bounded subject-bound rider input, maintains distinct player-keyed rider/horse state, and
+publishes subject-tagged snapshots; non-authorities render remote actors and reconcile their local
+prediction. Native shooter-bound commands are delivered to the installed authority, resolved once
+through `CombatAuthority`, and returned as authority-only epoch-bound results with transport and
+combat-level deduplication. Authority loss no longer tears down the match: survivors advance one
+epoch and install a hash-checked bounded movement/combat checkpoint before continuing.
+
+This is **implemented source proof**, covered by credential-free Rust, Godot contract, and separate
+OS-process gates. It is not credentialed/human evidence. Real create/join stays dark until the native
+secret-handoff blocker above is closed, and route/quality, natural M2 tuning, packaged two-client,
+and provider cleanup evidence remain required. No code here authorizes provider mutations,
+publishes an artifact, or changes the release gate.

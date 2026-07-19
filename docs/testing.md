@@ -117,22 +117,27 @@ server-signed exact-endpoint roster, rejects a tampered Ed25519 envelope before 
 move, and accepts signed traffic in both directions. It then starts three fresh peer processes,
 waits for B and C to verify signed traffic from the initial authority A, kills A without a Leave
 packet, and requires both survivors to agree on B at epoch 2. The migration proof rejects a
-tampered signed authority claim, accepts the intact claim, rejects C's signed non-authority
-snapshot, accepts B's authority-only snapshot, and accepts signed rider input after migration.
+tampered signed migration checkpoint, accepts the intact hash-checked checkpoint containing
+distinct bounded rider/combat state, rejects C's signed non-authority snapshot, accepts B's
+subject-tagged authority snapshot, and accepts signed rider input after migration. Rust tests also
+cover forged payload subjects, result deduplication across different transport sequences, invalid
+checkpoint atomicity, and exactly-one epoch advancement.
 
 Expected exact markers are:
 
 ```text
-SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1
-SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true
+SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true combat=authority_once result_dedup=true authority=a epoch=1
+SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c checkpoint=hash_checked riders=2 combat_receipts=retained continued_play=true
 ```
 
 The wrapper refuses to run when a recognized Tailscale, capability, or GitHub credential variable
 is present. After a locked build, it runs the proof under `env -i` with an isolated temporary home
 and temp directory; peer children also clear their environments. A 60-second execution-only timeout
 owns the proof process group and escalates after five seconds so failed runs cannot leave peers behind.
-It performs no provider calls and is the deterministic signed-session process gate. It does not
-replace real RustScale route coverage, production key custody, or provider lifecycle evidence.
+It performs no provider calls and is the deterministic signed-session process gate. Together with
+the Godot source/contract smoke this is **implemented source proof**, not credentialed or human
+evidence. It does not replace separately packaged invited-client play, real RustScale route
+coverage, production key custody, natural M2 tuning, or provider lifecycle/cleanup evidence.
 
 ## 7. Visible three-client P2P demo
 

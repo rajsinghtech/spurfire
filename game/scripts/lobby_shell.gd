@@ -224,6 +224,7 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	var old_peer := _course.get_node_or_null("PeerSession")
 	var old_replication := _course.get_node_or_null("NetworkReplication")
 	var m2 := _course.get_node_or_null("M2Gameplay")
+	var combat_router := _course.get_node_or_null("Rider/CombatInput")
 	var network_layer := _course.get_node_or_null("NetworkLayer")
 	if rider == null or remote == null or m2 == null:
 		return false
@@ -232,7 +233,10 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	_bridge.name = "LobbyPeerBridge"
 	_course.add_child(_bridge)
 	_bridge.authority_departed.connect(_on_authority_departed)
-	if not _bridge.configure({"peer_session": peer_session, "local_rider": rider, "remote_rider": remote}, _player_id):
+	if not _bridge.configure({
+		"peer_session": peer_session, "local_rider": rider,
+		"remote_rider": remote, "combat_router": combat_router,
+	}, _player_id):
 		return false
 	m2.set("replication", _bridge)
 	if network_layer:
@@ -277,12 +281,14 @@ func _on_report_completed(_response: Dictionary) -> void:
 
 func _on_peer_failed(_message: String) -> void:
 	waiting_status.text = "Peer network failed. Leaving safely…"
-	api.leave_lobby(_lobby_id)
+	_begin_leave()
 
 func _on_authority_departed() -> void:
-	if _screen == Screen.MATCH and not _leaving:
-		_begin_leave()
-		teardown_status.text = "Host left • ending this Alpha match safely…"
+	if _screen == Screen.MATCH and not _leaving and _bridge:
+		_bridge.begin_authority_migration()
+		# The scene remains live while signed peers converge on the exactly-next
+		# epoch and restore the bounded M2 checkpoint.
+		waiting_status.text = "Host lost • restoring the posse…"
 
 func _on_lobby_updated(response: Dictionary) -> void:
 	var lobby_value = response.get("lobby", response)

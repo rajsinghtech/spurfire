@@ -12,12 +12,14 @@ use ed25519_dalek::{Signer, SigningKey};
 use godot::classes::{INode, Node};
 use godot::prelude::*;
 use spurfire_net::{
-    decode, encode, rustscale::RustScalePeer, AcceptOutcome, PeerPayload, SecureSession,
-    SessionState,
+    decode, encode, rustscale::RustScalePeer, AcceptOutcome, MatchCheckpoint, PeerPayload,
+    SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, LobbyId, LobbySessionProjection, NodeKey, PlayerId, RiderStance,
-    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature,
+    canonical_keyreg_digest, CombatAuthority, LobbyId, LobbySessionProjection, NodeKey, PlayerId,
+    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
+    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, SimulationTick,
+    TargetRegistry, WeaponAmmo, WeaponId,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -26,6 +28,10 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use crate::saddle_dive_controller::SaddleDiveController;
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 enum WorkerCommand {
     Send {
@@ -314,6 +320,8 @@ pub struct PeerSession {
     command_tx: Option<UnboundedSender<WorkerCommand>>,
     event_rx: Option<Receiver<(u64, WorkerEvent)>>,
     worker_generation: u64,
+    combat_authority: Option<CombatAuthority>,
+    combat_targets: Option<TargetRegistry>,
 }
 
 #[godot_api]
@@ -521,10 +529,23 @@ impl PeerSession {
         }) {
             return false;
         }
-        let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
-        for player in &self.allowed_players {
-            state.add_peer(*player, now_ms);
-        }
+        let state = if let Some(existing) = &self.secure_session {
+            if existing.roster_hash() == manifest.hash() {
+                existing.state().clone()
+            } else {
+                let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
+                for player in &self.allowed_players {
+                    state.add_peer(*player, now_ms);
+                }
+                state
+            }
+        } else {
+            let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
+            for player in &self.allowed_players {
+                state.add_peer(*player, now_ms);
+            }
+            state
+        };
         let Ok(secure) = SecureSession::new(manifest, pinned_key, signature, state) else {
             return false;
         };
@@ -615,6 +636,8 @@ impl PeerSession {
         self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        self.combat_authority = CombatAuthority::new(60, 0).ok();
+        self.combat_targets = TargetRegistry::new(60).ok();
         let signal_player = self.local_player_id.clone();
         let signal_epoch = self.authority_epoch;
         self.signals()
@@ -675,6 +698,7 @@ impl PeerSession {
     fn make_rider_snapshot(
         &mut self,
         tick: i64,
+        rider_player_id: GString,
         position: Vector3,
         velocity: Vector3,
         yaw_degrees: f64,
@@ -689,6 +713,12 @@ impl PeerSession {
                     (value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
                         .then_some(value as i32)
                 })
+        }
+        let Ok(rider_player_id) = PlayerId::parse(&rider_player_id.to_string()) else {
+            return PackedByteArray::new();
+        };
+        if !self.allowed_players.contains(&rider_player_id) {
+            return PackedByteArray::new();
         }
         let Some(position_mm) = [position.x, position.y, position.z]
             .map(millimetres)
@@ -718,6 +748,7 @@ impl PeerSession {
         self.make_packet(
             tick,
             PeerPayload::RiderSnapshot {
+                rider_player_id,
                 position_mm: [position_mm[0], position_mm[1], position_mm[2]],
                 velocity_mmps: [velocity_mmps[0], velocity_mmps[1], velocity_mmps[2]],
                 yaw_millidegrees: yaw.round() as i32,
@@ -726,7 +757,98 @@ impl PeerSession {
         )
     }
 
-    /// Decode presentation fields after `accept_packet` has accepted the packet.
+    /// Build a shooter-bound command from the native combat controller JSON.
+    #[func]
+    fn make_shot_command(&mut self, tick: i64, command_json: GString) -> PackedByteArray {
+        let Ok(command) = serde_json::from_str(&command_json.to_string()) else {
+            return PackedByteArray::new();
+        };
+        self.make_packet(tick, PeerPayload::ShotCommand { command })
+    }
+
+    /// Resolve one admitted command exactly once through `CombatAuthority`.
+    /// The returned JSON can only be signed by `make_shot_result` on authority.
+    #[func]
+    fn resolve_shot_command(&mut self, command_json: GString) -> GString {
+        let Ok(command) = serde_json::from_str::<ShotCommand>(&command_json.to_string()) else {
+            return GString::new();
+        };
+        if self.local_player_id.to_string() != self.authority_player_id.to_string()
+            || !self.allowed_players.contains(&command.shooter_peer_id)
+        {
+            return GString::new();
+        }
+        let (Some(authority), Some(targets)) =
+            (self.combat_authority.as_mut(), self.combat_targets.as_mut())
+        else {
+            return GString::new();
+        };
+        if authority.shooter_kernel(command.shooter_peer_id).is_none() {
+            authority.register_shooter(command.shooter_peer_id, command.weapon_id);
+        } else if let Some(kernel) = authority.shooter_kernel_mut(command.shooter_peer_id) {
+            let _ = kernel.equip_weapon(command.weapon_id);
+        }
+        let rider = CombatRiderSnapshot {
+            tick: command.tick,
+            shooter_peer_id: command.shooter_peer_id,
+            muzzle_origin: command.origin,
+            team_id: Default::default(),
+            riding: RidingState::default(),
+        };
+        let resolved = authority.validate_shot(&command, command.tick, rider, targets);
+        let encoded = serde_json::to_string(&resolved.result).unwrap_or_default();
+        GString::from(&encoded)
+    }
+
+    /// Build authority-only resolved combat truth.
+    #[func]
+    fn make_shot_result(&mut self, tick: i64, result_json: GString) -> PackedByteArray {
+        let Ok(result) = serde_json::from_str(&result_json.to_string()) else {
+            return PackedByteArray::new();
+        };
+        self.make_packet(tick, PeerPayload::ShotResult { result })
+    }
+
+    /// Advance exactly one epoch after timeout and sign a bounded checkpoint.
+    #[func]
+    fn poll_migration(&mut self, now_ms: i64, checkpoint_json: GString) -> PackedByteArray {
+        let (Ok(now_ms), Ok(checkpoint)) = (
+            u64::try_from(now_ms),
+            serde_json::from_str::<MatchCheckpoint>(&checkpoint_json.to_string()),
+        ) else {
+            return PackedByteArray::new();
+        };
+        if !checkpoint.is_bounded_and_canonical() {
+            return PackedByteArray::new();
+        }
+        let Some(secure) = self.secure_session.as_mut() else {
+            return PackedByteArray::new();
+        };
+        let source_epoch = secure.state().authority_epoch();
+        if checkpoint.source_epoch != source_epoch {
+            return PackedByteArray::new();
+        }
+        let Some((authority, epoch)) = secure.expire_and_migrate(now_ms) else {
+            return PackedByteArray::new();
+        };
+        self.authority_player_id = GString::from(&authority.to_string());
+        self.authority_epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
+        if authority.to_string() != self.local_player_id.to_string() {
+            return PackedByteArray::new();
+        }
+        let hash = checkpoint.hash();
+        self.make_packet(
+            i64::try_from(checkpoint.tick).unwrap_or(i64::MAX),
+            PeerPayload::MigrationSnapshot {
+                authority,
+                epoch,
+                checkpoint,
+                state_hash: hash,
+            },
+        )
+    }
+
+    /// Decode presentation fields only for explicit insecure diagnostics.
     #[func]
     fn decode_packet(&self, packet: PackedByteArray) -> VarDictionary {
         let Ok(envelope) = decode(&packet.to_vec()) else {
@@ -768,12 +890,14 @@ impl PeerSession {
                 result.set("buttons", i64::from(buttons));
             }
             PeerPayload::RiderSnapshot {
+                rider_player_id,
                 position_mm,
                 velocity_mmps,
                 yaw_millidegrees,
                 stance,
             } => {
                 result.set("type", "rider_snapshot");
+                result.set("rider_player_id", rider_player_id.to_string());
                 result.set(
                     "position",
                     Vector3::new(
@@ -794,8 +918,24 @@ impl PeerSession {
                 result.set("stance_id", i64::from(stance.as_u8()));
                 result.set("stance_known", stance.is_known());
             }
-            PeerPayload::ShotCommand { .. } => result.set("type", "shot_command"),
-            PeerPayload::ShotResult { .. } => result.set("type", "shot_result"),
+            PeerPayload::ShotCommand { command } => {
+                result.set("type", "shot_command");
+                result.set("shooter_player_id", command.shooter_peer_id.to_string());
+                result.set(
+                    "command_json",
+                    serde_json::to_string(&command).unwrap_or_default(),
+                );
+            }
+            PeerPayload::ShotResult {
+                result: shot_result,
+            } => {
+                result.set("type", "shot_result");
+                result.set("shooter_player_id", shot_result.shooter_peer_id.to_string());
+                result.set(
+                    "result_json",
+                    serde_json::to_string(&shot_result).unwrap_or_default(),
+                );
+            }
             PeerPayload::Authority { authority, epoch } => {
                 result.set("type", "authority");
                 result.set("authority", authority.to_string());
@@ -804,14 +944,21 @@ impl PeerSession {
             PeerPayload::MigrationSnapshot {
                 authority,
                 epoch,
-                tick,
+                checkpoint,
                 state_hash,
             } => {
                 result.set("type", "migration_snapshot");
                 result.set("authority", authority.to_string());
                 result.set("epoch", i64::try_from(epoch).unwrap_or(i64::MAX));
-                result.set("snapshot_tick", i64::try_from(tick).unwrap_or(i64::MAX));
-                result.set("state_hash", state_hash);
+                result.set(
+                    "snapshot_tick",
+                    i64::try_from(checkpoint.tick).unwrap_or(i64::MAX),
+                );
+                result.set(
+                    "checkpoint_json",
+                    serde_json::to_string(&checkpoint).unwrap_or_default(),
+                );
+                result.set("state_hash", hex_bytes(&state_hash));
             }
             PeerPayload::Leave => result.set("type", "leave"),
         }
@@ -871,9 +1018,70 @@ impl PeerSession {
             node_key,
             now_ms,
         );
+        if outcome == AcceptOutcome::Accepted {
+            if let PeerPayload::MigrationSnapshot { checkpoint, .. } = &envelope.payload {
+                let mut restored = CombatAuthority::new(60, 0).ok();
+                if let Some(authority) = restored.as_mut() {
+                    for rider in &checkpoint.riders {
+                        let Ok(weapon) = WeaponId::try_from(i64::from(rider.weapon_id)) else {
+                            restored = None;
+                            break;
+                        };
+                        let last_tick = rider.last_shot_tick.map(SimulationTick::new);
+                        if !authority.restore_shooter(
+                            rider.rider_player_id,
+                            weapon,
+                            WeaponAmmo {
+                                magazine: rider.ammo_magazine,
+                                reserve: rider.ammo_reserve,
+                            },
+                            last_tick,
+                        ) {
+                            restored = None;
+                            break;
+                        }
+                    }
+                }
+                if restored.is_some() {
+                    self.combat_authority = restored;
+                    self.combat_targets = TargetRegistry::new(60).ok();
+                }
+            }
+        }
         self.authority_player_id = GString::from(&session.state().authority().to_string());
         self.authority_epoch = i64::try_from(session.state().authority_epoch()).unwrap_or(i64::MAX);
         Self::outcome_code(outcome)
+    }
+
+    /// Atomically admit and dispatch one immutable packet. Rejected traffic
+    /// never exposes a gameplay payload to GDScript.
+    #[func]
+    fn dispatch_packet_with_source(
+        &mut self,
+        packet: PackedByteArray,
+        source_ip: GString,
+        source_port: i64,
+        source_node_key: GString,
+        now_ms: i64,
+    ) -> VarDictionary {
+        let outcome = self.accept_packet_with_source(
+            packet.clone(),
+            source_ip,
+            source_port,
+            source_node_key,
+            now_ms,
+        );
+        let mut result = VarDictionary::new();
+        result.set("accepted", outcome == 0);
+        result.set("outcome", outcome);
+        if outcome != 0 {
+            return result;
+        }
+        let payload = self.decode_packet(packet);
+        for (key, value) in payload.iter_shared() {
+            result.set(&key, &value);
+        }
+        result
     }
 
     /// Start enrollment on a background Tokio runtime. The auth key is never logged.
@@ -976,6 +1184,8 @@ impl PeerSession {
         self.authority_epoch = 0;
         self.tailnet_ip = GString::new();
         self.local_port = 0;
+        self.combat_authority = None;
+        self.combat_targets = None;
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
@@ -1016,6 +1226,9 @@ impl PeerSession {
             AcceptOutcome::BadSignature => 10,
             AcceptOutcome::InvalidAuthorityClaim => 11,
             AcceptOutcome::InvalidPayloadRole => 12,
+            AcceptOutcome::InvalidPayloadSubject => 13,
+            AcceptOutcome::InvalidCheckpoint => 14,
+            AcceptOutcome::DuplicateShotResult => 15,
         }
     }
 
@@ -1109,6 +1322,8 @@ impl INode for PeerSession {
             command_tx: None,
             event_rx: None,
             worker_generation: 0,
+            combat_authority: None,
+            combat_targets: None,
         }
     }
 

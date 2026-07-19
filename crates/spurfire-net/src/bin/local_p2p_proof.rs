@@ -15,12 +15,13 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use spurfire_net::{
-    decode, encode, AcceptOutcome, Envelope, PeerPayload, SecureSession, SessionState,
-    MAX_DATAGRAM_BYTES, RIDER_INPUT_JUMP_PRESSED,
+    decode, encode, AcceptOutcome, Envelope, MatchCheckpoint, PeerPayload, RiderCheckpoint,
+    SecureSession, SessionState, MAX_DATAGRAM_BYTES, RIDER_INPUT_JUMP_PRESSED,
 };
 use spurfire_protocol::{
-    canonical_manifest_digest, LobbyId, PlayerId, RiderStance, RosterManifest, RosterManifestEntry,
-    SessionPublicKey, SessionSignature,
+    canonical_manifest_digest, LobbyId, PlayerId, QuantizedDirection, QuantizedOrigin, RiderStance,
+    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
+    ShotOutcome, ShotResult, SimulationTick, WeaponId,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -156,6 +157,9 @@ enum EventKind {
     SignedHelloAccepted,
     InputSignatureRejected,
     SignedInputAccepted,
+    ShotCommandAccepted,
+    ShotResultAccepted,
+    ShotResultDuplicateRejected,
     Migrated,
     MigrationClaimSignatureRejected,
     SignedMigrationClaimAccepted,
@@ -551,6 +555,18 @@ fn run_two_peer_proof() -> ProofResult<()> {
             },
             EventKey {
                 node: Node::A,
+                kind: EventKind::ShotCommandAccepted,
+            },
+            EventKey {
+                node: Node::B,
+                kind: EventKind::ShotResultAccepted,
+            },
+            EventKey {
+                node: Node::B,
+                kind: EventKind::ShotResultDuplicateRejected,
+            },
+            EventKey {
+                node: Node::A,
                 kind: EventKind::Done,
             },
             EventKey {
@@ -567,7 +583,7 @@ fn run_two_peer_proof() -> ProofResult<()> {
         )?;
         wait_for_success(&mut peers, None)?;
         println!(
-            "SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1"
+            "SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true combat=authority_once result_dedup=true authority=a epoch=1"
         );
         Ok(())
     })();
@@ -684,7 +700,7 @@ fn run_migration_proof() -> ProofResult<()> {
         )?;
         wait_for_success(&mut peers, None)?;
         println!(
-            "SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true"
+            "SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c checkpoint=hash_checked riders=2 combat_receipts=retained continued_play=true"
         );
         Ok(())
     })();
@@ -844,6 +860,34 @@ fn emit_event(
     )
 }
 
+fn proof_shot_command() -> ProofResult<ShotCommand> {
+    Ok(ShotCommand {
+        tick: SimulationTick::new(3),
+        shooter_peer_id: Node::B.id()?,
+        weapon_id: WeaponId::Dustwalker,
+        origin: QuantizedOrigin::new(0, 1_600, 0),
+        direction: QuantizedDirection::new(0, 0, -1_000_000),
+        spread_seed: spurfire_protocol::shot_spread_seed(0, Node::B.id()?, 0),
+        claimed_target: None,
+    })
+}
+
+fn proof_shot_result() -> ProofResult<ShotResult> {
+    Ok(ShotResult {
+        tick: SimulationTick::new(3),
+        shooter_peer_id: Node::B.id()?,
+        weapon_id: WeaponId::Dustwalker,
+        outcome: ShotOutcome::Miss,
+        rejection_reason: None,
+        resolved_direction: Some(QuantizedDirection::new(0, 0, -1_000_000)),
+        target_id: None,
+        hit_zone: None,
+        damage: 0,
+        distance_mm: None,
+        eliminated: false,
+    })
+}
+
 fn run_two_peer_child(
     node: Node,
     socket: UdpSocket,
@@ -877,6 +921,23 @@ fn run_two_peer_child(
                 return Err(proof_error("peer B reply was not rider input"));
             }
             emit_event(&mut writer, node, EventKind::SignedInputAccepted, &session)?;
+            let (command, source) = receive_envelope(&socket)?;
+            if session.accept_with_source(&command, source, None, 3) != AcceptOutcome::Accepted
+                || !matches!(command.payload, PeerPayload::ShotCommand { .. })
+            {
+                return Err(proof_error("authority rejected shooter-bound shot command"));
+            }
+            emit_event(&mut writer, node, EventKind::ShotCommandAccepted, &session)?;
+            for _ in 0..2 {
+                let result = session.envelope(
+                    3,
+                    PeerPayload::ShotResult {
+                        result: proof_shot_result()?,
+                    },
+                    &signing_key,
+                )?;
+                send_envelope(&socket, &result, endpoint_for(&manifest, Node::B)?)?;
+            }
         }
         Node::B => {
             let (hello, source) = receive_envelope(&socket)?;
@@ -904,6 +965,33 @@ fn run_two_peer_child(
                 &signing_key,
             )?;
             send_envelope(&socket, &reply, endpoint_for(&manifest, Node::A)?)?;
+            let command = session.envelope(
+                3,
+                PeerPayload::ShotCommand {
+                    command: proof_shot_command()?,
+                },
+                &signing_key,
+            )?;
+            send_envelope(&socket, &command, endpoint_for(&manifest, Node::A)?)?;
+            let (first, source) = receive_envelope(&socket)?;
+            if session.accept_with_source(&first, source, None, 4) != AcceptOutcome::Accepted {
+                return Err(proof_error("peer B rejected authority shot result"));
+            }
+            emit_event(&mut writer, node, EventKind::ShotResultAccepted, &session)?;
+            let (duplicate, source) = receive_envelope(&socket)?;
+            if session.accept_with_source(&duplicate, source, None, 5)
+                != AcceptOutcome::DuplicateShotResult
+            {
+                return Err(proof_error(
+                    "same result under a new sequence was not deduplicated",
+                ));
+            }
+            emit_event(
+                &mut writer,
+                node,
+                EventKind::ShotResultDuplicateRejected,
+                &session,
+            )?;
         }
         Node::C => return Err(proof_error("peer C is not part of the two-peer proof")),
     }
@@ -929,22 +1017,62 @@ fn migration_payload(
     node: Node,
     session: &SecureSession,
     send_index: u64,
+    tick: u64,
 ) -> ProofResult<PeerPayload> {
     let successor = Node::B.id()?;
     Ok(
         if session.state().authority() == successor && session.state().authority_epoch() == 2 {
             match node {
-                Node::B if send_index.is_multiple_of(2) => PeerPayload::Authority {
-                    authority: successor,
-                    epoch: 2,
-                },
+                Node::B if send_index.is_multiple_of(2) => {
+                    let checkpoint = MatchCheckpoint {
+                        source_epoch: 1,
+                        tick,
+                        riders: vec![
+                            RiderCheckpoint {
+                                rider_player_id: Node::B.id()?,
+                                position_mm: [2_000, 0, 3_000],
+                                velocity_mmps: [500, 0, 750],
+                                yaw_millidegrees: 45_000,
+                                stance: RiderStance::Mounted,
+                                health: 72,
+                                weapon_id: WeaponId::Dustwalker.as_u8(),
+                                ammo_magazine: 3,
+                                ammo_reserve: 18,
+                                last_input_tick: tick.saturating_sub(1),
+                                last_shot_tick: Some(tick.saturating_sub(2)),
+                            },
+                            RiderCheckpoint {
+                                rider_player_id: Node::C.id()?,
+                                position_mm: [7_000, 0, 4_000],
+                                velocity_mmps: [900, 0, -150],
+                                yaw_millidegrees: 90_000,
+                                stance: RiderStance::Mounted,
+                                health: 100,
+                                weapon_id: WeaponId::Dustwalker.as_u8(),
+                                ammo_magazine: 5,
+                                ammo_reserve: 24,
+                                last_input_tick: tick.saturating_sub(1),
+                                last_shot_tick: None,
+                            },
+                        ],
+                        resolved_shots: vec![(Node::B.id()?, tick.saturating_sub(2))],
+                    };
+                    PeerPayload::MigrationSnapshot {
+                        authority: successor,
+                        epoch: 2,
+                        state_hash: checkpoint.hash(),
+                        checkpoint,
+                    }
+                }
                 Node::B => PeerPayload::RiderSnapshot {
+                    rider_player_id: Node::B.id()?,
                     position_mm: [2_000, 0, 3_000],
                     velocity_mmps: [500, 0, 750],
                     yaw_millidegrees: 45_000,
                     stance: RiderStance::Mounted,
                 },
                 Node::C if send_index.is_multiple_of(3) => PeerPayload::RiderSnapshot {
+                    rider_player_id: Node::C.id()?,
                     position_mm: [9_000, 0, 9_000],
                     velocity_mmps: [9_000, 0, 9_000],
                     yaw_millidegrees: 90_000,
@@ -1048,8 +1176,21 @@ fn run_migration_child(
         if last_send.elapsed() >= SEND_INTERVAL {
             last_send = Instant::now();
             send_index = send_index.saturating_add(1);
-            let payload = migration_payload(node, &session, send_index)?;
-            let envelope = session.envelope(now_ms / 16, payload, &signing_key)?;
+            let tick = now_ms / 16;
+            let payload = migration_payload(node, &session, send_index, tick)?;
+            let envelope = if node == Node::C
+                && matches!(payload, PeerPayload::RiderSnapshot { .. })
+            {
+                // Deliberately bypass the outbound role builder to prove that
+                // receivers reject a compromised roster member's validly
+                // signed authority-only payload.
+                let mut forged = session.envelope(tick, PeerPayload::Heartbeat, &signing_key)?;
+                forged.payload = payload;
+                session.sign(&mut forged, &signing_key)?;
+                forged
+            } else {
+                session.envelope(tick, payload, &signing_key)?
+            };
             for peer in Scenario::Migration.nodes() {
                 if *peer != node {
                     send_envelope(&socket, &envelope, endpoint_for(&manifest, *peer)?)?;
@@ -1067,9 +1208,10 @@ fn run_migration_child(
                     && envelope.authority_epoch == 2
                     && matches!(
                         payload,
-                        PeerPayload::Authority {
+                        PeerPayload::MigrationSnapshot {
                             authority,
-                            epoch: 2
+                            epoch: 2,
+                            ..
                         } if authority == Node::B.id()?
                     )
                     && !migration_signature_rejected
@@ -1139,9 +1281,10 @@ fn run_migration_child(
                         && envelope.sender == Node::B.id()?
                         && matches!(
                             payload,
-                            PeerPayload::Authority {
+                            PeerPayload::MigrationSnapshot {
                                 authority,
-                                epoch: 2
+                                epoch: 2,
+                                ..
                             } if authority == Node::B.id()?
                         )
                         && !migration_claim_accepted

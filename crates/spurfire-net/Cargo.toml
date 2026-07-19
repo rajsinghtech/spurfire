@@ -15,6 +15,7 @@ ed25519-dalek = "2"
 spurfire-protocol = { path = "../spurfire-protocol" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "272ee212c7c339c3d028ea474554154bc28ae381", optional = true }

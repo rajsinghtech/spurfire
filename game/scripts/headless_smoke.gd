@@ -229,6 +229,12 @@ func _check_peer_session(failures: Array[String]) -> void:
 			failures.append("PeerSession lacks %s" % method)
 	if not peer_session.has_signal("packet_received") or not peer_session.has_signal("route_updated"):
 		failures.append("PeerSession lacks packet or route telemetry signals")
+	for method in [
+		"dispatch_packet_with_source", "make_shot_command", "resolve_shot_command",
+		"make_shot_result", "poll_migration", "make_leave", "clear_lobby_session",
+	]:
+		if not peer_session.has_method(method):
+			failures.append("PeerSession lacks M2 multiplayer method %s" % method)
 	peer_session.call("set_insecure_demo_mode", true)
 	var configured := bool(peer_session.call(
 		"configure_session",
@@ -246,18 +252,28 @@ func _check_peer_session(failures: Array[String]) -> void:
 		elif int(peer_session.call("accept_packet", heartbeat, 2)) != 1:
 			failures.append("PeerSession failed to reject replayed heartbeat")
 		var snapshot := peer_session.call(
-			"make_rider_snapshot", 2, Vector3(1, 2, 3), Vector3(4, 0, -2), 45.0, STANCE_DIVE
+			"make_rider_snapshot", 2, "00000000-0000-4000-8000-000000000002",
+			Vector3(1, 2, 3), Vector3(4, 0, -2), 45.0, STANCE_DIVE
 		) as PackedByteArray
 		var decoded := peer_session.call("decode_packet", snapshot) as Dictionary
 		if decoded.get("type", "") != "rider_snapshot" or decoded.get("position", Vector3.ZERO) != Vector3(1, 2, 3):
 			failures.append("PeerSession snapshot codec omitted rider state")
+		if str(decoded.get("rider_player_id", "")) != "00000000-0000-4000-8000-000000000002":
+			failures.append("PeerSession snapshot omitted the authority-owned rider subject")
 		if int(decoded.get("stance_id", -1)) != STANCE_DIVE or not bool(decoded.get("stance_known", false)):
 			failures.append("PeerSession snapshot codec omitted known stance")
 		var bad_stance := peer_session.call(
-			"make_rider_snapshot", 3, Vector3.ZERO, Vector3.ZERO, 0.0, 222
+			"make_rider_snapshot", 3, "00000000-0000-4000-8000-000000000002",
+			Vector3.ZERO, Vector3.ZERO, 0.0, 222
 		) as PackedByteArray
 		if not bad_stance.is_empty():
 			failures.append("PeerSession outbound snapshot accepted unknown local stance")
+		var outsider := peer_session.call(
+			"make_rider_snapshot", 4, "00000000-0000-4000-8000-000000000099",
+			Vector3.ZERO, Vector3.ZERO, 0.0, 1
+		) as PackedByteArray
+		if not outsider.is_empty():
+			failures.append("PeerSession authority snapshot accepted an unknown rider subject")
 		var reserved_buttons := peer_session.call("make_rider_input", 4, 0, 0, 4) as PackedByteArray
 		if not reserved_buttons.is_empty():
 			failures.append("PeerSession accepted nonzero reserved rider-input bits")

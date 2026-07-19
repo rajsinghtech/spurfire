@@ -141,6 +141,7 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	if (_demo_mode or local_is_authority) and (simulation_tick % 2 == 0 or stance_changed):
 		packet = peer_session.make_rider_snapshot(
 			simulation_tick,
+			str(peer_session.get("local_player_id")),
 			local_rider.global_position,
 			local_rider.velocity,
 			rad_to_deg(local_rider.rotation.y),

@@ -1732,6 +1732,32 @@ impl CombatAuthority {
         }
     }
 
+    /// Restore one bounded shooter checkpoint during an authenticated epoch handoff.
+    pub fn restore_shooter(
+        &mut self,
+        shooter_peer_id: PlayerId,
+        weapon_id: WeaponId,
+        ammo: WeaponAmmo,
+        last_command_tick: Option<SimulationTick>,
+    ) -> bool {
+        let Ok(mut kernel) =
+            CombatKernel::with_weapon(self.tick_rate, self.lobby_seed, shooter_peer_id, weapon_id)
+        else {
+            return false;
+        };
+        if !kernel.set_ammo(weapon_id, ammo) {
+            return false;
+        }
+        self.shooters.insert(
+            shooter_peer_id,
+            AuthorityShooter {
+                kernel,
+                last_command_tick,
+            },
+        );
+        true
+    }
+
     /// Immutable shooter kernel for snapshots/tests.
     #[must_use]
     pub fn shooter_kernel(&self, shooter_peer_id: PlayerId) -> Option<&CombatKernel> {

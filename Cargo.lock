@@ -3510,6 +3510,7 @@ dependencies = [
  "rustscale-tsnet",
  "serde",
  "serde_json",
+ "sha2",
  "spurfire-protocol",
  "tempfile",
  "thiserror 2.0.18",

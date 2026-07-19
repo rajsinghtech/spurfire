@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 //! Bounded, transport-independent peer-session protocol for Spurfire.
 
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     canonical_envelope_digest, canonical_manifest_digest, LobbyId, NodeKey, PlayerId, RiderStance,
     RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
@@ -19,6 +23,8 @@ pub mod rustscale;
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 3_000;
 pub const RECONNECT_GRACE_MS: u64 = 5_000;
+/// Maximum invited-friends roster represented by one M2 checkpoint.
+pub const MAX_CHECKPOINT_RIDERS: usize = 16;
 /// Existing mounted-jump edge bit, now formally assigned.
 pub const RIDER_INPUT_JUMP_PRESSED: u16 = 1 << 0;
 /// M2 dismount/remount E edge bit.
@@ -26,6 +32,75 @@ pub const RIDER_INPUT_INTERACT_PRESSED: u16 = 1 << 1;
 /// Every other input bit is reserved and must remain zero in wire 1.1.
 pub const RIDER_INPUT_RESERVED_MASK: u16 =
     !(RIDER_INPUT_JUMP_PRESSED | RIDER_INPUT_INTERACT_PRESSED);
+
+/// Bounded authority-owned state retained by every peer for migration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiderCheckpoint {
+    #[serde(rename = "p", alias = "rider_player_id")]
+    pub rider_player_id: PlayerId,
+    #[serde(rename = "x", alias = "position_mm")]
+    pub position_mm: [i32; 3],
+    #[serde(rename = "v", alias = "velocity_mmps")]
+    pub velocity_mmps: [i32; 3],
+    #[serde(rename = "y", alias = "yaw_millidegrees")]
+    pub yaw_millidegrees: i32,
+    #[serde(rename = "s", alias = "stance")]
+    pub stance: RiderStance,
+    #[serde(rename = "h", alias = "health")]
+    pub health: u16,
+    #[serde(rename = "w", alias = "weapon_id")]
+    pub weapon_id: u8,
+    #[serde(rename = "m", alias = "ammo_magazine")]
+    pub ammo_magazine: u16,
+    #[serde(rename = "r", alias = "ammo_reserve")]
+    pub ammo_reserve: u16,
+    #[serde(rename = "i", alias = "last_input_tick")]
+    pub last_input_tick: u64,
+    #[serde(rename = "f", alias = "last_shot_tick")]
+    pub last_shot_tick: Option<u64>,
+}
+
+/// Complete bounded M2 handoff. Combat receipts prevent damage/ammo replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchCheckpoint {
+    #[serde(rename = "e", alias = "source_epoch")]
+    pub source_epoch: u64,
+    #[serde(rename = "t", alias = "tick")]
+    pub tick: u64,
+    #[serde(rename = "r", alias = "riders")]
+    pub riders: Vec<RiderCheckpoint>,
+    #[serde(rename = "d", alias = "resolved_shots")]
+    pub resolved_shots: Vec<(PlayerId, u64)>,
+}
+
+impl MatchCheckpoint {
+    #[must_use]
+    pub fn hash(&self) -> [u8; 32] {
+        let bytes = serde_json::to_vec(self).expect("checkpoint serialization cannot fail");
+        Sha256::digest(bytes).into()
+    }
+
+    #[must_use]
+    pub fn is_bounded_and_canonical(&self) -> bool {
+        if self.riders.is_empty()
+            || self.riders.len() > MAX_CHECKPOINT_RIDERS
+            || self.resolved_shots.len() > MAX_CHECKPOINT_RIDERS * 64
+            || self
+                .riders
+                .iter()
+                .any(|rider| !rider.stance.is_canonical() || rider.weapon_id > 2)
+        {
+            return false;
+        }
+        let rider_ids = self
+            .riders
+            .iter()
+            .map(|rider| rider.rider_player_id)
+            .collect::<BTreeSet<_>>();
+        let receipts = self.resolved_shots.iter().copied().collect::<BTreeSet<_>>();
+        rider_ids.len() == self.riders.len() && receipts.len() == self.resolved_shots.len()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -44,6 +119,10 @@ pub enum PeerPayload {
         buttons: u16,
     },
     RiderSnapshot {
+        /// Authority-owned actor represented by this snapshot. Pre-1.2 packets
+        /// are rebound to the envelope sender during decode.
+        #[serde(default = "legacy_snapshot_subject")]
+        rider_player_id: PlayerId,
         position_mm: [i32; 3],
         velocity_mmps: [i32; 3],
         yaw_millidegrees: i32,
@@ -62,10 +141,14 @@ pub enum PeerPayload {
         epoch: u64,
     },
     MigrationSnapshot {
+        #[serde(rename = "a")]
         authority: PlayerId,
+        #[serde(rename = "e")]
         epoch: u64,
-        tick: u64,
-        state_hash: String,
+        #[serde(rename = "c")]
+        checkpoint: MatchCheckpoint,
+        #[serde(rename = "h")]
+        state_hash: [u8; 32],
     },
     Leave,
 }
@@ -74,6 +157,11 @@ pub enum PeerPayload {
 #[must_use]
 pub const fn legacy_mounted_stance() -> RiderStance {
     RiderStance::Mounted
+}
+
+fn legacy_snapshot_subject() -> PlayerId {
+    PlayerId::parse("ffffffff-ffff-4fff-bfff-ffffffffffff")
+        .expect("legacy snapshot sentinel is a UUIDv4")
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,10 +202,20 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
     if bytes.len() > MAX_DATAGRAM_BYTES {
         return Err(CodecError::TooLarge);
     }
-    let envelope: Envelope =
+    let mut envelope: Envelope =
         serde_json::from_slice(bytes).map_err(|error| CodecError::Malformed(error.to_string()))?;
     if !CURRENT_WIRE_VERSION.is_compatible_with(envelope.wire_version) {
         return Err(CodecError::IncompatibleVersion);
+    }
+    if envelope.wire_version.minor() < 2 {
+        if let PeerPayload::RiderSnapshot {
+            rider_player_id, ..
+        } = &mut envelope.payload
+        {
+            if *rider_player_id == legacy_snapshot_subject() {
+                *rider_player_id = envelope.sender;
+            }
+        }
     }
     validate_remote_payload(&envelope.payload, envelope.wire_version)?;
     Ok(envelope)
@@ -184,6 +282,9 @@ pub enum AcceptOutcome {
     BadSignature,
     InvalidAuthorityClaim,
     InvalidPayloadRole,
+    InvalidPayloadSubject,
+    InvalidCheckpoint,
+    DuplicateShotResult,
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +303,8 @@ pub struct SessionState {
     authority_epoch: u64,
     next_sequence: u64,
     peers: BTreeMap<PlayerId, PeerState>,
+    applied_shot_results: BTreeSet<(u64, PlayerId, u64)>,
+    checkpoint: Option<MatchCheckpoint>,
 }
 
 impl SessionState {
@@ -227,6 +330,8 @@ impl SessionState {
             authority_epoch: 1,
             next_sequence: 1,
             peers,
+            applied_shot_results: BTreeSet::new(),
+            checkpoint: None,
         }
     }
 
@@ -237,6 +342,16 @@ impl SessionState {
     #[must_use]
     pub const fn authority_epoch(&self) -> u64 {
         self.authority_epoch
+    }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&MatchCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
+    #[must_use]
+    pub fn has_applied_shot_result(&self, epoch: u64, shooter: PlayerId, tick: u64) -> bool {
+        self.applied_shot_results.contains(&(epoch, shooter, tick))
     }
 
     pub fn add_peer(&mut self, player: PlayerId, now_ms: u64) {
@@ -293,13 +408,64 @@ impl SessionState {
         {
             return AcceptOutcome::InvalidPayloadRole;
         }
-        // A rider may submit only its own command identity.
+        // Subject and tick bindings are checked before replay/liveness mutation.
         if matches!(
             envelope.payload,
             PeerPayload::ShotCommand { ref command }
                 if command.shooter_peer_id != envelope.sender
+                    || command.tick.as_u64() != envelope.simulation_tick
         ) {
-            return AcceptOutcome::InvalidPayloadRole;
+            return AcceptOutcome::InvalidPayloadSubject;
+        }
+        if matches!(
+            envelope.payload,
+            PeerPayload::ShotResult { ref result }
+                if result.tick.as_u64() != envelope.simulation_tick
+                    || !self.peers.contains_key(&result.shooter_peer_id)
+        ) {
+            return AcceptOutcome::InvalidPayloadSubject;
+        }
+        if matches!(
+            envelope.payload,
+            PeerPayload::RiderSnapshot { rider_player_id, .. }
+                if !self.peers.contains_key(&rider_player_id)
+        ) {
+            return AcceptOutcome::InvalidPayloadSubject;
+        }
+        if matches!(
+            envelope.payload,
+            PeerPayload::ShotResult { ref result }
+                if self.applied_shot_results.contains(&(
+                    envelope.authority_epoch,
+                    result.shooter_peer_id,
+                    result.tick.as_u64(),
+                ))
+        ) {
+            return AcceptOutcome::DuplicateShotResult;
+        }
+        if let PeerPayload::MigrationSnapshot {
+            authority,
+            epoch,
+            ref checkpoint,
+            state_hash,
+        } = envelope.payload
+        {
+            let expected_epoch = checkpoint.source_epoch.checked_add(1);
+            let epoch_window = checkpoint.source_epoch == self.authority_epoch
+                || (expected_epoch == Some(self.authority_epoch) && epoch == self.authority_epoch);
+            if authority != envelope.sender
+                || expected_epoch != Some(epoch)
+                || !epoch_window
+                || checkpoint.tick != envelope.simulation_tick
+                || checkpoint.hash() != state_hash
+                || !checkpoint.is_bounded_and_canonical()
+                || checkpoint
+                    .riders
+                    .iter()
+                    .any(|rider| !self.peers.contains_key(&rider.rider_player_id))
+            {
+                return AcceptOutcome::InvalidCheckpoint;
+            }
         }
         if envelope.sequence <= self.peers[&envelope.sender].last_sequence {
             return AcceptOutcome::DuplicateOrReplay;
@@ -322,6 +488,22 @@ impl SessionState {
         peer.last_sequence = envelope.sequence;
         peer.last_seen_ms = now_ms;
         peer.connected = !matches!(envelope.payload, PeerPayload::Leave);
+        if let PeerPayload::ShotResult { ref result } = envelope.payload {
+            self.applied_shot_results.insert((
+                envelope.authority_epoch,
+                result.shooter_peer_id,
+                result.tick.as_u64(),
+            ));
+        }
+        if let PeerPayload::MigrationSnapshot { ref checkpoint, .. } = envelope.payload {
+            self.applied_shot_results.extend(
+                checkpoint
+                    .resolved_shots
+                    .iter()
+                    .map(|(shooter, tick)| (checkpoint.source_epoch, *shooter, *tick)),
+            );
+            self.checkpoint = Some(checkpoint.clone());
+        }
         if let PeerPayload::Authority { authority, epoch }
         | PeerPayload::MigrationSnapshot {
             authority, epoch, ..
@@ -364,7 +546,7 @@ impl SessionState {
         if epoch == self.authority_epoch {
             return authority <= self.authority;
         }
-        if epoch != self.authority_epoch.saturating_add(1) {
+        if self.authority_epoch.checked_add(1) != Some(epoch) {
             return false;
         }
         self.authority != self.local_player
@@ -395,8 +577,9 @@ impl SessionState {
             .iter()
             .filter_map(|(id, peer)| peer.connected.then_some(*id))
             .min()?;
+        let next_epoch = self.authority_epoch.checked_add(1)?;
         self.authority = successor;
-        self.authority_epoch = self.authority_epoch.saturating_add(1);
+        self.authority_epoch = next_epoch;
         Some((successor, self.authority_epoch))
     }
 }
@@ -446,6 +629,24 @@ impl SecureSession {
         payload: PeerPayload,
         signing_key: &SigningKey,
     ) -> Result<Envelope, SessionIdentityError> {
+        if matches!(
+            payload,
+            PeerPayload::RiderSnapshot { .. } | PeerPayload::ShotResult { .. }
+        ) && self.state.local_player != self.state.authority
+        {
+            return Err(SessionIdentityError::BadSignature);
+        }
+        if matches!(
+            payload,
+            PeerPayload::ShotCommand { ref command }
+                if command.shooter_peer_id != self.state.local_player
+                    || command.tick.as_u64() != tick
+        ) || matches!(
+            payload,
+            PeerPayload::ShotResult { ref result } if result.tick.as_u64() != tick
+        ) {
+            return Err(SessionIdentityError::BadSignature);
+        }
         let mut envelope = self.state.envelope(tick, payload);
         self.sign(&mut envelope, signing_key)?;
         Ok(envelope)
@@ -601,12 +802,14 @@ pub fn canonical_payload_bytes(payload: &PeerPayload) -> Vec<u8> {
             out.extend_from_slice(&buttons.to_be_bytes());
         }
         PeerPayload::RiderSnapshot {
+            rider_player_id,
             position_mm,
             velocity_mmps,
             yaw_millidegrees,
             stance,
         } => {
             out.push(4);
+            out.extend_from_slice(rider_player_id.as_bytes());
             for value in position_mm.iter().chain(velocity_mmps) {
                 out.extend_from_slice(&value.to_be_bytes());
             }
@@ -666,14 +869,18 @@ pub fn canonical_payload_bytes(payload: &PeerPayload) -> Vec<u8> {
         PeerPayload::MigrationSnapshot {
             authority,
             epoch,
-            tick,
+            checkpoint,
             state_hash,
         } => {
             out.push(8);
             out.extend_from_slice(authority.as_bytes());
             out.extend_from_slice(&epoch.to_be_bytes());
-            out.extend_from_slice(&tick.to_be_bytes());
-            string(&mut out, state_hash);
+            out.extend_from_slice(&checkpoint.source_epoch.to_be_bytes());
+            out.extend_from_slice(&checkpoint.tick.to_be_bytes());
+            out.extend_from_slice(&state_hash[..]);
+            out.extend_from_slice(
+                &serde_json::to_vec(checkpoint).expect("checkpoint serialization cannot fail"),
+            );
         }
         PeerPayload::Leave => out.push(9),
     }
@@ -820,18 +1027,17 @@ mod tests {
     fn signed_non_authority_snapshot_is_rejected_before_replay_mutation() {
         let (mut sender, sender_key, source) = secure_fixture(player(2));
         let (mut receiver, _, _) = secure_fixture(player(1));
-        let signed = sender
-            .envelope(
-                1,
-                PeerPayload::RiderSnapshot {
-                    position_mm: [1, 2, 3],
-                    velocity_mmps: [4, 5, 6],
-                    yaw_millidegrees: 7_000,
-                    stance: RiderStance::Mounted,
-                },
-                &sender_key,
-            )
+        let mut signed = sender
+            .envelope(1, PeerPayload::Heartbeat, &sender_key)
             .unwrap();
+        signed.payload = PeerPayload::RiderSnapshot {
+            rider_player_id: player(2),
+            position_mm: [1, 2, 3],
+            velocity_mmps: [4, 5, 6],
+            yaw_millidegrees: 7_000,
+            stance: RiderStance::Mounted,
+        };
+        sender.sign(&mut signed, &sender_key).unwrap();
         let before = receiver.state().peers[&player(2)].clone();
         assert_eq!(
             receiver.accept_with_source(&signed, source, None, 10),
@@ -1083,6 +1289,7 @@ mod tests {
         ));
 
         let new = envelope(PeerPayload::RiderSnapshot {
+            rider_player_id: player(2),
             position_mm: [1, 2, 3],
             velocity_mmps: [4, 5, 6],
             yaw_millidegrees: 7_000,
@@ -1130,6 +1337,7 @@ mod tests {
             RiderStance::Unknown(255),
         ] {
             let original = envelope(PeerPayload::RiderSnapshot {
+                rider_player_id: player(2),
                 position_mm: [0; 3],
                 velocity_mmps: [0; 3],
                 yaw_millidegrees: 0,
@@ -1139,6 +1347,7 @@ mod tests {
         }
 
         let base = serde_json::to_value(envelope(PeerPayload::RiderSnapshot {
+            rider_player_id: player(2),
             position_mm: [0; 3],
             velocity_mmps: [0; 3],
             yaw_millidegrees: 0,
@@ -1201,6 +1410,7 @@ mod tests {
                 buttons: RIDER_INPUT_JUMP_PRESSED | RIDER_INPUT_INTERACT_PRESSED,
             },
             PeerPayload::RiderSnapshot {
+                rider_player_id: player(2),
                 position_mm: [i32::MAX, i32::MIN, 0],
                 velocity_mmps: [i32::MIN, i32::MAX, 0],
                 yaw_millidegrees: i32::MAX,
@@ -1214,9 +1424,26 @@ mod tests {
             },
             PeerPayload::MigrationSnapshot {
                 authority: player(1),
-                epoch: u64::MAX,
-                tick: u64::MAX,
-                state_hash: "f".repeat(64),
+                epoch: 2,
+                checkpoint: MatchCheckpoint {
+                    source_epoch: 1,
+                    tick: u64::MAX,
+                    riders: vec![RiderCheckpoint {
+                        rider_player_id: player(2),
+                        position_mm: [i32::MAX, i32::MIN, 0],
+                        velocity_mmps: [i32::MIN, i32::MAX, 0],
+                        yaw_millidegrees: i32::MAX,
+                        stance: RiderStance::Mounted,
+                        health: 100,
+                        weapon_id: 0,
+                        ammo_magazine: 6,
+                        ammo_reserve: 24,
+                        last_input_tick: u64::MAX,
+                        last_shot_tick: Some(u64::MAX),
+                    }],
+                    resolved_shots: vec![],
+                },
+                state_hash: [0xf; 32],
             },
             PeerPayload::Leave,
         ];
@@ -1276,9 +1503,114 @@ mod tests {
     }
 
     #[test]
+    fn shot_results_are_subject_bound_and_applied_once_across_sequences() {
+        use spurfire_protocol::{ShotOutcome, SimulationTick, WeaponId};
+        let result = ShotResult {
+            tick: SimulationTick::new(42),
+            shooter_peer_id: player(2),
+            weapon_id: WeaponId::Dustwalker,
+            outcome: ShotOutcome::Miss,
+            rejection_reason: None,
+            resolved_direction: None,
+            target_id: None,
+            hit_zone: None,
+            damage: 0,
+            distance_mm: None,
+            eliminated: false,
+        };
+        let mut session = SessionState::new(lobby(), player(2), player(1), 0);
+        session.add_peer(player(1), 0);
+        let packet = Envelope {
+            wire_version: CURRENT_WIRE_VERSION,
+            lobby_id: lobby(),
+            sender: player(1),
+            sequence: 1,
+            authority_epoch: 1,
+            simulation_tick: 42,
+            payload: PeerPayload::ShotResult {
+                result: result.clone(),
+            },
+            session: None,
+        };
+        assert_eq!(session.accept(&packet, 1), AcceptOutcome::Accepted);
+        assert!(session.has_applied_shot_result(1, player(2), 42));
+        let mut duplicate = packet.clone();
+        duplicate.sequence = 2;
+        assert_eq!(
+            session.accept(&duplicate, 2),
+            AcceptOutcome::DuplicateShotResult
+        );
+        let mut forged_subject = packet;
+        forged_subject.sequence = 3;
+        if let PeerPayload::ShotResult { result } = &mut forged_subject.payload {
+            result.shooter_peer_id = player(3);
+        }
+        assert_eq!(
+            session.accept(&forged_subject, 3),
+            AcceptOutcome::InvalidPayloadSubject
+        );
+    }
+
+    #[test]
+    fn migration_checkpoint_installs_atomically_and_advances_exactly_one_epoch() {
+        let checkpoint = MatchCheckpoint {
+            source_epoch: 1,
+            tick: 180,
+            riders: vec![RiderCheckpoint {
+                rider_player_id: player(2),
+                position_mm: [2_000, 0, 3_000],
+                velocity_mmps: [500, 0, 750],
+                yaw_millidegrees: 45_000,
+                stance: RiderStance::Mounted,
+                health: 72,
+                weapon_id: 0,
+                ammo_magazine: 3,
+                ammo_reserve: 18,
+                last_input_tick: 179,
+                last_shot_tick: Some(170),
+            }],
+            resolved_shots: vec![(player(2), 170)],
+        };
+        let packet = |hash| Envelope {
+            wire_version: CURRENT_WIRE_VERSION,
+            lobby_id: lobby(),
+            sender: player(2),
+            sequence: 1,
+            authority_epoch: 2,
+            simulation_tick: 180,
+            payload: PeerPayload::MigrationSnapshot {
+                authority: player(2),
+                epoch: 2,
+                checkpoint: checkpoint.clone(),
+                state_hash: hash,
+            },
+            session: None,
+        };
+        let mut session = SessionState::new(lobby(), player(3), player(1), 0);
+        session.add_peer(player(2), 0);
+        session.add_peer(player(3), 3_000);
+        let before = session.clone();
+        assert_eq!(
+            session.accept(&packet([0; 32]), HEARTBEAT_TIMEOUT_MS),
+            AcceptOutcome::InvalidCheckpoint
+        );
+        assert_eq!(session.authority(), before.authority());
+        assert!(session.checkpoint().is_none());
+        assert_eq!(
+            session.accept(&packet(checkpoint.hash()), HEARTBEAT_TIMEOUT_MS),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(session.authority(), player(2));
+        assert_eq!(session.authority_epoch(), 2);
+        assert_eq!(session.checkpoint(), Some(&checkpoint));
+        assert!(session.has_applied_shot_result(1, player(2), 170));
+    }
+
+    #[test]
     fn noncanonical_unknown_stance_aliases_are_rejected_before_transport() {
         for known_id in RiderStance::MOUNTED_ID..=RiderStance::ON_FOOT_STANDING_ID {
             let aliased = envelope(PeerPayload::RiderSnapshot {
+                rider_player_id: player(2),
                 position_mm: [0; 3],
                 velocity_mmps: [0; 3],
                 yaw_millidegrees: 0,
