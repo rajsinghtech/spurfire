@@ -499,6 +499,7 @@ impl PeerSession {
                         .lobby_client
                         .copy_invitation(&lobby_id, &invitation)
                         .is_ok()
+                    {
                         self.signals()
                             .invitation_copied()
                             .emit(&GString::from(&lobby_id));
