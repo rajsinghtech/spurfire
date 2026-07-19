@@ -431,8 +431,17 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Assert exact source
-        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Assert exact source and current main head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          current_main="$(git ls-remote --exit-code "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | awk 'NR == 1 { print $1 }')"
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          test "$current_main" = "$GITHUB_SHA" || {
+            echo "refusing to publish stale main commit $GITHUB_SHA; current main is $current_main" >&2
+            exit 1
+          }
 
       - name: Download native digest records
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
