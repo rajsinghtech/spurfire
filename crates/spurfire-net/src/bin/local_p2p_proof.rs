@@ -3,12 +3,12 @@ use std::{
     env,
     error::Error,
     fmt,
-    io::{self, BufRead, BufReader, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
+    io::{self, BufReader, Read, Write},
+    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     process::{Child, Command, Stdio},
     str::FromStr,
     sync::mpsc::{self, Receiver, RecvTimeoutError},
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -28,12 +28,17 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 const PROOF_TIMEOUT: Duration = Duration::from_secs(20);
 const UDP_TIMEOUT: Duration = Duration::from_millis(25);
 const SEND_INTERVAL: Duration = Duration::from_millis(75);
+const CONTROL_HEADER_BYTES: usize = size_of::<u32>();
+const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
 
 type ProofResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+type ReaderHandles = BTreeMap<Node, JoinHandle<ProofResult<()>>>;
+type ActiveControl = (BTreeMap<Node, TcpStream>, Receiver<Notice>, ReaderHandles);
 type StartedScenario = (
     Vec<PeerProcess>,
     BTreeMap<Node, TcpStream>,
     Receiver<Notice>,
+    ReaderHandles,
 );
 
 fn proof_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
@@ -190,6 +195,10 @@ enum ControlMessage {
         authority: Node,
         epoch: u64,
     },
+    Quiesce,
+    Quiesced {
+        node: Node,
+    },
     Stop,
 }
 
@@ -209,8 +218,15 @@ struct EventRecord {
 
 enum Notice {
     Event(EventRecord),
+    Quiesced(Node),
     Closed(Node),
     Failed(Node, String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentCommand {
+    Quiesce,
+    Stop,
 }
 
 struct ReadyConnection {
@@ -225,19 +241,53 @@ struct PeerProcess {
     child: Option<Child>,
 }
 
-fn send_control(stream: &mut TcpStream, message: &ControlMessage) -> ProofResult<()> {
-    serde_json::to_writer(&mut *stream, message)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+fn encode_control_frame(message: &ControlMessage) -> ProofResult<Vec<u8>> {
+    let payload = serde_json::to_vec(message)?;
+    if payload.len() > MAX_CONTROL_FRAME_BYTES {
+        return Err(proof_error("control frame exceeds the application limit"));
+    }
+    let length = u32::try_from(payload.len())?;
+    let mut frame = Vec::with_capacity(CONTROL_HEADER_BYTES + payload.len());
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+fn send_control<W: Write>(writer: &mut W, message: &ControlMessage) -> ProofResult<()> {
+    let frame = encode_control_frame(message)?;
+    // Build the complete application frame before the sole write_all call. A
+    // successful return therefore means no lifecycle transition can bisect it.
+    writer.write_all(&frame)?;
+    writer.flush()?;
     Ok(())
 }
 
-fn read_control(reader: &mut BufReader<TcpStream>) -> ProofResult<Option<ControlMessage>> {
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Ok(None);
+fn read_control<R: Read>(reader: &mut R) -> ProofResult<Option<ControlMessage>> {
+    let mut header = [0_u8; CONTROL_HEADER_BYTES];
+    loop {
+        match reader.read(&mut header[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    Ok(Some(serde_json::from_str(line.trim_end())?))
+    reader
+        .read_exact(&mut header[1..])
+        .map_err(|error| proof_error(format!("truncated control frame header: {error}")))?;
+    let length = usize::try_from(u32::from_be_bytes(header))?;
+    if length > MAX_CONTROL_FRAME_BYTES {
+        return Err(proof_error(format!(
+            "control frame length {length} exceeds limit {MAX_CONTROL_FRAME_BYTES}"
+        )));
+    }
+    let mut payload = vec![0_u8; length];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|error| proof_error(format!("truncated control frame body: {error}")))?;
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|error| proof_error(format!("invalid complete control frame: {error}")))
 }
 
 fn spawn_peers(scenario: Scenario, control: SocketAddr) -> ProofResult<Vec<PeerProcess>> {
@@ -374,61 +424,127 @@ fn config_for(
     })
 }
 
+fn notice_from_control(
+    expected_node: Node,
+    message: ControlMessage,
+    terminal_frame_seen: &mut bool,
+) -> ProofResult<Notice> {
+    if *terminal_frame_seen {
+        return Err(proof_error(
+            "peer sent a frame after its lifecycle acknowledgment",
+        ));
+    }
+    match message {
+        ControlMessage::Event {
+            node,
+            kind,
+            authority,
+            epoch,
+        } if node == expected_node => {
+            *terminal_frame_seen = kind == EventKind::Done;
+            Ok(Notice::Event(EventRecord {
+                node,
+                kind,
+                authority,
+                epoch,
+            }))
+        }
+        ControlMessage::Quiesced { node } if node == expected_node => {
+            *terminal_frame_seen = true;
+            Ok(Notice::Quiesced(node))
+        }
+        _ => Err(proof_error("peer sent an invalid control event")),
+    }
+}
+
 fn start_event_readers(
     mut connections: BTreeMap<Node, ReadyConnection>,
     config: &ControlMessage,
-) -> ProofResult<(BTreeMap<Node, TcpStream>, Receiver<Notice>)> {
+) -> ProofResult<ActiveControl> {
     let (sender, receiver) = mpsc::channel();
     let mut writers = BTreeMap::new();
-    for (node, mut connection) in std::mem::take(&mut connections) {
-        if node != connection.node {
+    let mut readers = BTreeMap::new();
+    for (node, connection) in &connections {
+        if *node != connection.node {
             return Err(proof_error("ready connection node mismatch"));
         }
+    }
+    // Complete every fallible setup operation before spawning a reader. This
+    // ensures an initialization failure cannot leave a detached reader behind.
+    for connection in connections.values_mut() {
         send_control(&mut connection.writer, config)?;
         connection.writer.set_read_timeout(None)?;
+    }
+    for (node, connection) in std::mem::take(&mut connections) {
         let mut reader = connection.reader;
         let event_sender = sender.clone();
-        thread::spawn(move || loop {
-            match read_control(&mut reader) {
-                Ok(Some(ControlMessage::Event {
-                    node: event_node,
-                    kind,
-                    authority,
-                    epoch,
-                })) if event_node == node => {
-                    if event_sender
-                        .send(Notice::Event(EventRecord {
-                            node,
-                            kind,
-                            authority,
-                            epoch,
-                        }))
-                        .is_err()
-                    {
-                        return;
+        let handle = thread::spawn(move || {
+            let mut terminal_frame_seen = false;
+            loop {
+                let message = match read_control(&mut reader) {
+                    Ok(Some(message)) => message,
+                    Ok(None) => {
+                        let _ = event_sender.send(Notice::Closed(node));
+                        return Ok(());
                     }
-                }
-                Ok(Some(_)) => {
-                    let _ = event_sender.send(Notice::Failed(
-                        node,
-                        "peer sent an invalid control event".to_owned(),
-                    ));
-                    return;
-                }
-                Ok(None) => {
-                    let _ = event_sender.send(Notice::Closed(node));
-                    return;
-                }
-                Err(error) => {
-                    let _ = event_sender.send(Notice::Failed(node, error.to_string()));
-                    return;
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = event_sender.send(Notice::Failed(node, message.clone()));
+                        return Err(proof_error(message));
+                    }
+                };
+                match notice_from_control(node, message, &mut terminal_frame_seen) {
+                    Ok(notice) => {
+                        if event_sender.send(notice).is_err() {
+                            return Err(proof_error("proof event receiver disconnected"));
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = event_sender.send(Notice::Failed(node, message.clone()));
+                        return Err(proof_error(message));
+                    }
                 }
             }
         });
+        readers.insert(node, handle);
         writers.insert(node, connection.writer);
     }
     drop(sender);
-    Ok((writers, receiver))
+    Ok((writers, receiver, readers))
+}
+
+fn close_writers(writers: &mut BTreeMap<Node, TcpStream>) {
+    for writer in writers.values() {
+        let _ = writer.shutdown(Shutdown::Write);
+    }
+    writers.clear();
+}
+
+fn join_reader(
+    readers: &mut BTreeMap<Node, JoinHandle<ProofResult<()>>>,
+    node: Node,
+) -> ProofResult<()> {
+    let handle = readers
+        .remove(&node)
+        .ok_or_else(|| proof_error(format!("missing control reader for peer {node}")))?;
+    handle
+        .join()
+        .map_err(|_| proof_error(format!("peer {node} control reader panicked")))?
+}
+
+fn join_readers(readers: &mut BTreeMap<Node, JoinHandle<ProofResult<()>>>) -> ProofResult<()> {
+    let mut first_error = None;
+    for node in [Node::A, Node::B, Node::C] {
+        if readers.contains_key(&node) {
+            if let Err(error) = join_reader(readers, node) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn validate_event(scenario: Scenario, event: EventRecord) -> ProofResult<EventKey> {
@@ -474,6 +590,11 @@ fn collect_until(
             Ok(Notice::Event(event)) => {
                 seen.insert(validate_event(scenario, event)?);
             }
+            Ok(Notice::Quiesced(node)) => {
+                return Err(proof_error(format!(
+                    "peer {node} quiesced while proof events were still required"
+                )));
+            }
             Ok(Notice::Closed(node)) => {
                 if required.difference(seen).any(|event| event.node == node) {
                     return Err(proof_error(format!(
@@ -495,6 +616,51 @@ fn collect_until(
         }
     }
     Ok(())
+}
+
+fn wait_for_quiesced(
+    scenario: Scenario,
+    receiver: &Receiver<Notice>,
+    node: Node,
+    seen: &mut BTreeSet<EventKey>,
+    timeout: Duration,
+) -> ProofResult<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(proof_error(format!(
+                "timed out waiting for peer {node} quiesced"
+            )));
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(Notice::Event(event)) => {
+                seen.insert(validate_event(scenario, event)?);
+            }
+            Ok(Notice::Quiesced(quiesced)) if quiesced == node => return Ok(()),
+            Ok(Notice::Quiesced(quiesced)) => {
+                return Err(proof_error(format!("unexpected peer {quiesced} quiesced")));
+            }
+            Ok(Notice::Closed(closed)) => {
+                return Err(proof_error(format!(
+                    "peer {closed} closed before peer {node} quiesced"
+                )));
+            }
+            Ok(Notice::Failed(failed, message)) => {
+                return Err(proof_error(format!(
+                    "peer {failed} control failure: {message}"
+                )));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(proof_error(format!(
+                    "timed out waiting for peer {node} quiesced"
+                )));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(proof_error("all proof event channels disconnected"));
+            }
+        }
+    }
 }
 
 fn wait_for_success(peers: &mut [PeerProcess], expected_killed: Option<Node>) -> ProofResult<()> {
@@ -527,7 +693,7 @@ fn start_scenario(scenario: Scenario) -> ProofResult<StartedScenario> {
         start_event_readers(connections, &config)
     })();
     match result {
-        Ok((writers, receiver)) => Ok((peers, writers, receiver)),
+        Ok((writers, receiver, readers)) => Ok((peers, writers, receiver, readers)),
         Err(error) => {
             terminate_peers(&mut peers);
             Err(error)
@@ -536,7 +702,7 @@ fn start_scenario(scenario: Scenario) -> ProofResult<StartedScenario> {
 }
 
 fn run_two_peer_proof() -> ProofResult<()> {
-    let (mut peers, _writers, receiver) = start_scenario(Scenario::TwoPeer)?;
+    let (mut peers, mut writers, receiver, mut readers) = start_scenario(Scenario::TwoPeer)?;
     let result = (|| {
         let required = BTreeSet::from([
             EventKey {
@@ -584,13 +750,17 @@ fn run_two_peer_proof() -> ProofResult<()> {
             PROOF_TIMEOUT,
         )?;
         wait_for_success(&mut peers, None)?;
+        close_writers(&mut writers);
+        join_readers(&mut readers)?;
         println!(
             "SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true combat=authority_once result_dedup=true authority=a epoch=1"
         );
         Ok(())
     })();
     if result.is_err() {
+        close_writers(&mut writers);
         terminate_peers(&mut peers);
+        let _ = join_readers(&mut readers);
     }
     result
 }
@@ -614,7 +784,7 @@ fn kill_peer(peers: &mut [PeerProcess], node: Node) -> ProofResult<()> {
 }
 
 fn run_migration_proof() -> ProofResult<()> {
-    let (mut peers, mut writers, receiver) = start_scenario(Scenario::Migration)?;
+    let (mut peers, mut writers, receiver, mut readers) = start_scenario(Scenario::Migration)?;
     let result = (|| {
         let mesh = BTreeSet::from([
             EventKey {
@@ -634,7 +804,22 @@ fn run_migration_proof() -> ProofResult<()> {
             &mut seen,
             CONTROL_TIMEOUT,
         )?;
+        let authority_writer = writers
+            .get_mut(&Node::A)
+            .ok_or_else(|| proof_error("missing control writer for authority peer a"))?;
+        send_control(authority_writer, &ControlMessage::Quiesce)?;
+        wait_for_quiesced(
+            Scenario::Migration,
+            &receiver,
+            Node::A,
+            &mut seen,
+            CONTROL_TIMEOUT,
+        )?;
         kill_peer(&mut peers, Node::A)?;
+        if let Some(writer) = writers.remove(&Node::A) {
+            writer.shutdown(Shutdown::Write)?;
+        }
+        join_reader(&mut readers, Node::A)?;
 
         let migrated = BTreeSet::from([
             EventKey {
@@ -701,13 +886,17 @@ fn run_migration_proof() -> ProofResult<()> {
             CONTROL_TIMEOUT,
         )?;
         wait_for_success(&mut peers, None)?;
+        close_writers(&mut writers);
+        join_readers(&mut readers)?;
         println!(
             "SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c checkpoint=hash_checked riders=2 combat_receipts=retained continued_play=true"
         );
         Ok(())
     })();
     if result.is_err() {
+        close_writers(&mut writers);
         terminate_peers(&mut peers);
+        let _ = join_readers(&mut readers);
     }
     result
 }
@@ -1057,18 +1246,42 @@ fn run_two_peer_child(
     Ok(())
 }
 
-fn start_stop_reader(mut reader: BufReader<TcpStream>) -> Receiver<ProofResult<()>> {
+fn start_command_reader(mut reader: BufReader<TcpStream>) -> Receiver<ProofResult<ParentCommand>> {
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    thread::spawn(move || loop {
         let result = match read_control(&mut reader) {
-            Ok(Some(ControlMessage::Stop)) => Ok(()),
+            Ok(Some(ControlMessage::Quiesce)) => Ok(ParentCommand::Quiesce),
+            Ok(Some(ControlMessage::Stop)) => Ok(ParentCommand::Stop),
             Ok(Some(_)) => Err(proof_error("unexpected parent control message")),
-            Ok(None) => Err(proof_error("parent closed before stopping the proof")),
+            Ok(None) => Err(proof_error("parent closed before a lifecycle command")),
             Err(error) => Err(error),
         };
-        let _ = sender.send(result);
+        let terminal = result.is_err();
+        if sender.send(result).is_err() || terminal {
+            return;
+        }
     });
     receiver
+}
+
+fn await_kill_after_quiesce(
+    commands: &Receiver<ProofResult<ParentCommand>>,
+    deadline: Instant,
+) -> ProofResult<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(proof_error("authority was not killed after quiescing"));
+    }
+    match commands.recv_timeout(remaining) {
+        Ok(Ok(_)) => Err(proof_error("authority received a command after quiescing")),
+        Ok(Err(error)) => Err(error),
+        Err(RecvTimeoutError::Timeout) => {
+            Err(proof_error("authority was not killed after quiescing"))
+        }
+        Err(RecvTimeoutError::Disconnected) => Err(proof_error(
+            "authority control reader disconnected after quiescing",
+        )),
+    }
 }
 
 fn migration_payload(
@@ -1162,7 +1375,7 @@ fn run_migration_child(
     signing_key: SigningKey,
     manifest: RosterManifest,
 ) -> ProofResult<()> {
-    let stop = start_stop_reader(reader);
+    let commands = start_command_reader(reader);
     let started = Instant::now();
     let mut last_send = started;
     let mut send_index = 0_u64;
@@ -1177,9 +1390,20 @@ fn run_migration_child(
     let mut snapshot_accepted = false;
 
     loop {
-        match stop.try_recv() {
-            Ok(result) => {
-                result?;
+        match commands.try_recv() {
+            Ok(Ok(ParentCommand::Quiesce)) if node == Node::A => {
+                send_control(&mut writer, &ControlMessage::Quiesced { node })?;
+                // The migration loop owns the sole writer. Once the flushed
+                // acknowledgment is sent, it enters a permanent no-write state
+                // and only the parent's forced process kill can end the proof.
+                return await_kill_after_quiesce(&commands, started + PROOF_TIMEOUT);
+            }
+            Ok(Ok(ParentCommand::Quiesce)) => {
+                return Err(proof_error(format!(
+                    "non-authority peer {node} received quiesce"
+                )));
+            }
+            Ok(Ok(ParentCommand::Stop)) => {
                 let complete = match node {
                     Node::B => {
                         mesh_reported
@@ -1205,9 +1429,10 @@ fn run_migration_child(
                 emit_event(&mut writer, node, EventKind::Done, &session)?;
                 return Ok(());
             }
+            Ok(Err(error)) => return Err(error),
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(proof_error("stop control reader disconnected"));
+                return Err(proof_error("lifecycle command reader disconnected"));
             }
         }
 
@@ -1466,37 +1691,255 @@ fn main() -> ProofResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
+    struct SplitIo {
+        bytes: Cursor<Vec<u8>>,
+        maximum: usize,
+        write_sizes: Vec<usize>,
+        flushed: bool,
+    }
+
+    impl SplitIo {
+        fn reader(bytes: Vec<u8>, maximum: usize) -> Self {
+            Self {
+                bytes: Cursor::new(bytes),
+                maximum,
+                write_sizes: Vec::new(),
+                flushed: false,
+            }
+        }
+
+        fn writer(maximum: usize) -> Self {
+            Self::reader(Vec::new(), maximum)
+        }
+    }
+
+    impl Read for SplitIo {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(self.maximum);
+            self.bytes.read(&mut buffer[..limit])
+        }
+    }
+
+    impl Write for SplitIo {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.write_sizes.push(buffer.len());
+            let accepted = buffer.len().min(self.maximum);
+            self.bytes.get_mut().extend_from_slice(&buffer[..accepted]);
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushed = true;
+            Ok(())
+        }
+    }
+
+    struct GatedReader {
+        bytes: Cursor<Vec<u8>>,
+        first_chunk: usize,
+        first_read: mpsc::Sender<()>,
+        resume: Option<mpsc::Receiver<()>>,
+        first_read_complete: bool,
+    }
+
+    impl Read for GatedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.first_read_complete {
+                self.first_read_complete = true;
+                let limit = buffer.len().min(self.first_chunk);
+                let read = self.bytes.read(&mut buffer[..limit])?;
+                self.first_read.send(()).unwrap();
+                return Ok(read);
+            }
+            if let Some(resume) = self.resume.take() {
+                resume.recv().unwrap();
+            }
+            self.bytes.read(buffer)
+        }
+    }
+
+    fn ready_frame() -> (ControlMessage, Vec<u8>) {
+        let message = ControlMessage::Ready {
+            scenario: Scenario::Migration,
+            node: Node::A,
+            endpoint: "127.0.0.1:32123".parse().unwrap(),
+        };
+        let frame = encode_control_frame(&message).unwrap();
+        (message, frame)
+    }
+
     #[test]
-    fn bounded_receive_survives_an_initial_scheduler_timeout() {
-        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        receiver.set_read_timeout(Some(UDP_TIMEOUT)).unwrap();
-        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let destination = receiver.local_addr().unwrap();
-        let lobby = LobbyId::parse(Scenario::TwoPeer.lobby()).unwrap();
-        let local = Node::A.id().unwrap();
-        let mut state = SessionState::new(lobby, local, local, 0);
-        state.add_peer(Node::B.id().unwrap(), 0);
-        let envelope = state.envelope(
-            1,
-            PeerPayload::Hello {
-                hostname: "delayed-valid-packet".into(),
-            },
-        );
-        let bytes = encode(&envelope).unwrap();
-        let worker = thread::spawn(move || {
-            thread::sleep(UDP_TIMEOUT + UDP_TIMEOUT);
-            sender.send_to(&bytes, destination).unwrap();
-        });
-        let received = receive_envelope_until(
+    fn framed_control_round_trips_coalesced_and_split_io() {
+        let (message, frame) = ready_frame();
+        let mut writer = SplitIo::writer(3);
+        send_control(&mut writer, &message).unwrap();
+        assert!(writer.flushed);
+        assert_eq!(writer.write_sizes.first(), Some(&frame.len()));
+        assert_eq!(writer.bytes.get_ref(), &frame);
+
+        let mut coalesced = frame.clone();
+        coalesced.extend_from_slice(&frame);
+        let mut reader = SplitIo::reader(coalesced, 1);
+        assert!(matches!(
+            read_control(&mut reader).unwrap(),
+            Some(ControlMessage::Ready { .. })
+        ));
+        assert!(matches!(
+            read_control(&mut reader).unwrap(),
+            Some(ControlMessage::Ready { .. })
+        ));
+        assert!(read_control(&mut reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn clean_eof_is_distinct_from_every_truncated_write_boundary() {
+        let (_, frame) = ready_frame();
+        assert!(read_control(&mut Cursor::new(Vec::<u8>::new()))
+            .unwrap()
+            .is_none());
+        for boundary in 1..frame.len() {
+            let error = read_control(&mut Cursor::new(&frame[..boundary]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("truncated control frame"),
+                "boundary {boundary}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_and_invalid_complete_frames_are_rejected() {
+        let oversized = u32::try_from(MAX_CONTROL_FRAME_BYTES + 1)
+            .unwrap()
+            .to_be_bytes();
+        let error = read_control(&mut Cursor::new(oversized))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exceeds limit"));
+
+        let payload = b"not-json";
+        let mut invalid = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
+        invalid.extend_from_slice(payload);
+        let error = read_control(&mut Cursor::new(invalid))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid complete control frame"));
+    }
+
+    #[test]
+    fn split_frame_survives_delayed_reader_scheduling_without_sleep() {
+        let (_, frame) = ready_frame();
+        let (first_read_sender, first_read_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let reader = GatedReader {
+            bytes: Cursor::new(frame),
+            first_chunk: 1,
+            first_read: first_read_sender,
+            resume: Some(resume_receiver),
+            first_read_complete: false,
+        };
+        let worker = thread::spawn(move || read_control(&mut BufReader::new(reader)));
+        first_read_receiver.recv().unwrap();
+        resume_sender.send(()).unwrap();
+        assert!(matches!(
+            worker.join().unwrap().unwrap(),
+            Some(ControlMessage::Ready { .. })
+        ));
+    }
+
+    #[test]
+    fn post_done_and_post_quiesce_frames_are_rejected() {
+        let event = |kind| ControlMessage::Event {
+            node: Node::B,
+            kind,
+            authority: Node::B,
+            epoch: 2,
+        };
+        let mut done = false;
+        assert!(matches!(
+            notice_from_control(Node::B, event(EventKind::Done), &mut done).unwrap(),
+            Notice::Event(_)
+        ));
+        assert!(notice_from_control(Node::B, event(EventKind::Mesh), &mut done).is_err());
+
+        let mut quiesced = false;
+        assert!(matches!(
+            notice_from_control(
+                Node::A,
+                ControlMessage::Quiesced { node: Node::A },
+                &mut quiesced,
+            )
+            .unwrap(),
+            Notice::Quiesced(Node::A)
+        ));
+        assert!(notice_from_control(Node::A, ControlMessage::Stop, &mut quiesced).is_err());
+    }
+
+    #[test]
+    fn reader_join_fault_still_joins_every_reader() {
+        let mut readers = BTreeMap::from([
+            (
+                Node::A,
+                thread::spawn(|| -> ProofResult<()> { Err(proof_error("forced reader fault")) }),
+            ),
+            (Node::B, thread::spawn(|| -> ProofResult<()> { Ok(()) })),
+        ]);
+        let error = join_readers(&mut readers).unwrap_err().to_string();
+        assert!(error.contains("forced reader fault"));
+        assert!(readers.is_empty());
+    }
+
+    #[test]
+    fn child_exit_statuses_are_checked_on_success_and_fault_paths() {
+        let success = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let mut peers = [PeerProcess {
+            node: Node::B,
+            child: Some(success),
+        }];
+        wait_for_success(&mut peers, None).unwrap();
+
+        let failure = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        let mut peers = [PeerProcess {
+            node: Node::C,
+            child: Some(failure),
+        }];
+        let error = wait_for_success(&mut peers, None).unwrap_err().to_string();
+        assert!(error.contains("peer c exited with"));
+    }
+
+    #[test]
+    fn early_close_before_quiesce_is_fatal() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Notice::Closed(Node::A)).unwrap();
+        let error = wait_for_quiesced(
+            Scenario::Migration,
             &receiver,
-            None,
-            Instant::now() + Duration::from_secs(1),
-            "delayed-regression",
+            Node::A,
+            &mut BTreeSet::new(),
+            CONTROL_TIMEOUT,
         )
-        .unwrap();
-        worker.join().unwrap();
-        assert_eq!(received.0, envelope);
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("peer a closed before peer a quiesced"));
+    }
+
+    #[test]
+    fn missing_quiesce_acknowledgment_obeys_the_bounded_deadline() {
+        let (_sender, receiver) = mpsc::channel();
+        let error = wait_for_quiesced(
+            Scenario::Migration,
+            &receiver,
+            Node::A,
+            &mut BTreeSet::new(),
+            Duration::ZERO,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("timed out waiting for peer a quiesced"));
     }
 }
