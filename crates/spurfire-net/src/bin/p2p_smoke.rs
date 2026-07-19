@@ -43,8 +43,14 @@ fn argument(name: &str) -> Result<String, String> {
 
 fn read_key(path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let value = Zeroizing::new(fs::read(path).map_err(|error| format!("read key file: {error}"))?);
-    let start = value.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(value.len());
-    let end = value.iter().rposition(|byte| !byte.is_ascii_whitespace()).map_or(start, |index| index + 1);
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
     let trimmed = Zeroizing::new(value[start..end].to_vec());
     if trimmed.is_empty() {
         return Err("auth key file was empty".into());
