@@ -39,8 +39,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Assert exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Validate versions and derive tags
         id: meta
@@ -125,10 +129,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out source
+      - name: Check out exact source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Assert exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Validate workflow, metadata, and shell syntax
         shell: bash
@@ -209,20 +217,32 @@ jobs:
   container:
     name: Container (${{ matrix.arch }})
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
     steps:
-      - name: Check out source
+      - name: Check out exact source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Assert native runner and exact source
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -240,10 +260,10 @@ jobs:
             SPURFIRE_VERSION=${{ needs.metadata.outputs.image_version }}
             SPURFIRE_REVISION=${{ github.sha }}
             SPURFIRE_CREATED=${{ needs.metadata.outputs.created }}
-          cache-from: type=gha,scope=spurfire-server-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=spurfire-server-${{ matrix.arch }}
+          cache-from: type=gha,scope=spurfire-server-validate-${{ matrix.arch }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'trusted' || 'untrusted' }}
+          cache-to: type=gha,mode=min,scope=spurfire-server-validate-${{ matrix.arch }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'trusted' || 'untrusted' }}
 
-      - name: Verify hardened runtime and health
+      - name: Verify native image, hardened runtime, and health
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
@@ -252,19 +272,19 @@ jobs:
         run: |
           set -euo pipefail
           image="spurfire-server:validate-$ARCH"
+          test "$(docker image inspect --format '{{.Architecture}}' "$image")" = "$ARCH"
           test "$(docker image inspect --format '{{.Config.User}}' "$image")" = '10001:10001'
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" = "$EXPECTED_VERSION"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$GITHUB_SHA"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.created"}}' "$image")" = "$EXPECTED_CREATED"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")" = 'BSD-3-Clause'
-          docker run --rm --platform "linux/$ARCH" --entrypoint /bin/sh "$image" -ec \
+          docker run --rm --entrypoint /bin/sh "$image" -ec \
             'test ! -w /usr/local/bin/spurfire-server; test -w /var/lib/spurfire'
 
           name="spurfire-server-${GITHUB_RUN_ID}-${ARCH}"
           cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           docker run --detach --name "$name" \
-            --platform "linux/$ARCH" \
             --read-only \
             --cap-drop ALL \
             --security-opt no-new-privileges \
@@ -291,7 +311,7 @@ jobs:
           jq -e '.status == "ok" and .provisioning_ready == true' <<< "$response"
           test "$(docker inspect --format '{{.State.Pid}}' "$name")" -gt 0
 
-      - name: Scan image vulnerabilities and secrets
+      - name: Scan native image vulnerabilities and secrets
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.33.1
         with:
           image-ref: spurfire-server:validate-${{ matrix.arch }}
@@ -301,27 +321,41 @@ jobs:
           format: table
           exit-code: '1'
 
-  publish:
-    name: Publish signed OCI main/SHA artifacts
+  publish-image:
+    name: Publish image digest (${{ matrix.arch }})
     # Version tags validate above but never publish aliases. Stable publication is a
     # separate, protected release action after exact-SHA Alpha evidence is approved.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'rajsinghtech/spurfire'
     needs: [metadata, validate, container]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
     steps:
-      - name: Check out source
+      - name: Check out exact source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Assert native runner and exact source
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -333,26 +367,154 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-architecture image
+      - name: Build and push native image by digest
         id: image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ needs.metadata.outputs.image_tags }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},name-canonical=true,push-by-digest=true,push=true
           build-args: |
             SPURFIRE_VERSION=${{ needs.metadata.outputs.image_version }}
             SPURFIRE_REVISION=${{ github.sha }}
             SPURFIRE_CREATED=${{ needs.metadata.outputs.created }}
           cache-from: |
-            type=gha,scope=spurfire-server-amd64
-            type=gha,scope=spurfire-server-arm64
-            type=gha,scope=spurfire-server-publish
-          cache-to: type=gha,mode=max,scope=spurfire-server-publish
+            type=gha,scope=spurfire-server-validate-${{ matrix.arch }}-trusted
+            type=gha,scope=spurfire-server-publish-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=spurfire-server-publish-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
+
+      - name: Record immutable native digest
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -n \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg arch "$ARCH" \
+            --arg image "$IMAGE" \
+            --arg digest "$DIGEST" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{source_sha: $source_sha, arch: $arch, image: $image, digest: $digest, run_id: $run_id, run_attempt: $run_attempt}' \
+            > "digest-${ARCH}.json"
+
+      - name: Upload native digest record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Finalize signed OCI main/SHA artifacts
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'rajsinghtech/spurfire'
+    needs: [metadata, publish-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Assert exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Download native digest records
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-digest-*
+          path: image-digests
+          merge-multiple: true
+
+      - name: Validate native digest records
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t records < <(find image-digests -maxdepth 1 -type f -name 'digest-*.json' -printf '%f\n' | sort)
+          test "${#records[@]}" -eq 2
+          test "${records[0]}" = digest-amd64.json
+          test "${records[1]}" = digest-arm64.json
+          for arch in amd64 arm64; do
+            record="image-digests/digest-${arch}.json"
+            test "$(jq -er '.source_sha' "$record")" = "$GITHUB_SHA"
+            test "$(jq -er '.arch' "$record")" = "$arch"
+            test "$(jq -er '.image' "$record")" = "$IMAGE"
+            test "$(jq -er '.run_id' "$record")" = "$GITHUB_RUN_ID"
+            test "$(jq -er '.run_attempt' "$record")" = "$GITHUB_RUN_ATTEMPT"
+            digest="$(jq -er '.digest' "$record")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify native attestations and create tagged index
+        id: image
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ needs.metadata.outputs.image_tags }}
+        run: |
+          set -euo pipefail
+          declare -A digests
+          for arch in amd64 arm64; do
+            digest="$(jq -er '.digest' "image-digests/digest-${arch}.json")"
+            digests[$arch]="$digest"
+            raw="$(docker buildx imagetools inspect "$IMAGE@$digest" --raw)"
+            image_manifest="$(jq -er --arg arch "$arch" \
+              '[.manifests[] | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] as $images | if (($images | length) == 1 and $images[0].platform.os == "linux" and $images[0].platform.architecture == $arch) then $images[0].digest else error("expected only the native image manifest") end' <<< "$raw")"
+            attestation_manifest="$(jq -er --arg image_manifest "$image_manifest" \
+              '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest" and .annotations["vnd.docker.reference.digest"] == $image_manifest) | .digest] | if length == 1 then .[0] else error("expected one linked attestation manifest") end' <<< "$raw")"
+            attestation="$(docker buildx imagetools inspect "$IMAGE@$attestation_manifest" --raw)"
+            jq -e '[.layers[].annotations["in-toto.io/predicate-type"]] | index("https://spdx.dev/Document") != null' <<< "$attestation" >/dev/null
+            jq -e '[.layers[].annotations["in-toto.io/predicate-type"] | select(startswith("https://slsa.dev/provenance/"))] | length >= 1' <<< "$attestation" >/dev/null
+          done
+
+          mapfile -t tags <<< "$IMAGE_TAGS"
+          test "${#tags[@]}" -ge 1
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            [[ "$tag" == "$IMAGE:"* ]]
+            tag_args+=(--tag "$tag")
+          done
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            "$IMAGE@${digests[amd64]}" \
+            "$IMAGE@${digests[arm64]}"
+
+          first_tag="${tags[0]}"
+          final_digest="$(docker buildx imagetools inspect "$first_tag" | awk '$1 == "Digest:" { print $2; exit }')"
+          [[ "$final_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for tag in "${tags[@]}"; do
+            tag_digest="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')"
+            test "$tag_digest" = "$final_digest"
+          done
+          final_raw="$(docker buildx imagetools inspect "$IMAGE@$final_digest" --raw)"
+          jq -e \
+            '[.manifests[] | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | "\(.platform.os)/\(.platform.architecture)"] | sort == ["linux/amd64", "linux/arm64"]' \
+            <<< "$final_raw" >/dev/null
+          echo "digest=$final_digest" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Helm
         shell: bash
@@ -398,7 +560,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v3
 
-      - name: Keyless-sign image and chart digests
+      - name: Keyless-sign image index and chart digests
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           CHART_REF: ${{ steps.chart.outputs.ref }}
@@ -406,7 +568,7 @@ jobs:
           cosign sign --yes "$IMAGE@$IMAGE_DIGEST"
           cosign sign --yes "$CHART_REF"
 
-      - name: Attest image build provenance
+      - name: Attest image index build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v3
         with:
           subject-name: ${{ env.IMAGE }}
