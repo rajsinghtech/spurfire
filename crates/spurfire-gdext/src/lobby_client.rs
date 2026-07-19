@@ -1063,8 +1063,8 @@ impl IControl for NativeSecretInput {
             return;
         }
         let unicode = key.get_unicode();
-        let paste_requested = (key.is_ctrl_pressed() || key.is_meta_pressed())
-            && matches!(unicode, 22 | 86 | 118);
+        let paste_requested =
+            (key.is_ctrl_pressed() || key.is_meta_pressed()) && matches!(unicode, 22 | 86 | 118);
         if paste_requested {
             if let Ok(mut pasted) = native_clipboard_read() {
                 while pasted.first().is_some_and(u8::is_ascii_whitespace) {
