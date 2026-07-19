@@ -215,12 +215,8 @@ impl GeneratedCapability {
         }
     }
 
-    fn opaque(
-        &self,
-        scopes: Vec<LobbyCapabilityScope>,
-        expires_at: UnixMillis,
-    ) -> OpaqueCapability {
-        OpaqueCapability::new(self.plaintext.as_str(), scopes, expires_at)
+    fn opaque(self, scopes: Vec<LobbyCapabilityScope>, expires_at: UnixMillis) -> OpaqueCapability {
+        OpaqueCapability::from_zeroizing(self.plaintext, scopes, expires_at)
     }
 }
 
@@ -1652,7 +1648,7 @@ async fn join_lobby(
 
     let credential = JoinCredential::new(
         minted.credential_id.clone(),
-        minted.auth_key.into_exposed(),
+        minted.auth_key.into_zeroizing(),
         minted.tailnet,
         vec![stored.tag.clone()],
         expires_at,

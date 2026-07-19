@@ -389,6 +389,10 @@ func _on_request_failed(operation: String, safe_message: String, _safe_code: Str
 		return
 	if _screen == Screen.TITLE:
 		title_status.text = safe_message
+		if operation == "create":
+			api.capture_create_grant()
+		elif operation == "join":
+			api.capture_join_code()
 		api.probe_lobby_readiness()
 	elif _screen == Screen.TEARDOWN:
 		teardown_status.text = "Still cleaning up — you can close the game; we'll keep at it."

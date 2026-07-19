@@ -6,7 +6,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 pattern='auth_key|enrollment_key|creator_capability|participant_capability|Spurfire-Capability|connect_rustscale|make_join_code|parse_join_code|clipboard_get|clipboard_set'
-mapfile -d '' files < <(find game -type f \( -name '*.gd' -o -name '*.tscn' \) -print0 | sort -z)
+files=()
+while IFS= read -r -d '' file; do
+  files+=("$file")
+done < <(find game -type f \( -name '*.gd' -o -name '*.tscn' \) -print0)
 if ((${#files[@]} == 0)); then
   echo 'error: no Godot sources found for native-secret boundary check' >&2
   exit 1

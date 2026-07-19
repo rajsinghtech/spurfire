@@ -21,11 +21,6 @@ while IFS= read -r name; do
   fi
 done < <(compgen -e)
 
-command -v timeout >/dev/null 2>&1 || {
-  echo "error: timeout is required for the bounded process proof" >&2
-  exit 1
-}
-
 cargo_bin="${CARGO:-cargo}"
 "$cargo_bin" build --locked --quiet -p spurfire-net --bin spurfire-local-p2p-proof
 
@@ -43,11 +38,10 @@ proof_log="$proof_tmp/proof.log"
 mkdir -p "$proof_tmp/home" "$proof_tmp/tmp"
 trap 'rm -rf "$proof_tmp"' EXIT
 
-# Compilation is outside the execution timeout. The proof and all descendants
-# receive a strict runtime environment with no inherited credentials or user
-# configuration. GNU timeout creates a separate process group and escalates if
-# a failed proof does not reap its peer children promptly.
-timeout --kill-after=5s 60s env -i \
+# The proof binary enforces bounded control/scenario deadlines and reaps every
+# peer child. Keep compilation outside those deadlines and use only portable
+# POSIX/macOS tooling for the strict runtime environment.
+env -i \
   HOME="$proof_tmp/home" \
   TMPDIR="$proof_tmp/tmp" \
   LC_ALL=C \

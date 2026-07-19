@@ -122,9 +122,7 @@ jobs:
           grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          if ! grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"; then
-            echo '::warning::Candidate lacks the integrated one-lobby Alpha smoke marker; CI remains blocked.'
-          fi
+          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           scripts/build-gdext.sh release
           mkdir -p dist/linux
           godot4 --headless --path game --export-release Linux
@@ -218,9 +216,7 @@ jobs:
           grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          if ! grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"; then
-            echo '::warning::Candidate lacks the integrated one-lobby Alpha smoke marker; CI remains blocked.'
-          fi
+          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
           scripts/build-gdext.sh release
           mkdir -p dist/linux-arm64
           godot4 --headless --path game --export-release "Linux ARM64"
@@ -319,9 +315,7 @@ jobs:
           grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$smoke_log"
           grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$smoke_log"
           grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$smoke_log"
-          if ! grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$smoke_log"; then
-            echo '::warning::Candidate lacks the integrated one-lobby Alpha smoke marker; CI remains blocked.'
-          fi
+          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$smoke_log"
           scripts/build-gdext.sh release
           mkdir -p dist/windows
           ./godot4.exe --headless --path game --export-release Windows
@@ -431,9 +425,7 @@ jobs:
           grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
           grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
           grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
-          if ! grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"; then
-            echo '::warning::Candidate lacks the integrated one-lobby Alpha smoke marker; CI remains blocked.'
-          fi
+          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
 
       - name: Execute the x86_64 slice under Rosetta
         shell: bash

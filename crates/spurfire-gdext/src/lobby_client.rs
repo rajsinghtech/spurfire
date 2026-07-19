@@ -6,8 +6,6 @@
 
 use std::{
     fmt,
-    io::Write,
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
@@ -15,6 +13,11 @@ use std::{
     },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::{
+    io::Write,
+    process::{Command, Stdio},
 };
 
 use godot::{
@@ -217,6 +220,35 @@ pub(crate) enum LobbyEvent {
     },
 }
 
+struct Cancellation {
+    generation: AtomicU64,
+    changed: tokio::sync::Notify,
+}
+
+impl Cancellation {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation: AtomicU64::new(generation),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn cancel(&self, generation: u64) {
+        self.generation.store(generation, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(&self, generation: u64) {
+        loop {
+            let changed = self.changed.notified();
+            if self.generation.load(Ordering::Acquire) != generation {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
 pub(crate) struct LobbyClientState {
     generation: u64,
     player_id: Option<String>,
@@ -225,7 +257,7 @@ pub(crate) struct LobbyClientState {
     copied_invitation: Option<Zeroizing<Vec<u8>>>,
     sender: Sender<LobbyEvent>,
     receiver: Receiver<LobbyEvent>,
-    cancellation: Arc<AtomicU64>,
+    cancellation: Arc<Cancellation>,
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub(crate) last_endpoint_sequence: u64,
 }
@@ -241,7 +273,7 @@ impl Default for LobbyClientState {
             copied_invitation: None,
             sender,
             receiver,
-            cancellation: Arc::new(AtomicU64::new(1)),
+            cancellation: Arc::new(Cancellation::new(1)),
             workers: Arc::new(Mutex::new(Vec::new())),
             last_endpoint_sequence: 0,
         }
@@ -297,7 +329,7 @@ impl LobbyClientState {
 
     pub(crate) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.cancellation.store(self.generation, Ordering::Release);
+        self.cancellation.cancel(self.generation);
         self.creator = None;
         self.participant = None;
         self.player_id = None;
@@ -316,6 +348,7 @@ impl LobbyClientState {
     }
 
     pub(crate) fn try_event(&self) -> Result<LobbyEvent, TryRecvError> {
+        reap_finished_workers(&self.workers);
         self.receiver.try_recv()
     }
 
@@ -379,20 +412,19 @@ impl LobbyClientState {
         let generation = self.generation;
         let lobby_id = lobby_id.to_owned();
         let auth = sensitive_authorization(capability);
-        let cancellation = self.cancellation.clone();
         spawn_request(
             move || {
                 let result = async {
                     let auth = auth?;
-                    let mut body = request(
+                    // Once dispatched, a first-response-only invitation must reach native
+                    // ownership before cancellation can complete.
+                    let mut body = request_uncancelled(
                         Method::POST,
                         &path,
                         Some("{}".into()),
                         Some(auth),
                         true,
                         None,
-                        cancellation,
-                        generation,
                     )
                     .await?;
                     let invitation = extract_secret(&mut body, b"token")?;
@@ -450,20 +482,19 @@ impl LobbyClientState {
         let sender = self.sender.clone();
         let generation = self.generation;
         let auth = sensitive_authorization(&invitation);
-        let cancellation = self.cancellation.clone();
         spawn_request(
             move || {
                 let result = async {
                     let auth = auth?;
-                    let mut response = request(
+                    // Joining consumes the invitation. Do not race that mutation against
+                    // cancellation and discard the only enrollment/capability response.
+                    let mut response = request_uncancelled(
                         Method::POST,
                         &path,
                         Some(body),
                         Some(auth),
                         true,
                         None,
-                        cancellation,
-                        generation,
                     )
                     .await?;
                     let enrollment = extract_secret(&mut response, b"auth_key")?;
@@ -517,17 +548,23 @@ impl LobbyClientState {
         spawn_request(
             move || {
                 let result = async {
-                    let mut response = request(
-                        method,
-                        &path,
-                        body,
-                        auth?,
-                        idempotent,
-                        actor,
-                        cancellation,
-                        generation,
-                    )
-                    .await?;
+                    let mut response = if operation == LobbyOperation::Create {
+                        // A real create consumes its grant and singleton lease. Finish the
+                        // response handoff before honoring cancellation.
+                        request_uncancelled(method, &path, body, auth?, idempotent, actor).await?
+                    } else {
+                        request(
+                            method,
+                            &path,
+                            body,
+                            auth?,
+                            idempotent,
+                            actor,
+                            cancellation,
+                            generation,
+                        )
+                        .await?
+                    };
                     match operation {
                         LobbyOperation::Create => {
                             let creator = extract_secret(&mut response, b"token")?;
@@ -577,6 +614,26 @@ enum SpawnResult {
     Created(String, SecretBytes),
 }
 
+fn reap_finished_workers(workers: &Arc<Mutex<Vec<JoinHandle<()>>>>) {
+    let finished = if let Ok(mut active) = workers.lock() {
+        let mut finished = Vec::new();
+        let mut index = 0;
+        while index < active.len() {
+            if active[index].is_finished() {
+                finished.push(active.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        finished
+    } else {
+        Vec::new()
+    };
+    for handle in finished {
+        let _ = handle.join();
+    }
+}
+
 fn spawn_request(
     task: impl FnOnce() + Send + 'static,
     fallback: Sender<LobbyEvent>,
@@ -584,6 +641,7 @@ fn spawn_request(
     operation: LobbyOperation,
     workers: &Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
+    reap_finished_workers(workers);
     match thread::Builder::new()
         .name(format!("spurfire-lobby-{}", operation.code()))
         .spawn(task)
@@ -675,7 +733,7 @@ async fn request(
     authorization: Option<HeaderValue>,
     idempotent: bool,
     actor: Option<String>,
-    cancellation: Arc<AtomicU64>,
+    cancellation: Arc<Cancellation>,
     generation: u64,
 ) -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
     tokio::select! {
@@ -684,10 +742,8 @@ async fn request(
     }
 }
 
-async fn wait_for_cancellation(cancellation: Arc<AtomicU64>, generation: u64) {
-    while cancellation.load(Ordering::Acquire) == generation {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+async fn wait_for_cancellation(cancellation: Arc<Cancellation>, generation: u64) {
+    cancellation.wait(generation).await;
 }
 
 async fn request_uncancelled(
@@ -978,17 +1034,123 @@ fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyE
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
+    write_command_stdin("pbcopy", &[], value)
+}
+
+#[cfg(target_os = "macos")]
+fn native_clipboard_read() -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
+    let output = Command::new("pbpaste")
+        .output()
+        .map_err(|_| NativeLobbyError::Clipboard)?;
+    output
+        .status
+        .success()
+        .then(|| Zeroizing::new(output.stdout))
+        .ok_or(NativeLobbyError::Clipboard)
+}
+
+#[cfg(target_os = "macos")]
+fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyError> {
+    if native_clipboard_read()?.as_slice() == expected {
+        write_command_stdin("pbcopy", &[], &[])?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+const POWERSHELL_CLIPBOARD_WRITE: &str = "[Console]::In.ReadToEnd() | Set-Clipboard";
+
+#[cfg(target_os = "windows")]
+fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
+    write_command_stdin(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            POWERSHELL_CLIPBOARD_WRITE,
+        ],
+        value,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn native_clipboard_read() -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Out.Write((Get-Clipboard -Raw))",
+        ])
+        .output()
+        .map_err(|_| NativeLobbyError::Clipboard)?;
+    output
+        .status
+        .success()
+        .then(|| Zeroizing::new(output.stdout))
+        .ok_or(NativeLobbyError::Clipboard)
+}
+
+#[cfg(target_os = "windows")]
+fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyError> {
+    if native_clipboard_read()?.as_slice() == expected {
+        let status = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Set-Clipboard -Value $null",
+            ])
+            .status()
+            .map_err(|_| NativeLobbyError::Clipboard)?;
+        if !status.success() {
+            return Err(NativeLobbyError::Clipboard);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn write_command_stdin(
+    program: &str,
+    arguments: &[&str],
+    value: &[u8],
+) -> Result<(), NativeLobbyError> {
+    let mut child = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| NativeLobbyError::Clipboard)?;
+    child
+        .stdin
+        .take()
+        .ok_or(NativeLobbyError::Clipboard)?
+        .write_all(value)
+        .map_err(|_| NativeLobbyError::Clipboard)?;
+    child
+        .wait()
+        .ok()
+        .filter(std::process::ExitStatus::success)
+        .map(|_| ())
+        .ok_or(NativeLobbyError::Clipboard)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_clipboard_write(_value: &[u8]) -> Result<(), NativeLobbyError> {
     Err(NativeLobbyError::Clipboard)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_clipboard_read() -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
     Err(NativeLobbyError::Clipboard)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_clipboard_clear_if_matches(_expected: &[u8]) -> Result<(), NativeLobbyError> {
     Ok(())
 }

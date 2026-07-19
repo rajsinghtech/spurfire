@@ -120,7 +120,10 @@ func _check_secret_storage_contract(failures: Array[String]) -> void:
 
 func _check_control_glue(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
-	for required in ["submit_measurements", "_stop_peer_transport"]:
+	for required in [
+		"submit_measurements", "_stop_peer_transport",
+		"api.capture_create_grant()", "api.capture_join_code()",
+	]:
 		if not shell_source.contains(required):
 			failures.append("lobby shell omitted integration behavior: %s" % required)
 	var bridge_source := FileAccess.get_file_as_string("res://scripts/lobby_peer_bridge.gd")

@@ -367,6 +367,7 @@ pub struct PeerSession {
     allowed_players: BTreeSet<PlayerId>,
     command_tx: Option<UnboundedSender<WorkerCommand>>,
     event_rx: Option<Receiver<(u64, WorkerEvent)>>,
+    worker_handle: Option<thread::JoinHandle<()>>,
     worker_generation: u64,
     combat_authority: Option<CombatAuthority>,
     combat_targets: Option<TargetRegistry>,
@@ -391,14 +392,16 @@ impl PeerSession {
         let (event_tx, event_rx) = mpsc::channel();
         self.worker_generation = self.worker_generation.wrapping_add(1);
         let generation = self.worker_generation;
-        if thread::Builder::new()
+        let Ok(worker_handle) = thread::Builder::new()
             .name("spurfire-rustscale".into())
-            .spawn(move || run_worker(hostname, enrollment, port, generation, command_rx, event_tx))
-            .is_err()
-        {
+            .spawn(move || {
+                run_worker(hostname, enrollment, port, generation, command_rx, event_tx)
+            })
+        else {
             return false;
-        }
+        };
         self.command_tx = Some(command_tx);
+        self.worker_handle = Some(worker_handle);
         self.event_rx = Some(event_rx);
         self.connection_state = "connecting".into();
         true
@@ -1878,11 +1881,18 @@ impl PeerSession {
         }
     }
 
+    fn join_worker(&mut self) {
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
     /// Forget all lobby-scoped identity after leave. Enrollment material is
     /// owned by the worker and dropped when shutdown completes.
     #[func]
     fn clear_lobby_session(&mut self) {
         self.shutdown();
+        self.join_worker();
         // Invalidate every event the orphaned worker can still emit so a late
         // `connected` from a cancelled enrollment cannot resurrect state.
         self.worker_generation = self.worker_generation.wrapping_add(1);
@@ -2022,6 +2032,7 @@ impl PeerSession {
                         }
                         WorkerEvent::Failed(message) => {
                             self.connection_state = "error".into();
+                            self.command_tx = None;
                             let signal_message = GString::from(&message);
                             self.signals().connection_failed().emit(&signal_message);
                         }
@@ -2040,6 +2051,13 @@ impl PeerSession {
             }
         }
         self.event_rx = Some(receiver);
+        if self
+            .worker_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            self.join_worker();
+        }
     }
 }
 
@@ -2064,6 +2082,7 @@ impl INode for PeerSession {
             allowed_players: BTreeSet::new(),
             command_tx: None,
             event_rx: None,
+            worker_handle: None,
             worker_generation: 0,
             combat_authority: None,
             combat_targets: None,
@@ -2082,6 +2101,7 @@ impl INode for PeerSession {
     fn exit_tree(&mut self) {
         self.lobby_client.cancel();
         self.shutdown();
+        self.join_worker();
     }
 }
 

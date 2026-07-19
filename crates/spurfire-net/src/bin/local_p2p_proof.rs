@@ -109,11 +109,11 @@ impl Node {
         }
     }
 
-    const fn loopback(self) -> Ipv4Addr {
+    const fn identity_ip(self) -> Ipv4Addr {
         match self {
-            Self::A => Ipv4Addr::new(127, 0, 0, 11),
-            Self::B => Ipv4Addr::new(127, 0, 0, 12),
-            Self::C => Ipv4Addr::new(127, 0, 0, 13),
+            Self::A => Ipv4Addr::new(100, 64, 0, 11),
+            Self::B => Ipv4Addr::new(100, 64, 0, 12),
+            Self::C => Ipv4Addr::new(100, 64, 0, 13),
         }
     }
 
@@ -343,7 +343,9 @@ fn config_for(
                 session_public_key: SessionPublicKey::from_bytes(
                     node.signing_key().verifying_key().to_bytes(),
                 ),
-                tailnet_address: connection.endpoint.ip(),
+                // Signed identities stay unique while proof transport uses the
+                // only loopback address bindable on stock BSD/macOS.
+                tailnet_address: node.identity_ip().into(),
                 application_port: connection.endpoint.port(),
                 node_key: None,
             })
@@ -727,7 +729,7 @@ fn child_handshake(
             "node does not belong to the requested scenario",
         ));
     }
-    let socket = UdpSocket::bind((node.loopback(), 0))?;
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
     socket.set_read_timeout(Some(UDP_TIMEOUT))?;
     socket.set_write_timeout(Some(CONTROL_TIMEOUT))?;
     let endpoint = socket.local_addr()?;
@@ -765,7 +767,7 @@ fn child_handshake(
         .iter()
         .find(|entry| entry.player_id == local_player)
         .ok_or_else(|| proof_error("local player missing from signed roster"))?;
-    if local_entry.tailnet_address != endpoint.ip()
+    if local_entry.tailnet_address != node.identity_ip()
         || local_entry.application_port != endpoint.port()
         || local_entry.session_public_key.as_bytes() != &signing_key.verifying_key().to_bytes()
     {
@@ -796,7 +798,7 @@ fn endpoint_for(manifest: &RosterManifest, node: Node) -> ProofResult<SocketAddr
         .find(|entry| entry.player_id == player)
         .ok_or_else(|| proof_error(format!("signed roster missing peer {node}")))?;
     Ok(SocketAddr::new(
-        entry.tailnet_address,
+        Ipv4Addr::LOCALHOST.into(),
         entry.application_port,
     ))
 }
@@ -814,9 +816,20 @@ fn send_envelope(
     Ok(())
 }
 
-fn receive_envelope(socket: &UdpSocket) -> ProofResult<(Envelope, SocketAddr)> {
+fn receive_envelope(
+    socket: &UdpSocket,
+    manifest: Option<&RosterManifest>,
+) -> ProofResult<(Envelope, SocketAddr)> {
     let mut bytes = [0_u8; MAX_DATAGRAM_BYTES];
-    let (length, source) = socket.recv_from(&mut bytes)?;
+    let (length, mut source) = socket.recv_from(&mut bytes)?;
+    if let Some(entry) = manifest.and_then(|manifest| {
+        manifest
+            .entries
+            .iter()
+            .find(|entry| entry.application_port == source.port())
+    }) {
+        source.set_ip(entry.tailnet_address);
+    }
     Ok((decode(&bytes[..length])?, source))
 }
 
@@ -833,11 +846,12 @@ fn transient_receive_error(error: &(dyn Error + Send + Sync + 'static)) -> bool 
 /// The socket keeps its 25 ms timeout so migration remains responsive.
 fn receive_envelope_until(
     socket: &UdpSocket,
+    manifest: Option<&RosterManifest>,
     deadline: Instant,
     stage: &str,
 ) -> ProofResult<(Envelope, SocketAddr)> {
     loop {
-        match receive_envelope(socket) {
+        match receive_envelope(socket, manifest) {
             Ok(value) => return Ok(value),
             Err(error) if transient_receive_error(error.as_ref()) && Instant::now() < deadline => {}
             Err(error) if transient_receive_error(error.as_ref()) => {
@@ -941,7 +955,8 @@ fn run_two_peer_child(
                 &signing_key,
             )?;
             send_envelope(&socket, &hello, endpoint_for(&manifest, Node::B)?)?;
-            let (reply, source) = receive_envelope_until(&socket, deadline, "peer-a rider-input")?;
+            let (reply, source) =
+                receive_envelope_until(&socket, Some(&manifest), deadline, "peer-a rider-input")?;
             reject_tampered_signature(&mut session, &reply, source, 2)?;
             emit_event(
                 &mut writer,
@@ -957,7 +972,7 @@ fn run_two_peer_child(
             }
             emit_event(&mut writer, node, EventKind::SignedInputAccepted, &session)?;
             let (command, source) =
-                receive_envelope_until(&socket, deadline, "peer-a shot-command")?;
+                receive_envelope_until(&socket, Some(&manifest), deadline, "peer-a shot-command")?;
             if session.accept_with_source(&command, source, None, 3) != AcceptOutcome::Accepted
                 || !matches!(command.payload, PeerPayload::ShotCommand { .. })
             {
@@ -976,7 +991,8 @@ fn run_two_peer_child(
             }
         }
         Node::B => {
-            let (hello, source) = receive_envelope_until(&socket, deadline, "peer-b hello")?;
+            let (hello, source) =
+                receive_envelope_until(&socket, Some(&manifest), deadline, "peer-b hello")?;
             reject_tampered_signature(&mut session, &hello, source, 1)?;
             emit_event(
                 &mut writer,
@@ -1009,13 +1025,18 @@ fn run_two_peer_child(
                 &signing_key,
             )?;
             send_envelope(&socket, &command, endpoint_for(&manifest, Node::A)?)?;
-            let (first, source) = receive_envelope_until(&socket, deadline, "peer-b shot-result")?;
+            let (first, source) =
+                receive_envelope_until(&socket, Some(&manifest), deadline, "peer-b shot-result")?;
             if session.accept_with_source(&first, source, None, 4) != AcceptOutcome::Accepted {
                 return Err(proof_error("peer B rejected authority shot result"));
             }
             emit_event(&mut writer, node, EventKind::ShotResultAccepted, &session)?;
-            let (duplicate, source) =
-                receive_envelope_until(&socket, deadline, "peer-b duplicate-result")?;
+            let (duplicate, source) = receive_envelope_until(
+                &socket,
+                Some(&manifest),
+                deadline,
+                "peer-b duplicate-result",
+            )?;
             if session.accept_with_source(&duplicate, source, None, 5)
                 != AcceptOutcome::DuplicateShotResult
             {
@@ -1239,7 +1260,7 @@ fn run_migration_child(
             }
         }
 
-        match receive_envelope(&socket) {
+        match receive_envelope(&socket, Some(&manifest)) {
             Ok((envelope, source)) => {
                 let payload = envelope.payload.clone();
                 if node == Node::C
@@ -1470,6 +1491,7 @@ mod tests {
         });
         let received = receive_envelope_until(
             &receiver,
+            None,
             Instant::now() + Duration::from_secs(1),
             "delayed-regression",
         )

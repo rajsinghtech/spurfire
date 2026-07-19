@@ -117,21 +117,20 @@ pub struct MintCredentialRequest {
 }
 
 /// A secret string that always redacts its diagnostic representation.
-#[derive(Clone, PartialEq, Eq)]
-pub struct SecretString(Zeroizing<String>);
+#[derive(PartialEq, Eq)]
+pub struct SecretString(Option<Zeroizing<String>>);
 
 impl SecretString {
     /// Wraps provider-returned secret material.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        Self(Zeroizing::new(value.into()))
+        Self(Some(Zeroizing::new(value.into())))
     }
 
-    /// Explicitly transfers a copy of secret material into the one allowed join response. The
-    /// provider-owned allocation is zeroized as this wrapper is dropped.
+    /// Transfers the protected allocation into the one allowed join response without copying it.
     #[must_use]
-    pub fn into_exposed(self) -> String {
-        self.0.to_string()
+    pub fn into_zeroizing(mut self) -> Zeroizing<String> {
+        self.0.take().expect("secret is present until transferred")
     }
 }
 
@@ -142,7 +141,7 @@ impl fmt::Debug for SecretString {
 }
 
 /// Provider result for a first credential issue.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MintedCredential {
     /// Non-secret receipt identifier.
     pub credential_id: String,
@@ -2001,7 +2000,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(minted.auth_key.into_exposed(), DRY_RUN_AUTH_KEY);
+        assert_eq!(minted.auth_key.into_zeroizing().as_str(), DRY_RUN_AUTH_KEY);
         provider
             .cleanup_lobby(CleanupLobbyRequest {
                 lobby_id,
@@ -2150,7 +2149,7 @@ mod tests {
             .unwrap();
         assert_eq!(minted.credential_id, "key-receipt");
         assert_eq!(
-            minted.auth_key.into_exposed(),
+            minted.auth_key.into_zeroizing().as_str(),
             "synthetic-auth-key-join-secret"
         );
 

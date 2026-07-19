@@ -4,13 +4,14 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{
-    AuthorityElection, AuthorityScore, AuthoritySummary, ConnectivitySample, HorseSelection,
-    InputHash, JoinCredential, Lobby, LobbyId, LobbyState, NodeKey, Player, PlayerId,
-    ProvisioningMode, RosterHash, RouteSummary, SessionPublicKey, SessionSignature, UnixMillis,
-    WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION, DEFAULT_MAX_PLAYERS, MAX_PLAYERS,
-    WIRE_VERSION,
+    credential::DeserializedSecret, AuthorityElection, AuthorityScore, AuthoritySummary,
+    ConnectivitySample, HorseSelection, InputHash, JoinCredential, Lobby, LobbyId, LobbyState,
+    NodeKey, Player, PlayerId, ProvisioningMode, RosterHash, RouteSummary, SessionPublicKey,
+    SessionSignature, UnixMillis, WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION,
+    DEFAULT_MAX_PLAYERS, MAX_PLAYERS, WIRE_VERSION,
 };
 
 /// Maximum Unicode scalar count accepted for a lobby or player display name.
@@ -107,7 +108,7 @@ pub struct CreateLobbyResponse {
 
 /// First successful create response. Replay uses [`CreateLobbyResponse`] and
 /// never re-emits capability plaintext.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateLobbyFirstResponse {
     /// Non-secret create receipt.
     #[serde(flatten)]
@@ -248,9 +249,9 @@ pub enum LobbyCapabilityScope {
 }
 
 /// First-response-only opaque capability. Debug output remains redacted.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(PartialEq, Eq)]
 pub struct OpaqueCapability {
-    token: String,
+    token: Zeroizing<String>,
     /// Non-secret privileges bound to the token verifier.
     pub scopes: Vec<LobbyCapabilityScope>,
     /// Absolute capability expiry.
@@ -266,7 +267,21 @@ impl OpaqueCapability {
         expires_at: UnixMillis,
     ) -> Self {
         Self {
-            token: token.into(),
+            token: Zeroizing::new(token.into()),
+            scopes,
+            expires_at,
+        }
+    }
+
+    /// Moves an already protected allocation into the first-response DTO.
+    #[must_use]
+    pub fn from_zeroizing(
+        token: Zeroizing<String>,
+        scopes: Vec<LobbyCapabilityScope>,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            token,
             scopes,
             expires_at,
         }
@@ -276,6 +291,26 @@ impl OpaqueCapability {
     #[must_use]
     pub fn expose_token(&self) -> &str {
         &self.token
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueCapability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            token: DeserializedSecret,
+            scopes: Vec<LobbyCapabilityScope>,
+            expires_at: UnixMillis,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            token: wire.token.into_zeroizing(),
+            scopes: wire.scopes,
+            expires_at: wire.expires_at,
+        })
     }
 }
 
@@ -315,7 +350,7 @@ impl Serialize for OpaqueCapability {
 pub struct CreateInvitationRequest {}
 
 /// First-success invitation returned once. Replays never re-emit this object.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInvitationResponse {
     /// One-use invitation capability.
     pub invitation: OpaqueCapability,
@@ -356,7 +391,7 @@ impl JoinLobbyRequest {
 /// Its custom serializer is the sole protocol serializer allowed to expose an
 /// auth key. Its derived-style `Debug` path delegates to the credential's
 /// redacted implementation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct JoinLobbyResponse {
     /// One-use secret returned exactly once.
     pub join_credential: JoinCredential,
@@ -979,7 +1014,7 @@ mod tests {
             ),
             join_credential: JoinCredential::new(
                 "credential-1",
-                secret,
+                Zeroizing::new(secret.into()),
                 "example.ts.net",
                 vec!["tag:spurfire-lobby-example".into()],
                 UnixMillis::new(300_000),
@@ -1012,7 +1047,7 @@ mod tests {
     fn dry_run_placeholder_is_structurally_valid_and_non_secret() {
         let credential = JoinCredential::new(
             "dry-credential",
-            DRY_RUN_AUTH_KEY,
+            Zeroizing::new(DRY_RUN_AUTH_KEY.into()),
             "dry-run.invalid",
             vec!["tag:spurfire-lobby-dry-run".into()],
             UnixMillis::new(1),
