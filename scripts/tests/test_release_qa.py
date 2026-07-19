@@ -274,6 +274,15 @@ class EvidenceTests(unittest.TestCase):
             name: {"id": index, "head_sha": SHA, "conclusion": "success"}
             for index, name in enumerate(("ci", "client_preflight", "private_live_lifecycle"), 1)
         }
+        runs["private_live_lifecycle"].update(
+            {
+                "repository": "trusted/live-evidence",
+                "workflow_path": ".github/workflows/private-live.yml",
+                "evidence_artifact": "private-live-evidence",
+                "evidence_file": "private-live.json",
+                "evidence_sha256": "3" * 64,
+            }
+        )
         return {
             "schema_version": 1,
             "version": "0.2.0",
@@ -287,8 +296,22 @@ class EvidenceTests(unittest.TestCase):
                 "windows": {"authenticode_signed": True},
             },
             "approvals": {
-                "activation": {"approved": True, "evidence_digest": "sha256:" + "4" * 64},
-                "release": {"approved": True, "evidence_digest": "sha256:" + "5" * 64},
+                "activation": {
+                    "approved": True,
+                    "evidence_digest": "sha256:" + "4" * 64,
+                    "repository": "rajsinghtech/spurfire",
+                    "pull_request": 9,
+                    "review_id": 41,
+                    "reviewer": "activation-reviewer",
+                },
+                "release": {
+                    "approved": True,
+                    "evidence_digest": "sha256:" + "5" * 64,
+                    "repository": "rajsinghtech/spurfire",
+                    "pull_request": 9,
+                    "review_id": 42,
+                    "reviewer": "release-reviewer",
+                },
             },
         }
 
@@ -301,6 +324,31 @@ class EvidenceTests(unittest.TestCase):
         manifest["distribution_trust"]["macos"]["notarized"] = False
         with self.assertRaises(EVIDENCE.ManifestError):
             EVIDENCE.validate(manifest, version="0.2.0", source_sha=SHA)
+
+    def test_self_asserted_external_bindings_block_release(self):
+        manifest = self.manifest()
+        manifest["runs"]["private_live_lifecycle"].pop("workflow_path")
+        with self.assertRaises(EVIDENCE.ManifestError):
+            EVIDENCE.validate(manifest, version="0.2.0", source_sha=SHA)
+
+        manifest = self.manifest()
+        manifest["approvals"]["release"]["reviewer"] = manifest["approvals"]["activation"]["reviewer"]
+        with self.assertRaises(EVIDENCE.ManifestError):
+            EVIDENCE.validate(manifest, version="0.2.0", source_sha=SHA)
+
+    def test_publisher_resolves_external_evidence(self):
+        publisher = (ROOT / ".github" / "workflows" / "client-publish.yml").read_text(
+            encoding="utf-8"
+        )
+        for contract in (
+            "ALPHA_PRIVATE_LIVE_REPOSITORY",
+            "ALPHA_PRIVATE_LIVE_WORKFLOW",
+            "gh run download",
+            "check-alpha-lifecycle-evidence.py --require-live",
+            "/reviews/$approval_review",
+            "SPURFIRE_ALPHA_${approval_name^^}_APPROVED",
+        ):
+            self.assertIn(contract, publisher)
 
     def test_missing_linux_arm64_artifact_blocks_release(self):
         manifest = self.manifest()

@@ -31,6 +31,7 @@ jobs:
       actions: read
       attestations: read
       contents: write
+      pull-requests: read
     environment: alpha-release
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -43,10 +44,12 @@ jobs:
         name: Validate source run, jobs, artifacts, and tag
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.ALPHA_EVIDENCE_TOKEN || github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.run_id }}
           EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          PRIVATE_LIVE_REPOSITORY: ${{ vars.ALPHA_PRIVATE_LIVE_REPOSITORY }}
+          PRIVATE_LIVE_WORKFLOW: ${{ vars.ALPHA_PRIVATE_LIVE_WORKFLOW }}
         run: |
           set -euo pipefail
 
@@ -153,6 +156,77 @@ jobs:
             passed("Rust source gates (windows-latest)") and
             passed("Godot / Rust M2 (Linux)")' \
             <<< "$ci_jobs_json" > /dev/null
+
+          # Resolve private-live proof through a repository-configured trusted
+          # harness instead of trusting booleans and run IDs in the manifest.
+          test -n "$PRIVATE_LIVE_REPOSITORY"
+          test -n "$PRIVATE_LIVE_WORKFLOW"
+          private_id="$(jq -er '.runs.private_live_lifecycle.id' "$evidence")"
+          private_repo="$(jq -er '.runs.private_live_lifecycle.repository' "$evidence")"
+          private_workflow="$(jq -er '.runs.private_live_lifecycle.workflow_path' "$evidence")"
+          private_artifact="$(jq -er '.runs.private_live_lifecycle.evidence_artifact' "$evidence")"
+          private_file="$(jq -er '.runs.private_live_lifecycle.evidence_file' "$evidence")"
+          private_digest="$(jq -er '.runs.private_live_lifecycle.evidence_sha256' "$evidence")"
+          test "$private_repo" = "$PRIVATE_LIVE_REPOSITORY"
+          test "$private_repo" != "$expected_repository"
+          test "$private_workflow" = "$PRIVATE_LIVE_WORKFLOW"
+          [[ "$private_file" =~ ^[A-Za-z0-9_.-]+$ ]]
+          private_run_json="$(gh api "/repos/$private_repo/actions/runs/$private_id")"
+          jq -e \
+            --arg repository "$private_repo" \
+            --arg workflow "$private_workflow" \
+            --arg sha "$source_sha" '
+              (.path == $workflow) and
+              (.event == "workflow_dispatch") and
+              (.status == "completed") and
+              (.conclusion == "success") and
+              (.head_sha == $sha) and
+              (.repository.full_name == $repository) and
+              (.head_repository.full_name == $repository)' \
+            <<< "$private_run_json" > /dev/null
+          private_dir="$RUNNER_TEMP/private-live-evidence"
+          rm -rf "$private_dir"
+          mkdir -p "$private_dir"
+          gh run download "$private_id" --repo "$private_repo" \
+            --name "$private_artifact" --dir "$private_dir"
+          test -f "$private_dir/$private_file"
+          test "$(find "$private_dir" -type f | wc -l)" -eq 1
+          echo "$private_digest  $private_dir/$private_file" | sha256sum --check
+          scripts/check-alpha-lifecycle-evidence.py --require-live \
+            "$private_dir/$private_file" > /dev/null
+          test "$(jq -r '.source_sha' "$private_dir/$private_file")" = "$source_sha"
+
+          # Resolve two distinct GitHub approvals bound to S and their evidence
+          # digests. Dismissed, stale, outsider, or PR-author reviews fail closed.
+          approval_reviewers=()
+          for approval_name in activation release; do
+            approval_repo="$(jq -er --arg name "$approval_name" '.approvals[$name].repository' "$evidence")"
+            approval_pr="$(jq -er --arg name "$approval_name" '.approvals[$name].pull_request' "$evidence")"
+            approval_review="$(jq -er --arg name "$approval_name" '.approvals[$name].review_id' "$evidence")"
+            approval_reviewer="$(jq -er --arg name "$approval_name" '.approvals[$name].reviewer' "$evidence")"
+            approval_digest="$(jq -er --arg name "$approval_name" '.approvals[$name].evidence_digest' "$evidence")"
+            test "$approval_repo" = "$expected_repository"
+            if test "$approval_name" = activation; then
+              test "$approval_digest" = "sha256:$private_digest"
+            fi
+            pr_json="$(gh api "/repos/$approval_repo/pulls/$approval_pr")"
+            test "$(jq -r '.head.sha' <<< "$pr_json")" = "$source_sha"
+            pr_author="$(jq -r '.user.login | ascii_downcase' <<< "$pr_json")"
+            review_json="$(gh api "/repos/$approval_repo/pulls/$approval_pr/reviews/$approval_review")"
+            marker="SPURFIRE_ALPHA_${approval_name^^}_APPROVED source_sha=$source_sha evidence_digest=$approval_digest"
+            jq -e \
+              --arg reviewer "$approval_reviewer" \
+              --arg sha "$source_sha" \
+              --arg marker "$marker" '
+                (.state == "APPROVED") and
+                (.commit_id == $sha) and
+                ((.user.login | ascii_downcase) == ($reviewer | ascii_downcase)) and
+                (.author_association | IN("MEMBER", "OWNER", "COLLABORATOR")) and
+                (.body | contains($marker))' <<< "$review_json" > /dev/null
+            test "$(jq -r '.user.login | ascii_downcase' <<< "$review_json")" != "$pr_author"
+            approval_reviewers+=("$(jq -r '.user.login | ascii_downcase' <<< "$review_json")")
+          done
+          test "${approval_reviewers[0]}" != "${approval_reviewers[1]}"
 
           artifacts_json="$(
             gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"

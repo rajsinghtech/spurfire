@@ -90,6 +90,17 @@ def validate(document: dict[str, Any], *, version: str | None, source_sha: str |
             raise ManifestError(f"{name} run id must be positive")
         if run.get("head_sha") != actual_sha or run.get("conclusion") != "success":
             raise ManifestError(f"{name} run is not a successful exact-SHA binding")
+    private_live = runs["private_live_lifecycle"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(private_live.get("repository", ""))):
+        raise ManifestError("private-live run must identify its external repository")
+    if not re.fullmatch(r"[^/]+(?:/[^/]+)*\.(?:yml|yaml)", str(private_live.get("workflow_path", ""))):
+        raise ManifestError("private-live run must identify its workflow path")
+    for field in ("evidence_artifact", "evidence_file"):
+        value = str(private_live.get(field, ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value) or value in {".", ".."}:
+            raise ManifestError(f"private-live {field} must be a safe file name")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(private_live.get("evidence_sha256", ""))):
+        raise ManifestError("private-live evidence lacks SHA-256")
 
     artifacts = document.get("artifacts")
     if not isinstance(artifacts, list):
@@ -120,12 +131,25 @@ def validate(document: dict[str, Any], *, version: str | None, source_sha: str |
     approvals = document.get("approvals")
     if not isinstance(approvals, dict):
         raise ManifestError("approvals must be an object")
+    reviewers: set[str] = set()
     for name in ("activation", "release"):
         approval = approvals.get(name)
         if not isinstance(approval, dict) or approval.get("approved") is not True:
             raise ManifestError(f"missing independent {name} approval")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(approval.get("evidence_digest", ""))):
             raise ManifestError(f"{name} approval lacks a SHA-256 evidence digest")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(approval.get("repository", ""))):
+            raise ManifestError(f"{name} approval must identify its GitHub repository")
+        if not isinstance(approval.get("pull_request"), int) or approval["pull_request"] < 1:
+            raise ManifestError(f"{name} approval pull request must be positive")
+        if not isinstance(approval.get("review_id"), int) or approval["review_id"] < 1:
+            raise ManifestError(f"{name} approval review id must be positive")
+        reviewer = str(approval.get("reviewer", ""))
+        if not re.fullmatch(r"[A-Za-z0-9-]+", reviewer):
+            raise ManifestError(f"{name} approval must identify its reviewer")
+        reviewers.add(reviewer.casefold())
+    if len(reviewers) != 2:
+        raise ManifestError("activation and release approvals require distinct reviewers")
 
     return {
         "ok": True,

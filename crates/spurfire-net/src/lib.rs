@@ -25,6 +25,8 @@ pub const HEARTBEAT_TIMEOUT_MS: u64 = 3_000;
 pub const RECONNECT_GRACE_MS: u64 = 5_000;
 /// Maximum invited-friends roster represented by one M2 checkpoint.
 pub const MAX_CHECKPOINT_RIDERS: usize = 16;
+/// Every rider target currently has a fixed 100-point combat health ceiling.
+pub const MAX_CHECKPOINT_RIDER_HEALTH: u16 = 100;
 /// Existing mounted-jump edge bit, now formally assigned.
 pub const RIDER_INPUT_JUMP_PRESSED: u16 = 1 << 0;
 /// M2 dismount/remount E edge bit.
@@ -92,6 +94,7 @@ impl MatchCheckpoint {
             || self.riders.iter().any(|rider| {
                 let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok();
                 !rider.stance.is_canonical()
+                    || rider.health > MAX_CHECKPOINT_RIDER_HEALTH
                     || weapon.is_none()
                     || weapon.is_some_and(|weapon| {
                         let stats = weapon.stats();
@@ -1729,6 +1732,34 @@ mod tests {
         );
         assert_eq!(session.authority(), before.authority());
         assert!(session.checkpoint().is_none());
+
+        // Regression: gameplay restoration has a fixed 100-health ceiling. The
+        // transport must reject an otherwise signed/hash-valid checkpoint
+        // before authority, replay, receipts, or checkpoint state can move.
+        let mut excessive_health = checkpoint.clone();
+        excessive_health.riders[0].health = MAX_CHECKPOINT_RIDER_HEALTH + 1;
+        assert_eq!(
+            session.accept(
+                &Envelope {
+                    payload: PeerPayload::MigrationSnapshot {
+                        authority: player(2),
+                        epoch: 2,
+                        state_hash: excessive_health.hash(),
+                        checkpoint: excessive_health,
+                    },
+                    ..packet(checkpoint.hash())
+                },
+                HEARTBEAT_TIMEOUT_MS,
+            ),
+            AcceptOutcome::InvalidCheckpoint
+        );
+        assert_eq!(session.authority(), before.authority());
+        assert_eq!(session.authority_epoch(), before.authority_epoch());
+        assert!(session.checkpoint().is_none());
+        assert!(!session.has_applied_shot_result(1, player(2), 170));
+
+        // Reusing the same sequence proves the invalid checkpoint did not
+        // advance replay state.
         assert_eq!(
             session.accept(&packet(checkpoint.hash()), HEARTBEAT_TIMEOUT_MS),
             AcceptOutcome::Accepted

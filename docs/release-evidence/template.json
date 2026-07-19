@@ -2,11 +2,19 @@
   "approvals": {
     "activation": {
       "approved": false,
-      "evidence_digest": ""
+      "evidence_digest": "",
+      "pull_request": 0,
+      "repository": "",
+      "review_id": 0,
+      "reviewer": ""
     },
     "release": {
       "approved": false,
-      "evidence_digest": ""
+      "evidence_digest": "",
+      "pull_request": 0,
+      "repository": "",
+      "review_id": 0,
+      "reviewer": ""
     }
   },
   "artifacts": [
@@ -81,8 +89,13 @@
     },
     "private_live_lifecycle": {
       "conclusion": "",
+      "evidence_artifact": "",
+      "evidence_file": "",
+      "evidence_sha256": "",
       "head_sha": "",
-      "id": 0
+      "id": 0,
+      "repository": "",
+      "workflow_path": ""
     }
   },
   "schema_version": 1,

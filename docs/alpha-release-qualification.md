@@ -61,6 +61,19 @@ scripts/check-alpha-lifecycle-evidence.py --require-live private-live.json
 
 Private-live validation additionally requires the control service to be absent from gameplay membership, two exact stable-ID-absence observations at least five seconds apart, verified vault erasure after absence, atomic `DEDICATED_ABSENT`, and lease release. The validator performs no mutation and rejects credential/topology material.
 
+## Governed readiness states
+
+These decisions are separate and none implies the next. Each decision must name its owner and bind immutable evidence to the exact source SHA:
+
+| State | Decision owner | Required binding | Current state |
+|---|---|---|---|
+| **Source-ready** | source maintainer | successful exact-SHA CI and all client-preflight jobs/artifacts | **No — exact-head gates must complete successfully** |
+| **Alpha-ready** | activation reviewer (not the PR author) | trusted-harness private-live artifact plus natural M2/telemetry evidence | **No — credentialed and human evidence is pending** |
+| **Merge-ready** | independent PR reviewer | Source-ready and Alpha-ready evidence plus an exact-SHA approving review | **No — independent review and prior states are pending** |
+| **Release-ready** | distinct release reviewer | merged source, distribution trust, completed manifest, and digest-bound approving review | **No — signing, notarization, evidence, and approvals are pending** |
+
+The completed manifest records bindings; it does not create any of these decisions. The protected publisher resolves the configured private-live workflow run and artifact through GitHub, validates the artifact, and resolves activation and release approvals as distinct exact-SHA PR reviews. Repository variables `ALPHA_PRIVATE_LIVE_REPOSITORY` and `ALPHA_PRIVATE_LIVE_WORKFLOW` identify the separately governed external trusted harness; it cannot be this source repository. If that repository is not readable by `github.token`, the protected environment must provide a read-only `ALPHA_EVIDENCE_TOKEN`. Missing configuration, inaccessible external evidence, self-approval, stale/dismissed reviews, or duplicate reviewers fail closed.
+
 ## Terminal release gate
 
 A stable tag is not a way to discover readiness. First qualify source commit **S** and record S in a reviewed `docs/release-evidence/<version>.json`. Commit only that manifest and its release notes in metadata commit **T**, then `scripts/check-release-tag-binding.sh <version> T` must prove S is an ancestor and S..T changes only those two files. The tag may identify T; all CI/client/live run IDs and artifact evidence remain bound to S. The manifest also binds launch smoke, SBOM/provenance, platform trust, activation, private-live cleanup, natural M2 playtest, telemetry, and independent approvals.

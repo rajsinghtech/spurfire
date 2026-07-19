@@ -13,6 +13,13 @@ sha256sum docs/release-evidence/<version>.json
 
 Commit only the completed manifest and `docs/release-notes-<version>.md` in metadata commit **T**. Before tagging T, run `scripts/check-release-tag-binding.sh <version> T`; it proves S is an ancestor and rejects every non-metadata change between S and T. This avoids an impossible self-referential manifest hash while keeping builds and evidence bound to S.
 
-The independently reviewed SHA-256 is required by the protected manual client publisher. The validator deliberately requires Apple Developer ID signing and notarization, Windows Authenticode signing, exact-SHA provenance/SBOM/launch smoke, private-live exact-cleanup evidence, natural M2 evidence, activation approval, and independent release approval.
+The independently reviewed SHA-256 is required by the protected manual client publisher. The local validator checks manifest structure only; booleans and identifiers are never treated as external proof. During publication, GitHub resolves the private-live run through the repository-configured trusted harness, downloads and hashes its sole redacted evidence artifact, runs the live lifecycle validator, and resolves activation and release approvals as two distinct exact-SHA PR reviews whose bodies bind the source and evidence digests. Missing external configuration or inaccessible evidence fails closed. The validator also requires Apple Developer ID signing and notarization, Windows Authenticode signing, exact-SHA provenance/SBOM/launch smoke, natural M2 evidence, and telemetry gates.
+
+Approval review bodies must contain exactly the applicable binding (with real values substituted):
+
+```text
+SPURFIRE_ALPHA_ACTIVATION_APPROVED source_sha=<S> evidence_digest=sha256:<digest>
+SPURFIRE_ALPHA_RELEASE_APPROVED source_sha=<S> evidence_digest=sha256:<digest>
+```
 
 Candidate workflow artifacts do not satisfy this contract. They are short-lived, nonpublishing, and explicitly record the current macOS and Windows trust blockers.
