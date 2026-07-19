@@ -1583,7 +1583,7 @@ impl PeerSession {
             Err(_) => self
                 .lobby_client
                 .fail_now(LobbyOperation::Create, NativeLobbyError::Secret),
-        }
+        };
     }
 
     #[func]
@@ -1600,7 +1600,7 @@ impl PeerSession {
             Err(_) => self
                 .lobby_client
                 .fail_now(LobbyOperation::Join, NativeLobbyError::Secret),
-        }
+        };
     }
 
     #[func]

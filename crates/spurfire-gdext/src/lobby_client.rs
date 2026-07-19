@@ -19,7 +19,7 @@ use godot::{
 };
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
-    Method, StatusCode, Url,
+    Method, Url,
 };
 use serde_json::{json, Value};
 use spurfire_protocol::{LobbyId, PlayerId};
@@ -861,7 +861,7 @@ impl NativeSecretInput {
 #[godot_api]
 impl NativeSecretInput {
     #[func]
-    fn arm_capture(&mut self) {
+    pub(crate) fn arm_capture(&mut self) {
         self.bytes.zeroize();
         self.bytes.clear();
         self.armed = true;
@@ -870,7 +870,7 @@ impl NativeSecretInput {
     }
 
     #[func]
-    fn clear_capture(&mut self) {
+    pub(crate) fn clear_capture(&mut self) {
         self.bytes.zeroize();
         self.bytes.clear();
         self.armed = false;
