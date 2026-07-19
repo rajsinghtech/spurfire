@@ -1040,6 +1040,8 @@ fn migration_payload(
                                 ammo_reserve: 18,
                                 last_input_tick: tick.saturating_sub(1),
                                 last_shot_tick: Some(tick.saturating_sub(2)),
+                                last_command_tick: Some(tick.saturating_sub(2)),
+                                shot_index: 1,
                             },
                             RiderCheckpoint {
                                 rider_player_id: Node::C.id()?,
@@ -1053,6 +1055,8 @@ fn migration_payload(
                                 ammo_reserve: 24,
                                 last_input_tick: tick.saturating_sub(1),
                                 last_shot_tick: None,
+                                last_command_tick: None,
+                                shot_index: 0,
                             },
                         ],
                         resolved_shots: vec![(Node::B.id()?, tick.saturating_sub(2))],

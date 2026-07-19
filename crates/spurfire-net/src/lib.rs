@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     canonical_envelope_digest, canonical_manifest_digest, LobbyId, NodeKey, PlayerId, RiderStance,
     RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
-    SessionSignature, ShotCommand, ShotResult, WireVersion, CURRENT_WIRE_VERSION,
+    SessionSignature, ShotCommand, ShotResult, WeaponId, WireVersion, CURRENT_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -58,6 +58,10 @@ pub struct RiderCheckpoint {
     pub last_input_tick: u64,
     #[serde(rename = "f", alias = "last_shot_tick")]
     pub last_shot_tick: Option<u64>,
+    #[serde(default, rename = "c", alias = "last_command_tick")]
+    pub last_command_tick: Option<u64>,
+    #[serde(default, rename = "n", alias = "shot_index")]
+    pub shot_index: u64,
 }
 
 /// Complete bounded M2 handoff. Combat receipts prevent damage/ammo replay.
@@ -85,10 +89,21 @@ impl MatchCheckpoint {
         if self.riders.is_empty()
             || self.riders.len() > MAX_CHECKPOINT_RIDERS
             || self.resolved_shots.len() > MAX_CHECKPOINT_RIDERS * 64
-            || self
-                .riders
-                .iter()
-                .any(|rider| !rider.stance.is_canonical() || rider.weapon_id > 2)
+            || self.riders.iter().any(|rider| {
+                let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok();
+                !rider.stance.is_canonical()
+                    || weapon.is_none()
+                    || weapon.is_some_and(|weapon| {
+                        let stats = weapon.stats();
+                        rider.ammo_magazine > stats.magazine_capacity
+                            || rider.ammo_reserve > stats.reserve_capacity
+                    })
+                    || rider.last_shot_tick.is_some() != (rider.shot_index > 0)
+                    || (rider.last_shot_tick.is_some() && rider.last_command_tick.is_none())
+                    || rider.last_command_tick.is_some_and(|command| {
+                        rider.last_shot_tick.is_some_and(|shot| shot > command)
+                    })
+            })
         {
             return false;
         }
@@ -544,11 +559,16 @@ impl SessionState {
             return false;
         }
         if epoch == self.authority_epoch {
-            return authority <= self.authority;
+            return authority == self.authority
+                || (authority < self.authority && self.current_authority_is_silent(now_ms));
         }
         if self.authority_epoch.checked_add(1) != Some(epoch) {
             return false;
         }
+        self.current_authority_is_silent(now_ms)
+    }
+
+    fn current_authority_is_silent(&self, now_ms: u64) -> bool {
         self.authority != self.local_player
             && self
                 .peers
@@ -1193,42 +1213,144 @@ mod tests {
     }
 
     #[test]
-    fn same_epoch_tie_break_converges_to_lowest_sender() {
+    fn same_epoch_tie_break_waits_for_installed_authority_timeout() {
         let mut session = SessionState::new(lobby(), player(2), player(3), 0);
         session.add_peer(player(1), 0);
         session.add_peer(player(3), 0);
-        let claim = |sender: PlayerId, sequence: u64| Envelope {
+        let claim = |sender: PlayerId, sequence: u64, migration: bool| Envelope {
             wire_version: CURRENT_WIRE_VERSION,
             lobby_id: lobby(),
             sender,
             sequence,
             authority_epoch: 1,
             simulation_tick: 10,
-            payload: PeerPayload::Authority {
-                authority: sender,
-                epoch: 1,
+            payload: if migration {
+                let checkpoint = MatchCheckpoint {
+                    source_epoch: 0,
+                    tick: 10,
+                    riders: vec![RiderCheckpoint {
+                        rider_player_id: player(2),
+                        position_mm: [0; 3],
+                        velocity_mmps: [0; 3],
+                        yaw_millidegrees: 0,
+                        stance: RiderStance::Mounted,
+                        health: 100,
+                        weapon_id: 0,
+                        ammo_magazine: 30,
+                        ammo_reserve: 120,
+                        last_input_tick: 10,
+                        last_shot_tick: None,
+                        last_command_tick: None,
+                        shot_index: 0,
+                    }],
+                    resolved_shots: vec![],
+                };
+                let state_hash = checkpoint.hash();
+                PeerPayload::MigrationSnapshot {
+                    authority: sender,
+                    epoch: 1,
+                    checkpoint,
+                    state_hash,
+                }
+            } else {
+                PeerPayload::Authority {
+                    authority: sender,
+                    epoch: 1,
+                }
             },
             session: None,
         };
-        // A higher-ID same-epoch claim does not displace the current authority.
         assert_eq!(
-            session.accept(&claim(player(3), 1), 10),
+            session.accept(&claim(player(3), 1, false), 10),
             AcceptOutcome::Accepted
         );
-        assert_eq!(session.authority(), player(3));
-        // The lowest-ID self-nomination wins the same-epoch tie-break.
+        let before = session.clone();
         assert_eq!(
-            session.accept(&claim(player(1), 1), 11),
+            session.accept(&claim(player(1), 1, false), 11),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(session.authority(), before.authority());
+        assert_eq!(
+            session.peers[&player(1)].last_sequence,
+            before.peers[&player(1)].last_sequence
+        );
+        // A valid, signed-shape migration claim cannot bypass the same gate.
+        assert_eq!(
+            session.accept(&claim(player(1), 2, true), 12),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(session.authority(), player(3));
+        assert_eq!(
+            session.accept(&claim(player(1), 3, false), 10 + HEARTBEAT_TIMEOUT_MS),
             AcceptOutcome::Accepted
         );
         assert_eq!(session.authority(), player(1));
         assert_eq!(session.authority_epoch(), 1);
-        // Once converged, the higher-ID claim is incoherent and inert.
+    }
+
+    #[test]
+    fn secure_receive_rejects_signed_lower_id_same_epoch_claim_while_authority_is_fresh() {
+        let (mut attacker, attacker_signing, attacker_source) = secure_fixture(player(1));
+        let (mut receiver, _, _) = secure_fixture(player(2));
+        receiver.state.authority = player(2);
+        let signed = attacker
+            .envelope(
+                1,
+                PeerPayload::Authority {
+                    authority: player(1),
+                    epoch: 1,
+                },
+                &attacker_signing,
+            )
+            .unwrap();
+        let before = receiver.state().clone();
         assert_eq!(
-            session.accept(&claim(player(3), 2), 12),
+            receiver.accept_with_source(&signed, attacker_source, None, 10),
             AcceptOutcome::InvalidAuthorityClaim
         );
-        assert_eq!(session.authority(), player(1));
+        assert_eq!(receiver.state().authority(), before.authority());
+        assert_eq!(
+            receiver.state().peers[&player(1)].last_sequence,
+            before.peers[&player(1)].last_sequence
+        );
+
+        let checkpoint = MatchCheckpoint {
+            source_epoch: 0,
+            tick: 2,
+            riders: vec![RiderCheckpoint {
+                rider_player_id: player(1),
+                position_mm: [0; 3],
+                velocity_mmps: [0; 3],
+                yaw_millidegrees: 0,
+                stance: RiderStance::Mounted,
+                health: 100,
+                weapon_id: 0,
+                ammo_magazine: 30,
+                ammo_reserve: 120,
+                last_input_tick: 2,
+                last_shot_tick: None,
+                last_command_tick: None,
+                shot_index: 0,
+            }],
+            resolved_shots: vec![],
+        };
+        let migration = attacker
+            .envelope(
+                2,
+                PeerPayload::MigrationSnapshot {
+                    authority: player(1),
+                    epoch: 1,
+                    state_hash: checkpoint.hash(),
+                    checkpoint,
+                },
+                &attacker_signing,
+            )
+            .unwrap();
+        assert_eq!(
+            receiver.accept_with_source(&migration, attacker_source, None, 11),
+            AcceptOutcome::InvalidAuthorityClaim
+        );
+        assert_eq!(receiver.state().authority(), player(2));
     }
 
     #[test]
@@ -1440,6 +1562,8 @@ mod tests {
                         ammo_reserve: 24,
                         last_input_tick: u64::MAX,
                         last_shot_tick: Some(u64::MAX),
+                        last_command_tick: Some(u64::MAX),
+                        shot_index: 1,
                     }],
                     resolved_shots: vec![],
                 },
@@ -1568,6 +1692,8 @@ mod tests {
                 ammo_reserve: 18,
                 last_input_tick: 179,
                 last_shot_tick: Some(170),
+                last_command_tick: Some(170),
+                shot_index: 1,
             }],
             resolved_shots: vec![(player(2), 170)],
         };

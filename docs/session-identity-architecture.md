@@ -140,7 +140,8 @@ manifest_public_key 32B || canonical_roster_bytes
    (`authority` == `sender`), and either an exact one-epoch advance accepted only while the
    current authority is silent in the receiver's own view (the local player always counts
    as fresh, so a live authority fails closed against remote usurpation), or a same-epoch
-   claim converging split elections toward the lowest `PlayerId`. Epoch jumps such as
+   claim from the installed authority or, after that same silence timeout, one converging
+   split elections toward the lowest `PlayerId`. Epoch jumps such as
    `u64::MAX` and third-party installs are inert and mutate nothing.
 
 **Every identity, source, and authority-claim check runs before replay, epoch, or authority

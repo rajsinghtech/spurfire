@@ -98,6 +98,11 @@ func apply_projection(response: Dictionary) -> bool:
 			"rtt_ms": existing.get("rtt_ms", null),
 			"last_seen_ms": int(existing.get("last_seen_ms", 0)),
 		}
+	# Projection removal may race ahead of the signed Leave packet. Clean all
+	# gameplay and presentation state here so packet ordering is irrelevant.
+	for previous_id: String in _peers.keys():
+		if not next_peers.has(previous_id):
+			_remove_peer(previous_id)
 	_peers = next_peers
 	if bool(projection.get("secure", false)):
 		if not peer_session.configure_secure_session(
@@ -127,6 +132,8 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 		_record_actor_state(local_player_id, local_rider, tick)
 		for player_id: String in _latest_inputs:
 			_simulate_remote_actor(player_id, _latest_inputs[player_id] as Dictionary, tick)
+		for player_id: String in _actor_states:
+			_record_authority_combat_state(player_id, _actor_states[player_id] as Dictionary)
 		if tick % 2 == 0 or stance_changed:
 			for player_id: String in _actor_states:
 				var state := _actor_states[player_id] as Dictionary
@@ -300,12 +307,7 @@ func _on_packet_received(
 			local_is_authority = _authority_player_id == local_player_id
 			_migration_pending = false
 		"leave":
-			_peers.erase(sender)
-			if _remote_riders.has(sender):
-				var departing := _remote_riders[sender] as Node3D
-				_remote_riders.erase(sender)
-				if departing != remote_rider_template:
-					departing.queue_free()
+			_remove_peer(sender)
 			if sender == _authority_player_id:
 				authority_departed.emit()
 
@@ -356,21 +358,35 @@ func _attempt_migration(now_ms: int) -> void:
 	var riders: Array = []
 	for player_id: String in _actor_states:
 		var state := _actor_states[player_id] as Dictionary
+		var combat := peer_session.combat_checkpoint_state(player_id) as Dictionary
+		if combat.is_empty():
+			# Never invent a loadout or refill/empty ammo during authority handoff.
+			return
+		var last_shot := int(combat.get("last_shot_tick", -1))
+		var last_command := int(combat.get("last_command_tick", -1))
 		riders.append({
 			"rider_player_id": player_id,
 			"position_mm": _vector_mm(state.position as Vector3),
 			"velocity_mmps": _vector_mm(state.velocity as Vector3),
 			"yaw_millidegrees": roundi(float(state.yaw_degrees) * 1000.0),
-			"stance": int(state.stance_id), "health": 100, "weapon_id": 0,
-			"ammo_magazine": 0, "ammo_reserve": 0,
-			"last_input_tick": int(state.tick), "last_shot_tick": null,
+			"stance": int(state.stance_id), "health": int(state.get("health", 100)),
+			"weapon_id": int(combat.weapon_id),
+			"ammo_magazine": int(combat.ammo_magazine),
+			"ammo_reserve": int(combat.ammo_reserve),
+			"last_input_tick": int(state.tick),
+			"last_shot_tick": null if last_shot < 0 else last_shot,
+			"last_command_tick": null if last_command < 0 else last_command,
+			"shot_index": int(combat.shot_index),
 		})
 	if riders.is_empty():
 		_record_actor_state(local_player_id, local_rider, simulation_tick)
 		return
+	var resolved_value = JSON.parse_string(str(peer_session.combat_resolved_shots_json()))
+	if not resolved_value is Array:
+		return
 	var checkpoint := {
 		"source_epoch": int(peer_session.get("authority_epoch")),
-		"tick": simulation_tick, "riders": riders, "resolved_shots": [],
+		"tick": simulation_tick, "riders": riders, "resolved_shots": resolved_value,
 	}
 	var packet: PackedByteArray = peer_session.poll_migration(
 		now_ms, JSON.stringify(checkpoint)
@@ -420,6 +436,23 @@ func _record_actor_state(player_id: String, rider: CharacterBody3D, tick: int) -
 		"yaw_degrees": rad_to_deg(rider.rotation.y), "stance_id": int(rider.get("stance_id")),
 	}
 
+func _record_authority_combat_state(player_id: String, state: Dictionary) -> void:
+	var muzzle := state.position as Vector3
+	if player_id == local_player_id:
+		var controller := local_rider.get_node_or_null("WeaponController") as Node3D
+		if controller:
+			muzzle = controller.global_position
+	else:
+		# Canonical authority-owned proxy muzzle. It is derived only from the
+		# simulated actor transform, never from the client's ShotCommand origin.
+		var offset := Vector3(0.52, 1.12, -0.18).rotated(
+			Vector3.UP, deg_to_rad(float(state.yaw_degrees))
+		)
+		muzzle += offset
+	peer_session.record_authority_rider_snapshot(
+		player_id, int(state.tick), muzzle, state.velocity as Vector3, int(state.stance_id)
+	)
+
 func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> void:
 	if int(input.get("tick", -1)) > tick or tick - int(input.get("tick", -1)) > 6:
 		return
@@ -450,18 +483,25 @@ func _on_route_updated(peer_ip: String, route: String) -> void:
 			peer.route = route
 			return
 
+func _remove_peer(player_id: String) -> void:
+	_peers.erase(player_id)
+	_latest_inputs.erase(player_id)
+	_actor_states.erase(player_id)
+	if _remote_riders.has(player_id):
+		var departing := _remote_riders[player_id] as Node3D
+		_remote_riders.erase(player_id)
+		departing.visible = false
+		departing.queue_free()
+
 func _remote_rider_for(player_id: String) -> Node3D:
 	if _remote_riders.has(player_id):
 		return _remote_riders[player_id] as Node3D
-	var rider: Node3D
-	if _remote_riders.is_empty():
-		rider = remote_rider_template
-	else:
-		rider = remote_rider_template.duplicate() as Node3D
-		remote_rider_template.get_parent().add_child(rider)
-	if rider:
-		rider.visible = true
-		_remote_riders[player_id] = rider
+	# Keep the scene node as a hidden prototype. Reusing it would retain a
+	# departed rider's native interpolation buffer across roster revisions.
+	var rider := remote_rider_template.duplicate() as Node3D
+	remote_rider_template.get_parent().add_child(rider)
+	rider.visible = true
+	_remote_riders[player_id] = rider
 	return rider
 
 func _authority_id(lobby: Dictionary) -> String:

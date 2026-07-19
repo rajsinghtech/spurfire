@@ -1,7 +1,7 @@
 //! Godot-facing background RustScale application-UDP node.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     net::{IpAddr, SocketAddr},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -16,10 +16,10 @@ use spurfire_net::{
     SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, CombatAuthority, LobbyId, LobbySessionProjection, NodeKey, PlayerId,
-    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
-    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, SimulationTick,
-    TargetRegistry, WeaponAmmo, WeaponId,
+    canonical_keyreg_digest, CombatAuthority, CombatGait, LobbyId, LobbySessionProjection, NodeKey,
+    PlayerId, QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
+    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
+    ShotResult, SimulationTick, TargetRegistry, TeamId, WeaponAmmo, WeaponId,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -84,6 +84,24 @@ fn parse_destination(destination_ip: &str, port: i64) -> Option<SocketAddr> {
     let ip = destination_ip.parse::<IpAddr>().ok()?;
     let port = u16::try_from(port).ok()?;
     Some(SocketAddr::new(ip, port))
+}
+
+fn resolve_authority_shot(
+    authority: &mut CombatAuthority,
+    targets: &mut TargetRegistry,
+    history: &BTreeMap<PlayerId, VecDeque<CombatRiderSnapshot>>,
+    command: &ShotCommand,
+) -> Option<ShotResult> {
+    let rider = history
+        .get(&command.shooter_peer_id)?
+        .iter()
+        .find(|snapshot| snapshot.tick == command.tick)
+        .copied()?;
+    Some(
+        authority
+            .validate_shot(command, command.tick, rider, targets)
+            .result,
+    )
 }
 
 async fn close_peer(peer: &mut RustScalePeer) -> Result<(), String> {
@@ -322,6 +340,8 @@ pub struct PeerSession {
     worker_generation: u64,
     combat_authority: Option<CombatAuthority>,
     combat_targets: Option<TargetRegistry>,
+    authority_rider_history: BTreeMap<PlayerId, VecDeque<CombatRiderSnapshot>>,
+    combat_receipts: BTreeSet<(u64, PlayerId, u64)>,
 }
 
 #[godot_api]
@@ -637,7 +657,17 @@ impl PeerSession {
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
         self.combat_authority = CombatAuthority::new(60, 0).ok();
+        if let Some(combat) = self.combat_authority.as_mut() {
+            // Multiplayer loadouts are authority-owned. Until signed loadout
+            // replication exists, every roster member starts with Dustwalker;
+            // a fire command can never select or change this state.
+            for player in &self.allowed_players {
+                combat.register_shooter(*player, WeaponId::Dustwalker);
+            }
+        }
         self.combat_targets = TargetRegistry::new(60).ok();
+        self.authority_rider_history.clear();
+        self.combat_receipts.clear();
         let signal_player = self.local_player_id.clone();
         let signal_epoch = self.authority_epoch;
         self.signals()
@@ -766,6 +796,83 @@ impl PeerSession {
         self.make_packet(tick, PeerPayload::ShotCommand { command })
     }
 
+    /// Record authority-simulated muzzle and rider state for one exact tick.
+    /// Client shot commands never contribute any value to this history.
+    #[func]
+    fn record_authority_rider_snapshot(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        muzzle_origin: Vector3,
+        velocity: Vector3,
+        stance_id: i64,
+    ) -> bool {
+        if self.local_player_id.to_string() != self.authority_player_id.to_string() {
+            return false;
+        }
+        let (Ok(player_id), Ok(tick), Ok(stance_id), Ok(muzzle_origin)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            u8::try_from(stance_id),
+            QuantizedOrigin::from_meters(
+                f64::from(muzzle_origin.x),
+                f64::from(muzzle_origin.y),
+                f64::from(muzzle_origin.z),
+            ),
+        ) else {
+            return false;
+        };
+        if !self.allowed_players.contains(&player_id) {
+            return false;
+        }
+        let stance = RiderStance::from_u8(stance_id);
+        let planar_speed = Vector2::new(velocity.x, velocity.z).length();
+        if !planar_speed.is_finite() {
+            return false;
+        }
+        let planar_speed_mmps = (f64::from(planar_speed) * 1_000.0)
+            .round()
+            .clamp(0.0, f64::from(u32::MAX)) as u32;
+        let gait = if planar_speed_mmps < 500 {
+            CombatGait::Idle
+        } else if planar_speed_mmps < 3_000 {
+            CombatGait::Walk
+        } else if planar_speed_mmps < 8_000 {
+            CombatGait::Trot
+        } else {
+            CombatGait::Gallop
+        };
+        let snapshot = CombatRiderSnapshot {
+            tick,
+            shooter_peer_id: player_id,
+            muzzle_origin,
+            team_id: TeamId::default(),
+            riding: RidingState {
+                stance,
+                dive_id: None,
+                gait,
+                planar_speed_mmps,
+                gait_top_speed_mmps: 13_000,
+                yaw_rate_millidegrees_per_second: 0,
+                stumbling: false,
+                ads: false,
+                sprint_gallop: false,
+            },
+        };
+        if !snapshot.riding.is_consistent() {
+            return false;
+        }
+        let history = self.authority_rider_history.entry(player_id).or_default();
+        if history.back().is_some_and(|previous| previous.tick >= tick) {
+            return false;
+        }
+        history.push_back(snapshot);
+        while history.len() > 32 {
+            history.pop_front();
+        }
+        true
+    }
+
     /// Resolve one admitted command exactly once through `CombatAuthority`.
     /// The returned JSON can only be signed by `make_shot_result` on authority.
     #[func]
@@ -783,30 +890,85 @@ impl PeerSession {
         else {
             return GString::new();
         };
-        if authority.shooter_kernel(command.shooter_peer_id).is_none() {
-            authority.register_shooter(command.shooter_peer_id, command.weapon_id);
-        } else if let Some(kernel) = authority.shooter_kernel_mut(command.shooter_peer_id) {
-            let _ = kernel.equip_weapon(command.weapon_id);
-        }
-        let rider = CombatRiderSnapshot {
-            tick: command.tick,
-            shooter_peer_id: command.shooter_peer_id,
-            muzzle_origin: command.origin,
-            team_id: Default::default(),
-            riding: RidingState::default(),
+        let Some(result) =
+            resolve_authority_shot(authority, targets, &self.authority_rider_history, &command)
+        else {
+            return GString::new();
         };
-        let resolved = authority.validate_shot(&command, command.tick, rider, targets);
-        let encoded = serde_json::to_string(&resolved.result).unwrap_or_default();
+        let encoded = serde_json::to_string(&result).unwrap_or_default();
         GString::from(&encoded)
+    }
+
+    /// Export authority-owned combat state for one checkpoint rider.
+    #[func]
+    fn combat_checkpoint_state(&self, player_id: GString) -> VarDictionary {
+        let mut state = VarDictionary::new();
+        let Ok(player_id) = PlayerId::parse(&player_id.to_string()) else {
+            return state;
+        };
+        let Some(authority) = self.combat_authority.as_ref() else {
+            return state;
+        };
+        let Some(kernel) = authority.shooter_kernel(player_id) else {
+            return state;
+        };
+        let ammo = kernel.equipped_ammo();
+        state.set("weapon_id", i64::from(kernel.equipped_weapon().as_u8()));
+        state.set("ammo_magazine", i64::from(ammo.magazine));
+        state.set("ammo_reserve", i64::from(ammo.reserve));
+        state.set(
+            "last_shot_tick",
+            kernel
+                .last_accepted_tick()
+                .map_or(-1, |tick| i64::try_from(tick.as_u64()).unwrap_or(i64::MAX)),
+        );
+        state.set(
+            "last_command_tick",
+            authority
+                .last_command_tick(player_id)
+                .map_or(-1, |tick| i64::try_from(tick.as_u64()).unwrap_or(i64::MAX)),
+        );
+        state.set(
+            "shot_index",
+            i64::try_from(kernel.shot_index()).unwrap_or(i64::MAX),
+        );
+        state
+    }
+
+    /// Export exact current-epoch result receipts for migration deduplication.
+    #[func]
+    fn combat_resolved_shots_json(&self) -> GString {
+        let Ok(epoch) = u64::try_from(self.authority_epoch) else {
+            return GString::new();
+        };
+        let rows = self
+            .combat_receipts
+            .iter()
+            .filter_map(|(receipt_epoch, shooter, tick)| {
+                (*receipt_epoch == epoch).then_some((*shooter, *tick))
+            })
+            .collect::<Vec<_>>();
+        GString::from(&serde_json::to_string(&rows).unwrap_or_default())
     }
 
     /// Build authority-only resolved combat truth.
     #[func]
     fn make_shot_result(&mut self, tick: i64, result_json: GString) -> PackedByteArray {
-        let Ok(result) = serde_json::from_str(&result_json.to_string()) else {
+        let Ok(result) = serde_json::from_str::<ShotResult>(&result_json.to_string()) else {
             return PackedByteArray::new();
         };
-        self.make_packet(tick, PeerPayload::ShotResult { result })
+        let receipt = (
+            u64::try_from(self.authority_epoch).ok(),
+            result.shooter_peer_id,
+            result.tick.as_u64(),
+        );
+        let packet = self.make_packet(tick, PeerPayload::ShotResult { result });
+        if !packet.is_empty() {
+            if let Some(epoch) = receipt.0 {
+                self.combat_receipts.insert((epoch, receipt.1, receipt.2));
+            }
+        }
+        packet
     }
 
     /// Advance exactly one epoch after timeout and sign a bounded checkpoint.
@@ -821,6 +983,11 @@ impl PeerSession {
         if !checkpoint.is_bounded_and_canonical() {
             return PackedByteArray::new();
         }
+        // Prepare the replacement before election state can mutate. A malformed
+        // combat checkpoint therefore fails the migration atomically.
+        let Some(restored_combat) = Self::restore_combat_checkpoint(&checkpoint) else {
+            return PackedByteArray::new();
+        };
         let Some(secure) = self.secure_session.as_mut() else {
             return PackedByteArray::new();
         };
@@ -836,6 +1003,16 @@ impl PeerSession {
         if authority.to_string() != self.local_player_id.to_string() {
             return PackedByteArray::new();
         }
+        // The elected sender does not receive its own datagram, so install the
+        // exact same state locally before advertising epoch 2.
+        self.combat_authority = Some(restored_combat);
+        self.combat_targets = TargetRegistry::new(60).ok();
+        self.combat_receipts.extend(
+            checkpoint
+                .resolved_shots
+                .iter()
+                .map(|(shooter, tick)| (checkpoint.source_epoch, *shooter, *tick)),
+        );
         let hash = checkpoint.hash();
         self.make_packet(
             i64::try_from(checkpoint.tick).unwrap_or(i64::MAX),
@@ -1020,31 +1197,15 @@ impl PeerSession {
         );
         if outcome == AcceptOutcome::Accepted {
             if let PeerPayload::MigrationSnapshot { checkpoint, .. } = &envelope.payload {
-                let mut restored = CombatAuthority::new(60, 0).ok();
-                if let Some(authority) = restored.as_mut() {
-                    for rider in &checkpoint.riders {
-                        let Ok(weapon) = WeaponId::try_from(i64::from(rider.weapon_id)) else {
-                            restored = None;
-                            break;
-                        };
-                        let last_tick = rider.last_shot_tick.map(SimulationTick::new);
-                        if !authority.restore_shooter(
-                            rider.rider_player_id,
-                            weapon,
-                            WeaponAmmo {
-                                magazine: rider.ammo_magazine,
-                                reserve: rider.ammo_reserve,
-                            },
-                            last_tick,
-                        ) {
-                            restored = None;
-                            break;
-                        }
-                    }
-                }
-                if restored.is_some() {
-                    self.combat_authority = restored;
+                if let Some(restored) = Self::restore_combat_checkpoint(checkpoint) {
+                    self.combat_authority = Some(restored);
                     self.combat_targets = TargetRegistry::new(60).ok();
+                    self.combat_receipts.extend(
+                        checkpoint
+                            .resolved_shots
+                            .iter()
+                            .map(|(shooter, tick)| (checkpoint.source_epoch, *shooter, *tick)),
+                    );
                 }
             }
         }
@@ -1186,6 +1347,8 @@ impl PeerSession {
         self.local_port = 0;
         self.combat_authority = None;
         self.combat_targets = None;
+        self.authority_rider_history.clear();
+        self.combat_receipts.clear();
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
@@ -1209,6 +1372,27 @@ impl PeerSession {
             .map_or_else(PackedByteArray::new, |bytes| {
                 PackedByteArray::from(bytes.as_slice())
             })
+    }
+
+    fn restore_combat_checkpoint(checkpoint: &MatchCheckpoint) -> Option<CombatAuthority> {
+        let mut restored = CombatAuthority::new(60, 0).ok()?;
+        for rider in &checkpoint.riders {
+            let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok()?;
+            if !restored.restore_shooter(
+                rider.rider_player_id,
+                weapon,
+                WeaponAmmo {
+                    magazine: rider.ammo_magazine,
+                    reserve: rider.ammo_reserve,
+                },
+                rider.last_command_tick.map(SimulationTick::new),
+                rider.last_shot_tick.map(SimulationTick::new),
+                rider.shot_index,
+            ) {
+                return None;
+            }
+        }
+        Some(restored)
     }
 
     const fn outcome_code(outcome: AcceptOutcome) -> i64 {
@@ -1324,6 +1508,8 @@ impl INode for PeerSession {
             worker_generation: 0,
             combat_authority: None,
             combat_targets: None,
+            authority_rider_history: BTreeMap::new(),
+            combat_receipts: BTreeSet::new(),
         }
     }
 
@@ -1338,6 +1524,134 @@ impl INode for PeerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spurfire_net::RiderCheckpoint;
+    use spurfire_protocol::{QuantizedDirection, ShotRejectionReason};
+
+    fn test_player(value: u8) -> PlayerId {
+        PlayerId::parse(&format!("00000000-0000-4000-8000-{value:012}")).expect("fixture player")
+    }
+
+    #[test]
+    fn authority_resolution_never_trusts_command_weapon_origin_or_riding_state() {
+        let shooter = test_player(1);
+        let mut authority = CombatAuthority::new(60, 0).unwrap();
+        assert!(authority.register_shooter(shooter, WeaponId::Dustwalker));
+        let mut targets = TargetRegistry::new(60).unwrap();
+        let origin = QuantizedOrigin::from_meters(0.0, 0.0, 0.0).unwrap();
+        let direction = QuantizedDirection::from_components(0.0, 0.0, -1.0).unwrap();
+        let snapshot = |tick, stance, muzzle_origin| CombatRiderSnapshot {
+            tick: SimulationTick::new(tick),
+            shooter_peer_id: shooter,
+            muzzle_origin,
+            team_id: TeamId::default(),
+            riding: RidingState {
+                stance,
+                ..RidingState::default()
+            },
+        };
+        let mut history = BTreeMap::from([(
+            shooter,
+            VecDeque::from([snapshot(1, RiderStance::Mounted, origin)]),
+        )]);
+        let command = |tick, weapon_id, command_origin, spread_seed| ShotCommand {
+            tick: SimulationTick::new(tick),
+            shooter_peer_id: shooter,
+            weapon_id,
+            origin: command_origin,
+            direction,
+            spread_seed,
+            claimed_target: None,
+        };
+
+        let seed = authority.expected_spread_seed(shooter).unwrap();
+        let forged_weapon = resolve_authority_shot(
+            &mut authority,
+            &mut targets,
+            &history,
+            &command(1, WeaponId::Longspur, origin, seed),
+        )
+        .unwrap();
+        assert_eq!(forged_weapon.weapon_id, WeaponId::Dustwalker);
+        assert_eq!(
+            forged_weapon.rejection_reason,
+            Some(ShotRejectionReason::Weapon)
+        );
+
+        let far_origin = QuantizedOrigin::from_meters(20.0, 0.0, 0.0).unwrap();
+        history
+            .get_mut(&shooter)
+            .unwrap()
+            .push_back(snapshot(2, RiderStance::Mounted, origin));
+        let forged_origin = resolve_authority_shot(
+            &mut authority,
+            &mut targets,
+            &history,
+            &command(2, WeaponId::Dustwalker, far_origin, seed),
+        )
+        .unwrap();
+        assert_eq!(
+            forged_origin.rejection_reason,
+            Some(ShotRejectionReason::OriginLeash)
+        );
+
+        history.get_mut(&shooter).unwrap().push_back(snapshot(
+            3,
+            RiderStance::OnFootStanding,
+            origin,
+        ));
+        let dismounted = resolve_authority_shot(
+            &mut authority,
+            &mut targets,
+            &history,
+            &command(3, WeaponId::Dustwalker, origin, seed),
+        )
+        .unwrap();
+        assert_eq!(
+            dismounted.rejection_reason,
+            Some(ShotRejectionReason::Dismounted)
+        );
+    }
+
+    #[test]
+    fn combat_checkpoint_restores_ammo_ticks_index_and_receipts() {
+        let shooter = test_player(1);
+        let checkpoint = MatchCheckpoint {
+            source_epoch: 1,
+            tick: 30,
+            riders: vec![RiderCheckpoint {
+                rider_player_id: shooter,
+                position_mm: [1, 2, 3],
+                velocity_mmps: [4, 5, 6],
+                yaw_millidegrees: 7,
+                stance: RiderStance::Mounted,
+                health: 82,
+                weapon_id: WeaponId::Longspur.as_u8(),
+                ammo_magazine: 2,
+                ammo_reserve: 9,
+                last_input_tick: 29,
+                last_shot_tick: Some(24),
+                last_command_tick: Some(25),
+                shot_index: 4,
+            }],
+            resolved_shots: vec![(shooter, 24)],
+        };
+        let restored = PeerSession::restore_combat_checkpoint(&checkpoint).unwrap();
+        let kernel = restored.shooter_kernel(shooter).unwrap();
+        assert_eq!(kernel.equipped_weapon(), WeaponId::Longspur);
+        assert_eq!(
+            kernel.equipped_ammo(),
+            WeaponAmmo {
+                magazine: 2,
+                reserve: 9
+            }
+        );
+        assert_eq!(kernel.last_accepted_tick(), Some(SimulationTick::new(24)));
+        assert_eq!(
+            restored.last_command_tick(shooter),
+            Some(SimulationTick::new(25))
+        );
+        assert_eq!(kernel.shot_index(), 4);
+    }
 
     #[test]
     fn parse_destination_accepts_ipv4_endpoint() {

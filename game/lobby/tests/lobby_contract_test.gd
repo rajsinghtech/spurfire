@@ -121,6 +121,9 @@ func _check_control_glue(failures: Array[String]) -> void:
 	for required in [
 		"dispatch_packet_with_source", "rider_player_id", "_simulate_remote_actor",
 		"_apply_shot_result_once", "begin_authority_migration", "poll_migration",
+		"_remove_peer(previous_id)", "_latest_inputs.erase(player_id)",
+		"_actor_states.erase(player_id)", "combat_checkpoint_state",
+		"combat_resolved_shots_json", "record_authority_rider_snapshot",
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)
@@ -128,6 +131,9 @@ func _check_control_glue(failures: Array[String]) -> void:
 		failures.append("secure bridge retained split packet acceptance/decoding")
 	if shell_source.contains("Host left • ending this Alpha match"):
 		failures.append("authority loss still tears down implemented M2 play")
+	for required in ["if _leaving:\n\t\treturn", "if not _leaving and _report_elapsed"]:
+		if not shell_source.contains(required):
+			failures.append("lobby shell omitted leave-race gate: %s" % required)
 
 func _check_cleanup_truth(failures: Array[String]) -> void:
 	var pending := {"backing": {"network_lifecycle": "VERIFYING_ABSENCE"}}

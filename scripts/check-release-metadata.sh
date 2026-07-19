@@ -83,8 +83,8 @@ grep -Fqi 'playtest pending' "$notes" || {
   echo "error: $notes must say that observational playtesting is pending" >&2
   exit 1
 }
-grep -Fq '| M2 | Saddle Dive | **implementation complete / playtest pending** |' docs/prototype-plan.md || {
-  echo "error: docs/prototype-plan.md must keep M2 implementation complete / playtest pending" >&2
+grep -Eq '^\| M2 \| [^|]+ \| \*\*source complete / credentialed playtest pending\*\* \|' docs/prototype-plan.md || {
+  echo "error: docs/prototype-plan.md must keep M2 source complete / credentialed playtest pending" >&2
   exit 1
 }
 

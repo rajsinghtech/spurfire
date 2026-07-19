@@ -73,12 +73,12 @@ func _process(delta: float) -> void:
 		_poll_elapsed = 0.0
 		api.poll_lobby(_lobby_id)
 		api.poll_network(_lobby_id)
-	if _report_elapsed >= 3.0 and _bridge and api.has_participant_access():
+	if not _leaving and _report_elapsed >= 3.0 and _bridge and api.has_participant_access():
 		var report := _bridge.measurement_report()
 		if not report.is_empty():
 			_report_elapsed = 0.0
 			api.submit_measurements(_lobby_id, report)
-	if _endpoint_renew_elapsed >= 30.0 and api.has_participant_access():
+	if not _leaving and _endpoint_renew_elapsed >= 30.0 and api.has_participant_access():
 		_endpoint_renew_elapsed = 0.0
 		_try_register_endpoint("", 0, true)
 	if (
@@ -249,11 +249,13 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	return _bridge.apply_projection(projection)
 
 func _on_peer_connected(address: String, port: int) -> void:
+	if _leaving:
+		return
 	waiting_status.text = "Rider network online • registering this session…"
 	_try_register_endpoint(address, port)
 
 func _try_register_endpoint(address: String = "", port: int = 0, force: bool = false) -> void:
-	if (_endpoint_registered and not force) or _network_generation <= 0:
+	if _leaving or (_endpoint_registered and not force) or _network_generation <= 0:
 		return
 	if address.is_empty():
 		address = str(peer_session.get("tailnet_ip"))
@@ -268,6 +270,8 @@ func _try_register_endpoint(address: String = "", port: int = 0, force: bool = f
 	)
 
 func _on_endpoint_registered(response: Dictionary) -> void:
+	if _leaving:
+		return
 	_endpoint_registered = true
 	_registered_roster_revision = int(
 		(response.get("session", {}) as Dictionary).get("roster_revision", _roster_revision)
@@ -277,7 +281,8 @@ func _on_endpoint_registered(response: Dictionary) -> void:
 	waiting_status.text = "Network ready • measuring the posse"
 
 func _on_report_completed(_response: Dictionary) -> void:
-	waiting_status.text = "Network measured • waiting for the posse"
+	if not _leaving:
+		waiting_status.text = "Network measured • waiting for the posse"
 
 func _on_peer_failed(_message: String) -> void:
 	waiting_status.text = "Peer network failed. Leaving safely…"
@@ -291,6 +296,8 @@ func _on_authority_departed() -> void:
 		waiting_status.text = "Host lost • restoring the posse…"
 
 func _on_lobby_updated(response: Dictionary) -> void:
+	if _leaving:
+		return
 	var lobby_value = response.get("lobby", response)
 	if lobby_value is Dictionary:
 		_lobby = lobby_value as Dictionary
@@ -326,7 +333,8 @@ func _on_lobby_updated(response: Dictionary) -> void:
 func _on_network_updated(response: Dictionary) -> void:
 	_network_view = response
 	_network_generation = int((response.get("backing", {}) as Dictionary).get("network_generation", 0))
-	_try_register_endpoint()
+	if not _leaving:
+		_try_register_endpoint()
 	_render_waiting()
 	if _screen == Screen.TEARDOWN:
 		teardown_status.text = SpurfireLobbyContract.cleanup_message(_network_view)
@@ -340,13 +348,16 @@ func _on_start_pressed() -> void:
 	api.start_lobby(_lobby_id)
 
 func _on_started(response: Dictionary) -> void:
+	if _leaving:
+		return
 	_authority_input_hash = str(response.get("input_hash", ""))
 	if _bridge:
 		_bridge.apply_projection(response)
 	_start_match()
 
 func _on_heartbeat(response: Dictionary) -> void:
-	_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
+	if not _leaving:
+		_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
 
 func _start_match() -> void:
 	if _course is Node3D:

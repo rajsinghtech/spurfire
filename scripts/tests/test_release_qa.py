@@ -130,6 +130,19 @@ def base_record(event: str, session: str = "session-local-1") -> dict:
     return {"schema_version": 1, "build_commit": SHA, "session_id": session, "event_type": event}
 
 
+class ReleaseMetadataTests(unittest.TestCase):
+    def test_current_release_metadata_contract(self):
+        result = subprocess.run(
+            [ROOT / "scripts/check-release-metadata.sh"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout.strip(), r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+
+
 class AggregateTests(unittest.TestCase):
     def records(self) -> list[dict]:
         rows = [
