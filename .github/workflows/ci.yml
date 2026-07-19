@@ -93,6 +93,10 @@ jobs:
           scripts/test-godot.sh --self-test
           scripts/check-release-metadata.sh
 
+      - name: Run credential-free signed peer and migration process proofs
+        shell: bash
+        run: just p2p-proof
+
       - name: Build extension and run bounded gameplay and one-lobby smoke tests
         shell: bash
         run: |
@@ -115,6 +119,7 @@ jobs:
           set -euo pipefail
           bash -n \
             scripts/check-alpha-smoke-log.sh \
+            scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh \
             scripts/check-release-metadata.sh
           python3 -m py_compile \

@@ -58,6 +58,10 @@ e2e:
     fi
     scripts/ts-api.sh token
 
+# Run credential-free signed two-process and three-process migration proofs over loopback UDP
+p2p-proof:
+    scripts/prove-local-p2p.sh
+
 # Provision a disposable child tailnet and exchange real Spurfire UDP frames through RustScale
 p2p-live:
     scripts/live-rustscale-p2p.sh

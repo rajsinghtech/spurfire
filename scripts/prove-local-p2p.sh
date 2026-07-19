@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Credential-free signed two-peer and three-peer authority-migration process proofs.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+for name in \
+  TS_CLIENT_ID TS_CLIENT_SECRET TS_API_BASE TS_API_BASE_URL TS_API_TOKEN TS_AUTHKEY \
+  TAILSCALE_AUTHKEY SPURFIRE_CAPABILITY GH_TOKEN GITHUB_TOKEN
+do
+  if [[ -n "${!name+x}" ]]; then
+    echo "error: $name must be unset for the credential-free process proof" >&2
+    exit 1
+  fi
+done
+
+command -v timeout >/dev/null 2>&1 || {
+  echo "error: timeout is required for the bounded process proof" >&2
+  exit 1
+}
+
+proof_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-local-p2p-proof.XXXXXX")"
+trap 'rm -f "$proof_log"' EXIT
+
+timeout 60 cargo run --locked --quiet -p spurfire-net --bin spurfire-local-p2p-proof \
+  2>&1 | tee "$proof_log"
+
+required=(
+  'SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1'
+  'SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true'
+)
+for marker in "${required[@]}"; do
+  count="$(grep -Fxc "$marker" "$proof_log" || true)"
+  if [[ "$count" -ne 1 ]]; then
+    echo "error: expected exactly one signed process marker; found $count: $marker" >&2
+    exit 1
+  fi
+done
+
+if grep -Eq 'panicked at|thread .* panicked|ERROR:' "$proof_log"; then
+  echo "error: signed process proof emitted a panic or error" >&2
+  exit 1
+fi
+
+echo 'credential-free signed process proofs passed'

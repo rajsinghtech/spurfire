@@ -106,7 +106,33 @@ Verify:
 
 M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. Record real 15-minute sessions until the observational gates can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. Until evidence meets those bands, status stays **implementation complete / playtest pending**.
 
-## 6. Visible three-client P2P demo
+## 6. Credential-free signed process proofs
+
+```bash
+just p2p-proof
+```
+
+This bounded Linux gate starts two separate loopback UDP peer processes, installs one
+server-signed exact-endpoint roster, rejects a tampered Ed25519 envelope before replay state can
+move, and accepts signed traffic in both directions. It then starts three fresh peer processes,
+waits for B and C to verify signed traffic from the initial authority A, kills A without a Leave
+packet, and requires both survivors to agree on B at epoch 2. The migration proof rejects a
+tampered signed authority claim, accepts the intact claim, rejects C's signed non-authority
+snapshot, accepts B's authority-only snapshot, and accepts signed rider input after migration.
+
+Expected exact markers are:
+
+```text
+SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1
+SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true
+```
+
+The proof clears the child environment and refuses to run when a recognized Tailscale, capability,
+or GitHub credential variable is present. It performs no provider calls and is the deterministic
+signed-session process gate. It
+does not replace real RustScale route coverage.
+
+## 7. Visible three-client P2P demo
 
 Create the gitignored `.env` if needed:
 
@@ -138,7 +164,7 @@ cleanup: deleted P2P demo tailnet ...
 
 `just game-run` is intentionally a single local client and therefore displays `NET OFFLINE`; it is not the three-player launcher.
 
-## 7. Automated UDP and authority-loss test
+## 8. Automated UDP and authority-loss test
 
 Run:
 
@@ -158,7 +184,12 @@ SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 
 The cleanup trap attempts to delete the tailnet on success, failure, interruption, or timeout. This development probe is **not Alpha lifecycle evidence**: its delete acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha lifecycle qualification even when UDP/migration markers appear.
 
-## 8. Final secret and repository checks
+The RustScale probe proves real transport and process-loss behavior, while `just p2p-proof` is the
+credential-free strict-signature gate. The current RustScale migration executable still uses the
+legacy insecure envelope path; do not treat its lifecycle marker alone as signed-session
+qualification.
+
+## 9. Final secret and repository checks
 
 ```bash
 git diff --check
@@ -168,7 +199,7 @@ git diff -- . ':!.env' | rg 'tskey-|Bearer |clientSecret' || true
 
 No auth key, bearer token, OAuth secret, capability plaintext, or generated child credential should appear.
 
-## 9. Control-plane network-view and activation plan
+## 10. Control-plane network-view and activation plan
 
 The normative matrix is [control-plane-network-view.md#required-test-plan](control-plane-network-view.md#required-test-plan). It covers exact-lobby capabilities/audience projection, FQDN validation, directional report aggregation, stale/unknown facts, cache-only inspection, one-real-lobby leasing, startup reconciliation, exact-ID cleanup proof, secret canaries, and the never-join dependency gate.
 

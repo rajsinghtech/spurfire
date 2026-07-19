@@ -207,10 +207,13 @@ on epoch change.
   across unsigned/endpoint/generation/roster/tamper/forgery/node-key classes, unknown-sender
   regression, signed 1200-byte datagram bound over every payload vector. server router:
   invalid proof, duplicate claims, replayed sequence, manifest signature verifies against the
-  projected roster, restart bumps generation and re-keys with an empty projection. live:
-  `p2p_smoke.rs` runs signed traffic and asserts a forged-sender negative case inside
-  `just p2p-live`; extending `migration_smoke.rs` to signed epoch-2 traffic is the remaining
-  live-harness follow-up.
+  projected roster, restart bumps generation and re-keys with an empty projection. process:
+  `just p2p-proof` runs separate loopback peers, rejects tampered signed traffic before state
+  mutation, kills authority A, proves B/C agreement on B at epoch 2, rejects a signed
+  non-authority snapshot, and accepts signed authority and gameplay traffic after migration.
+  live: `p2p_smoke.rs` runs signed traffic
+  inside `just p2p-live`; extending the RustScale `migration_smoke.rs` path to signed epoch-2
+  traffic remains a live-harness follow-up.
 - **Docs** — D12 (`docs/decisions.md`), security-boundaries rewrite in
   `docs/p2p-networking.md`, `docs/prototype-plan.md` join-flow wording.
 
@@ -247,6 +250,7 @@ never logged or persisted. Signature cost is negligible (≤16 peers × 60 Hz; ~
   -D warnings` (including the `rustscale`-feature smoke bins), `cargo test --locked`,
   `bash scripts/check-control-plane-deps.sh`, and a tree-wide secret scan. Results are
   recorded with the landing commits.
-- Real admission remains force-closed; live signed smoke (`just p2p-live`) and the
+- Real admission remains force-closed. The credential-free signed two-process and
+  three-process migration proof is `just p2p-proof`; real RustScale route evidence and the
   `migration_smoke.rs` signed-traffic extension require credentialed tailnets and remain
-  follow-ups.
+  separate follow-ups.

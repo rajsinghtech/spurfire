@@ -146,12 +146,14 @@ jobs:
             scripts/check-packaging.sh \
             scripts/check-release-metadata.sh \
             scripts/install-just-ci.sh \
+            scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh
           shellcheck \
             scripts/check-alpha-smoke-log.sh \
             scripts/check-packaging.sh \
             scripts/check-release-metadata.sh \
             scripts/install-just-ci.sh \
+            scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh
           python3 -m py_compile \
             scripts/aggregate-playtest.py \
