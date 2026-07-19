@@ -925,7 +925,12 @@ fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
 #[cfg(target_os = "linux")]
 fn native_clipboard_clear_if_matches(expected: &[u8]) -> Result<(), NativeLobbyError> {
     for (reader, read_arguments, clearer, clear_arguments) in [
-        ("wl-paste", &["--no-newline"][..], "wl-copy", &["--clear"][..]),
+        (
+            "wl-paste",
+            &["--no-newline"][..],
+            "wl-copy",
+            &["--clear"][..],
+        ),
         (
             "xclip",
             &["-selection", "clipboard", "-o"][..],

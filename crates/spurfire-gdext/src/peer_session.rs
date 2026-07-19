@@ -32,8 +32,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     lobby_client::{
-        route_for, safe_error, unix_millis, LobbyClientState, LobbyEvent,
-        LobbyOperation, NativeLobbyError, NativeSecretInput,
+        route_for, safe_error, unix_millis, LobbyClientState, LobbyEvent, LobbyOperation,
+        NativeLobbyError, NativeSecretInput,
     },
     saddle_dive_controller::SaddleDiveController,
 };
