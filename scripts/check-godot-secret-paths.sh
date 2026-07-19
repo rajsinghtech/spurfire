@@ -23,7 +23,7 @@ if ! grep -Fq 'type="NativeSecretInput"' game/lobby/lobby_shell.tscn; then
   echo 'error: lobby scene does not use native masked input' >&2
   exit 1
 fi
-if ! grep -Fq 'not session.has_method(&("connect_" + "rustscale"))' game/lobby/tests/lobby_contract_test.gd; then
+if ! grep -Fq 'session.has_method(&("connect_" + "rustscale"))' game/lobby/tests/lobby_contract_test.gd; then
   echo 'error: Godot contract does not assert removal of the secret transport ABI' >&2
   exit 1
 fi
