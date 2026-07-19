@@ -8,8 +8,12 @@ use std::{
     fmt,
     io::Write,
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
-    thread,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -111,6 +115,7 @@ impl Route<'_> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeLobbyError {
+    Cancelled,
     Client,
     Deadline,
     Route,
@@ -127,6 +132,7 @@ pub(crate) enum NativeLobbyError {
 impl NativeLobbyError {
     pub(crate) const fn code(self) -> &'static str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::Client => "transport",
             Self::Deadline => "deadline",
             Self::Route => "route",
@@ -218,6 +224,8 @@ pub(crate) struct LobbyClientState {
     participant: Option<SecretBytes>,
     sender: Sender<LobbyEvent>,
     receiver: Receiver<LobbyEvent>,
+    cancellation: Arc<AtomicU64>,
+    workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub(crate) last_endpoint_sequence: u64,
 }
 
@@ -231,6 +239,8 @@ impl Default for LobbyClientState {
             participant: None,
             sender,
             receiver,
+            cancellation: Arc::new(AtomicU64::new(1)),
+            workers: Arc::new(Mutex::new(Vec::new())),
             last_endpoint_sequence: 0,
         }
     }
@@ -271,10 +281,15 @@ impl LobbyClientState {
 
     pub(crate) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.cancellation.store(self.generation, Ordering::Release);
         self.creator = None;
         self.participant = None;
         self.player_id = None;
         while self.receiver.try_recv().is_ok() {}
+        let handles = self.workers.lock().map(|mut workers| workers.drain(..).collect::<Vec<_>>()).unwrap_or_default();
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     pub(crate) fn try_event(&self) -> Result<LobbyEvent, TryRecvError> {
@@ -341,6 +356,7 @@ impl LobbyClientState {
         let generation = self.generation;
         let lobby_id = lobby_id.to_owned();
         let auth = sensitive_authorization(capability);
+        let cancellation = self.cancellation.clone();
         spawn_request(
             move || {
                 let result = async {
@@ -352,6 +368,8 @@ impl LobbyClientState {
                         Some(auth),
                         true,
                         None,
+                        cancellation,
+                        generation,
                     )
                     .await?;
                     let invitation = extract_secret(&mut body, b"token")?;
@@ -377,6 +395,7 @@ impl LobbyClientState {
             self.sender.clone(),
             self.generation,
             operation,
+            &self.workers,
         );
     }
 
@@ -408,12 +427,22 @@ impl LobbyClientState {
         let sender = self.sender.clone();
         let generation = self.generation;
         let auth = sensitive_authorization(&invitation);
+        let cancellation = self.cancellation.clone();
         spawn_request(
             move || {
                 let result = async {
                     let auth = auth?;
-                    let mut response =
-                        request(Method::POST, &path, Some(body), Some(auth), true, None).await?;
+                    let mut response = request(
+                        Method::POST,
+                        &path,
+                        Some(body),
+                        Some(auth),
+                        true,
+                        None,
+                        cancellation,
+                        generation,
+                    )
+                    .await?;
                     let enrollment = extract_secret(&mut response, b"auth_key")?;
                     if enrollment.as_bytes() == b"DRY_RUN_NO_KEY" {
                         return Err(NativeLobbyError::Secret);
@@ -439,6 +468,7 @@ impl LobbyClientState {
             self.sender.clone(),
             self.generation,
             LobbyOperation::Join,
+            &self.workers,
         );
     }
 
@@ -460,11 +490,21 @@ impl LobbyClientState {
         let auth = capability.map(sensitive_authorization).transpose();
         let sender = self.sender.clone();
         let generation = self.generation;
+        let cancellation = self.cancellation.clone();
         spawn_request(
             move || {
                 let result = async {
-                    let mut response =
-                        request(method, &path, body, auth?, idempotent, actor).await?;
+                    let mut response = request(
+                        method,
+                        &path,
+                        body,
+                        auth?,
+                        idempotent,
+                        actor,
+                        cancellation,
+                        generation,
+                    )
+                    .await?;
                     match operation {
                         LobbyOperation::Create => {
                             let creator = extract_secret(&mut response, b"token")?;
@@ -496,6 +536,7 @@ impl LobbyClientState {
             self.sender.clone(),
             self.generation,
             operation,
+            &self.workers,
         );
     }
 
@@ -518,17 +559,24 @@ fn spawn_request(
     fallback: Sender<LobbyEvent>,
     generation: u64,
     operation: LobbyOperation,
+    workers: &Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
-    if thread::Builder::new()
+    match thread::Builder::new()
         .name(format!("spurfire-lobby-{}", operation.code()))
         .spawn(task)
-        .is_err()
     {
-        let _ = fallback.send(LobbyEvent::Failed {
-            generation,
-            operation,
-            error: NativeLobbyError::Worker,
-        });
+        Ok(handle) => {
+            if let Ok(mut active) = workers.lock() {
+                active.push(handle);
+            }
+        }
+        Err(_) => {
+            let _ = fallback.send(LobbyEvent::Failed {
+                generation,
+                operation,
+                error: NativeLobbyError::Worker,
+            });
+        }
     }
 }
 
@@ -596,7 +644,30 @@ fn idempotency_key() -> Result<HeaderValue, NativeLobbyError> {
     HeaderValue::from_str(&encoded).map_err(|_| NativeLobbyError::Client)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request(
+    method: Method,
+    path: &str,
+    body: Option<String>,
+    authorization: Option<HeaderValue>,
+    idempotent: bool,
+    actor: Option<String>,
+    cancellation: Arc<AtomicU64>,
+    generation: u64,
+) -> Result<Zeroizing<Vec<u8>>, NativeLobbyError> {
+    tokio::select! {
+        result = request_uncancelled(method, path, body, authorization, idempotent, actor) => result,
+        () = wait_for_cancellation(cancellation, generation) => Err(NativeLobbyError::Cancelled),
+    }
+}
+
+async fn wait_for_cancellation(cancellation: Arc<AtomicU64>, generation: u64) {
+    while cancellation.load(Ordering::Acquire) == generation {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn request_uncancelled(
     method: Method,
     path: &str,
     body: Option<String>,
@@ -888,7 +959,7 @@ impl IControl for NativeSecretInput {
         Self {
             base,
             bytes: Zeroizing::new(Vec::with_capacity(640)),
-            armed: false,
+            armed: true,
         }
     }
 
