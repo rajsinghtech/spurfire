@@ -128,6 +128,11 @@ jobs:
             scripts/check-alpha-lifecycle-evidence.py \
             scripts/make-alpha-candidate-metadata.py
           python3 -m unittest discover -s scripts/tests -v
+          if proof_output="$(TS_CLIENT_ID=sentinel scripts/prove-local-p2p.sh 2>&1)"; then
+            echo 'error: signed process proof accepted an inherited credential variable' >&2
+            exit 1
+          fi
+          grep -Fqx 'error: TS_CLIENT_ID must be unset for the credential-free process proof' <<<"$proof_output"
 
       - name: Confirm the evidence template fails closed
         shell: bash

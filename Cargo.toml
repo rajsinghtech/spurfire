@@ -21,10 +21,6 @@ dotenvy = "0.15"
 zeroize = "1"
 
 [patch.crates-io]
-# RustScale 8511e0b requires its receive-pipeline BoringTun fork.
-# This vendored copy is from that exact pinned revision.
+# RustScale v0.1.4 requires the receive-pipeline APIs documented in the
+# vendored BoringTun provenance. Upstream boringtun 0.7.1 does not expose them.
 boringtun = { path = "vendor/boringtun" }
-
-[patch."https://github.com/rajsinghtech/rustscale"]
-# Pinned 8511e0b netstack plus the application-UDP send wakeup fix.
-rustscale-netstack = { path = "vendor/rustscale-netstack" }

@@ -28,6 +28,7 @@ const STANCE_DIVE := 3
 const STANCE_PRONE := 4
 const STANCE_RECOVERY := 5
 const STANCE_ON_FOOT := 6
+const HUD_SETTLE_PROCESS_FRAMES := 3
 
 func _ready() -> void:
 	var failures: Array[String] = []
@@ -668,17 +669,17 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	var horse_world_offset := horse.global_position - horse_launch_position
 	if Vector2(horse_world_offset.x, horse_world_offset.z).length() > 25.001:
 		failures.append("horse world position crossed the 25 m runout cap")
-	await get_tree().process_frame
 	var remount_hint := course.get_node("HUD/Panel/Margin/VBox/RemountHint") as Label
-	if not remount_hint.visible or (not remount_hint.text.begins_with("HORSE READY") and remount_hint.text != "E — REMOUNT"):
-		failures.append("retrievable horse lacked a HUD affordance")
+	var affordance_ready := await _wait_for_remount_hint(remount_hint, horse, rider, false)
+	if not affordance_ready:
+		failures.append("retrievable horse lacked a HUD affordance: %s" % _remount_hint_diagnostic(remount_hint, horse, rider))
 
 	# Test setup moves only the rider into the normal 3 m interaction range; the
 	# horse remains where collision-resolved runout stopped.
 	rider.global_position = horse.global_position + Vector3(0, 0, 1.0)
-	await get_tree().process_frame
-	if not remount_hint.visible or remount_hint.text != "E — REMOUNT":
-		failures.append("in-range horse lacked the E remount prompt")
+	var in_range_ready := await _wait_for_remount_hint(remount_hint, horse, rider, true)
+	if not in_range_ready:
+		failures.append("in-range horse lacked the E remount prompt: %s" % _remount_hint_diagnostic(remount_hint, horse, rider))
 	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_MOUNTED:
 		failures.append("eligible E remount did not complete")
@@ -692,6 +693,36 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	for expected in ["FLYING DISMOUNT", "SADDLE DIVE HEADSHOT", "FULL-GALLOP HIT", "AIRBORNE REVERSAL"]:
 		if expected not in events:
 			failures.append("deterministic gameplay event missing: %s" % expected)
+
+func _wait_for_remount_hint(
+	hint: Label,
+	horse: CharacterBody3D,
+	rider: CharacterBody3D,
+	require_in_range: bool
+) -> bool:
+	for _frame in HUD_SETTLE_PROCESS_FRAMES:
+		await get_tree().process_frame
+		if not hint.visible:
+			continue
+		if require_in_range and hint.text == "E — REMOUNT":
+			return true
+		if not require_in_range and (hint.text.begins_with("HORSE READY") or hint.text == "E — REMOUNT"):
+			return true
+	return false
+
+func _remount_hint_diagnostic(
+	hint: Label,
+	horse: CharacterBody3D,
+	rider: CharacterBody3D
+) -> String:
+	return "is_retrievable=%s control_mode=%s stance_id=%s visible=%s label=%s waited_process_frames=%d" % [
+		str(bool(horse.get("is_retrievable"))),
+		str(int(horse.get("control_mode"))),
+		str(int(rider.get("stance_id"))),
+		str(hint.visible),
+		var_to_str(hint.text),
+		HUD_SETTLE_PROCESS_FRAMES,
+	]
 
 func _exercise_landing_boundaries(
 	course: Node,

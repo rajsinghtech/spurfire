@@ -1,6 +1,6 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The integration is pinned to RustScale revision `8511e0b78074bf07b59d53cf1a2eb349cd0d2407` plus the focused vendored netstack wakeup patch documented in `vendor/rustscale-netstack/PROVENANCE.md`; do not update either without rerunning the live lifecycle probe.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. Both direct RustScale dependencies are pinned to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; do not update the pin without rerunning the dependency gates and live lifecycle probe.
 
 ## Components
 
@@ -14,7 +14,7 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
 
-RustScale revision `8511e0b` did not wake its smoltcp poll loop after `UdpListener::send_to` enqueued application data, allowing packets to batch behind a one-second idle fallback. Spurfire's pinned patch wakes after enqueue and includes a sub-500-ms idle-send regression test. This is tracked upstream as [rustscale#75](https://github.com/rajsinghtech/rustscale/issues/75). A managed 1,600-snapshot-per-peer soak measured steady maximum packet gaps around 41–54 ms; control-map reconnects caused brief 125–287 ms gaps but no rejection, disconnect, accumulated delay, or traffic loss.
+RustScale v0.1.4 owns the netstack poll-loop notification in `UdpListener`, wakes it after a successful application-UDP enqueue, and includes idle-delivery and 20 Hz anti-batching regression tests. Spurfire therefore carries no local netstack override. A managed 1,600-snapshot-per-peer soak measured steady maximum packet gaps around 41–54 ms; control-map reconnects caused brief 125–287 ms gaps but no rejection, disconnect, accumulated delay, or traffic loss.
 
 ## Live proof
 

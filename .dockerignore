@@ -17,8 +17,6 @@
 !vendor/
 !vendor/boringtun/
 !vendor/boringtun/**
-!vendor/rustscale-netstack/
-!vendor/rustscale-netstack/**
 
 # Never re-include local credentials if one appears below an allowed tree.
 **/.env

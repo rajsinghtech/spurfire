@@ -127,10 +127,12 @@ SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidir
 SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c continued_play=true
 ```
 
-The proof clears the child environment and refuses to run when a recognized Tailscale, capability,
-or GitHub credential variable is present. It performs no provider calls and is the deterministic
-signed-session process gate. It
-does not replace real RustScale route coverage.
+The wrapper refuses to run when a recognized Tailscale, capability, or GitHub credential variable
+is present. After a locked build, it runs the proof under `env -i` with an isolated temporary home
+and temp directory; peer children also clear their environments. A 60-second execution-only timeout
+owns the proof process group and escalates after five seconds so failed runs cannot leave peers behind.
+It performs no provider calls and is the deterministic signed-session process gate. It does not
+replace real RustScale route coverage, production key custody, or provider lifecycle evidence.
 
 ## 7. Visible three-client P2P demo
 

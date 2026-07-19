@@ -70,7 +70,7 @@ See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changi
 
 Godot 4.7.1 with Rust GDExtension is the accepted game stack. Keep engine-facing scenes and content in `game/` and gameplay classes in `crates/spurfire-gdext/`; never commit generated libraries under `game/bin/`. M0 is movement-only, and RustScale integration starts only after the movement acceptance checks in `docs/godot-m0.md` pass.
 
-A sibling checkout of the RustScale repository (conventionally `../rustscale`) is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. In-process Rust integration is feasible, but production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
+A sibling checkout of the RustScale repository (conventionally `../rustscale`) is under active development. Spurfire pins its direct RustScale dependencies to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; the UDP wakeup fix is upstream and no local netstack override remains. The consumer-workspace BoringTun override is still required and documented in `vendor/boringtun/PROVENANCE.md`. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live in RustScale rather than Spurfire. Production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check both its survey snapshot and the active dependency pin before integrating.
 
 ## Agent worktree pattern
 

@@ -1,7 +1,7 @@
 # Spurfire P2P session-identity architecture
 
-Branch `agent/alpha-completion`. RustScale sibling pinned at
-`8511e0b78074bf07b59d53cf1a2eb349cd0d2407`. Status: **implemented** (wire 1.2 signed
+Branch `agent/alpha-completion`. RustScale dependencies pinned at released v0.1.4 revision
+`272ee212c7c339c3d028ea474554154bc28ae381`. Status: **implemented** (wire 1.2 signed
 sessions) and validated in a secret-free isolated checkout on the alpha builder
 (formatting, warnings-denied Clippy, tests, dependency/secret guards). Real admission
 remains force-closed; the control service stays out of gameplay.

@@ -20,11 +20,32 @@ command -v timeout >/dev/null 2>&1 || {
   exit 1
 }
 
-proof_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-local-p2p-proof.XXXXXX")"
-trap 'rm -f "$proof_log"' EXIT
+cargo_bin="${CARGO:-cargo}"
+"$cargo_bin" build --locked --quiet -p spurfire-net --bin spurfire-local-p2p-proof
 
-timeout 60 cargo run --locked --quiet -p spurfire-net --bin spurfire-local-p2p-proof \
-  2>&1 | tee "$proof_log"
+proof_bin="${CARGO_TARGET_DIR:-target}/debug/spurfire-local-p2p-proof"
+if [[ "$proof_bin" != /* ]]; then
+  proof_bin="$repo_root/$proof_bin"
+fi
+if [[ ! -x "$proof_bin" ]]; then
+  echo "error: signed process proof binary was not built at $proof_bin" >&2
+  exit 1
+fi
+
+proof_tmp="$(mktemp -d "${TMPDIR:-/tmp}/spurfire-local-p2p-proof.XXXXXX")"
+proof_log="$proof_tmp/proof.log"
+mkdir -p "$proof_tmp/home" "$proof_tmp/tmp"
+trap 'rm -rf "$proof_tmp"' EXIT
+
+# Compilation is outside the execution timeout. The proof and all descendants
+# receive a strict runtime environment with no inherited credentials or user
+# configuration. GNU timeout creates a separate process group and escalates if
+# a failed proof does not reap its peer children promptly.
+timeout --kill-after=5s 60s env -i \
+  HOME="$proof_tmp/home" \
+  TMPDIR="$proof_tmp/tmp" \
+  LC_ALL=C \
+  "$proof_bin" 2>&1 | tee "$proof_log"
 
 required=(
   'SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true authority=a epoch=1'
