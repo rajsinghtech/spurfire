@@ -31,7 +31,7 @@ func _check_native_boundary(failures: Array[String]) -> void:
 		failures.append("native lobby owner could not be instantiated")
 		return
 	add_child(session)
-	if session.has_method(&("connect_" + "rustscale")):
+	if session.has_method(StringName("connect_" + "rustscale")):
 		failures.append("legacy Godot secret-taking transport method remains exported")
 	for method in [
 		"configure_lobby_player", "probe_lobby_readiness", "capture_create_grant",
