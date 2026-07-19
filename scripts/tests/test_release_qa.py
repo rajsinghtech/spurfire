@@ -476,6 +476,26 @@ class CommandTests(unittest.TestCase):
             publisher,
         )
 
+    def test_desktop_jobs_run_behavioral_native_smoke(self):
+        # ABI, loader, input, and exported-method regressions must not ship in
+        # desktop artifacts that only launched a bootstrap scene for 30 frames.
+        preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
+        # Linux x86_64, Linux ARM64, Windows, macOS arm64, and the macOS
+        # x86_64 slice under Rosetta all run the full smoke suite.
+        self.assertGreaterEqual(preflight.count("scripts/test-godot.sh"), 5)
+        for marker in (
+            "SPURFIRE_GODOT_SMOKE_OK",
+            "SPURFIRE_POLISH_SMOKE_OK",
+            "SPURFIRE_COMBAT_UI_SMOKE_OK",
+        ):
+            self.assertGreaterEqual(preflight.count(marker), 5, marker)
+        self.assertIn('GODOT_BIN="$PWD/godot4.exe"', preflight)
+        self.assertIn('GODOT_BIN="$PWD/Godot.app/Contents/MacOS/Godot"', preflight)
+        # The macOS x86_64 slice must execute, not merely cross-compile.
+        self.assertIn("softwareupdate --install-rosetta", preflight)
+        self.assertIn("arch -x86_64", preflight)
+        self.assertIn("godot-smoke-x86_64.log", preflight)
+
     def test_candidate_metadata_is_nonpublishing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

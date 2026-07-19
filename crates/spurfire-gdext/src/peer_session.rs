@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    future::Future,
     net::{IpAddr, SocketAddr},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
@@ -18,7 +19,10 @@ use spurfire_protocol::{
     canonical_keyreg_digest, LobbyId, LobbySessionProjection, NodeKey, PlayerId, RiderStance,
     RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature,
 };
-use tokio::time::Duration;
+use tokio::{
+    sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
+    time::Duration,
+};
 use zeroize::Zeroizing;
 
 use crate::saddle_dive_controller::SaddleDiveController;
@@ -52,6 +56,30 @@ enum WorkerEvent {
     Stopped,
 }
 
+/// Tags every worker event with the session generation that spawned the
+/// worker. The Godot thread drops events from an older generation so an
+/// enrollment that lost a leave/quit race can never resurrect cleared state.
+struct WorkerEventSink {
+    generation: u64,
+    sender: Sender<(u64, WorkerEvent)>,
+}
+
+impl WorkerEventSink {
+    fn send(&self, event: WorkerEvent) {
+        // Delivery is best-effort: the Godot thread may already be gone.
+        let _ = self.sender.send((self.generation, event));
+    }
+}
+
+/// Parse a destination endpoint for either address family. Building
+/// `"{ip}:{port}"` is invalid for bare IPv6 literals, which previously made
+/// every outbound packet to an IPv6-selected peer fail silently.
+fn parse_destination(destination_ip: &str, port: i64) -> Option<SocketAddr> {
+    let ip = destination_ip.parse::<IpAddr>().ok()?;
+    let port = u16::try_from(port).ok()?;
+    Some(SocketAddr::new(ip, port))
+}
+
 async fn close_peer(peer: &mut RustScalePeer) -> Result<(), String> {
     let mut last = None;
     for _ in 0..4 {
@@ -71,92 +99,188 @@ async fn close_peer(peer: &mut RustScalePeer) -> Result<(), String> {
     }
 }
 
+/// Execute one queued gameplay command. Returns true when the worker must exit.
+async fn handle_command(
+    peer: &RustScalePeer,
+    command: WorkerCommand,
+    events: &WorkerEventSink,
+) -> bool {
+    match command {
+        WorkerCommand::Send {
+            packet,
+            destination,
+        } => {
+            match decode(&packet) {
+                Ok(envelope) => {
+                    if let Err(error) = peer.send(&envelope, destination).await {
+                        events.send(WorkerEvent::Failed(error.to_string()));
+                    }
+                }
+                Err(error) => events.send(WorkerEvent::Failed(error.to_string())),
+            }
+            false
+        }
+        WorkerCommand::QueryRoute { peer_ip } => {
+            let route = peer.route_to(peer_ip).unwrap_or_else(|| "Unknown".into());
+            events.send(WorkerEvent::Route {
+                peer_ip: peer_ip.to_string(),
+                route,
+            });
+            false
+        }
+        WorkerCommand::Stop => true,
+    }
+}
+
+enum EnrollOutcome<T> {
+    Connected(T),
+    Failed(String),
+    Cancelled,
+}
+
+/// Await RustScale enrollment while staying responsive to shutdown. The old
+/// worker blocked inside `RustScalePeer::connect` until the control server
+/// answered, so a leave/quit during enrollment could not cancel it: the
+/// one-use credential stayed captive and a late `connected` event could
+/// resurrect a session the UI had already torn down. Selecting on the command
+/// channel lets `Stop` drop the in-flight connect future, which releases the
+/// credential and suppresses the stale completion. Gameplay commands queued
+/// meanwhile are deferred and replayed in order once connected.
+async fn enroll_with_cancellation<T, E, F>(
+    connect: F,
+    commands: &mut UnboundedReceiver<WorkerCommand>,
+    deferred: &mut Vec<WorkerCommand>,
+) -> EnrollOutcome<T>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    tokio::pin!(connect);
+    loop {
+        tokio::select! {
+            result = &mut connect => {
+                // Drain anything queued during the enrollment window so no
+                // gameplay frame is reordered behind post-connect traffic.
+                loop {
+                    match commands.try_recv() {
+                        Ok(WorkerCommand::Stop)
+                        | Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
+                            return EnrollOutcome::Cancelled;
+                        }
+                        Ok(command) => deferred.push(command),
+                        Err(tokio_mpsc::error::TryRecvError::Empty) => break,
+                    }
+                }
+                return match result {
+                    Ok(peer) => EnrollOutcome::Connected(peer),
+                    Err(error) => EnrollOutcome::Failed(error.to_string()),
+                };
+            }
+            command = commands.recv() => match command {
+                None | Some(WorkerCommand::Stop) => return EnrollOutcome::Cancelled,
+                Some(command) => deferred.push(command),
+            },
+        }
+    }
+}
+
 fn run_worker(
     hostname: String,
     auth_key: Zeroizing<String>,
     port: u16,
-    commands: Receiver<WorkerCommand>,
-    events: Sender<WorkerEvent>,
+    generation: u64,
+    mut commands: UnboundedReceiver<WorkerCommand>,
+    events: Sender<(u64, WorkerEvent)>,
 ) {
+    let events = WorkerEventSink {
+        generation,
+        sender: events,
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = events.send(WorkerEvent::Failed(format!(
+            events.send(WorkerEvent::Failed(format!(
                 "network runtime failed: {error}"
             )));
             return;
         }
     };
     runtime.block_on(async move {
-        let mut peer = match RustScalePeer::connect(hostname, auth_key, port).await {
-            Ok(peer) => peer,
-            Err(error) => {
-                let _ = events.send(WorkerEvent::Failed(error.to_string()));
+        let mut deferred = Vec::new();
+        let mut peer = match enroll_with_cancellation(
+            RustScalePeer::connect(hostname, auth_key, port),
+            &mut commands,
+            &mut deferred,
+        )
+        .await
+        {
+            EnrollOutcome::Connected(peer) => peer,
+            EnrollOutcome::Failed(error) => {
+                events.send(WorkerEvent::Failed(error));
+                return;
+            }
+            EnrollOutcome::Cancelled => {
+                events.send(WorkerEvent::Stopped);
                 return;
             }
         };
-        let _ = events.send(WorkerEvent::Connected {
+        events.send(WorkerEvent::Connected {
             ip: peer.tailnet_ip().to_string(),
             port: peer.local_addr().port(),
         });
-        'network: loop {
-            // Drain every queued gameplay frame before waiting for receive. The
-            // old one-command-per-25ms loop could create avoidable input latency
-            // whenever physics frames arrived in a burst.
-            loop {
-                match commands.try_recv() {
-                    Ok(WorkerCommand::Send {
-                        packet,
-                        destination,
-                    }) => match decode(&packet) {
-                        Ok(envelope) => {
-                            if let Err(error) = peer.send(&envelope, destination).await {
-                                let _ = events.send(WorkerEvent::Failed(error.to_string()));
+        let mut stopping = false;
+        // Replay in order whatever was queued while enrollment was in flight.
+        for command in deferred {
+            if handle_command(&peer, command, &events).await {
+                stopping = true;
+                break;
+            }
+        }
+        if !stopping {
+            'network: loop {
+                // Drain every queued gameplay frame before waiting for receive. The
+                // old one-command-per-25ms loop could create avoidable input latency
+                // whenever physics frames arrived in a burst.
+                loop {
+                    match commands.try_recv() {
+                        Ok(command) => {
+                            if handle_command(&peer, command, &events).await {
+                                break 'network;
                             }
                         }
+                        Err(tokio_mpsc::error::TryRecvError::Disconnected) => break 'network,
+                        Err(tokio_mpsc::error::TryRecvError::Empty) => break,
+                    }
+                }
+                match peer.recv(Duration::from_millis(5)).await {
+                    Ok((envelope, source)) => match encode(&envelope) {
+                        Ok(packet) => {
+                            let node_key = peer.node_key_for(source.ip());
+                            events.send(WorkerEvent::Packet {
+                                packet,
+                                source,
+                                node_key,
+                            });
+                        }
                         Err(error) => {
-                            let _ = events.send(WorkerEvent::Failed(error.to_string()));
+                            events.send(WorkerEvent::Failed(error.to_string()));
                         }
                     },
-                    Ok(WorkerCommand::QueryRoute { peer_ip }) => {
-                        let route = peer.route_to(peer_ip).unwrap_or_else(|| "Unknown".into());
-                        let _ = events.send(WorkerEvent::Route {
-                            peer_ip: peer_ip.to_string(),
-                            route,
-                        });
-                    }
-                    Ok(WorkerCommand::Stop) | Err(TryRecvError::Disconnected) => break 'network,
-                    Err(TryRecvError::Empty) => break,
-                }
-            }
-            match peer.recv(Duration::from_millis(5)).await {
-                Ok((envelope, source)) => match encode(&envelope) {
-                    Ok(packet) => {
-                        let node_key = peer.node_key_for(source.ip());
-                        let _ = events.send(WorkerEvent::Packet {
-                            packet,
-                            source,
-                            node_key,
-                        });
-                    }
+                    Err(spurfire_net::rustscale::RustScaleTransportError::Timeout) => {}
                     Err(error) => {
-                        let _ = events.send(WorkerEvent::Failed(error.to_string()));
+                        events.send(WorkerEvent::Failed(error.to_string()));
+                        break;
                     }
-                },
-                Err(spurfire_net::rustscale::RustScaleTransportError::Timeout) => {}
-                Err(error) => {
-                    let _ = events.send(WorkerEvent::Failed(error.to_string()));
-                    break;
                 }
             }
         }
         if let Err(error) = close_peer(&mut peer).await {
-            let _ = events.send(WorkerEvent::Failed(error));
+            events.send(WorkerEvent::Failed(error));
         }
-        let _ = events.send(WorkerEvent::Stopped);
+        events.send(WorkerEvent::Stopped);
     });
 }
 
@@ -187,8 +311,9 @@ pub struct PeerSession {
     pinned_manifest_key: Option<(u64, SessionPublicKey)>,
     insecure_demo_mode: bool,
     allowed_players: BTreeSet<PlayerId>,
-    command_tx: Option<Sender<WorkerCommand>>,
-    event_rx: Option<Receiver<WorkerEvent>>,
+    command_tx: Option<UnboundedSender<WorkerCommand>>,
+    event_rx: Option<Receiver<(u64, WorkerEvent)>>,
+    worker_generation: u64,
 }
 
 #[godot_api]
@@ -757,13 +882,24 @@ impl PeerSession {
         if self.command_tx.is_some() || !(0..=u16::MAX as i64).contains(&port) {
             return false;
         }
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let hostname = hostname.to_string();
         let auth_key = Zeroizing::new(auth_key.to_string());
+        self.worker_generation = self.worker_generation.wrapping_add(1);
+        let generation = self.worker_generation;
         if let Err(error) = thread::Builder::new()
             .name("spurfire-rustscale".into())
-            .spawn(move || run_worker(hostname, auth_key, port as u16, command_rx, event_tx))
+            .spawn(move || {
+                run_worker(
+                    hostname,
+                    auth_key,
+                    port as u16,
+                    generation,
+                    command_rx,
+                    event_tx,
+                );
+            })
         {
             godot_error!("PeerSession could not start worker: {error}");
             return false;
@@ -777,7 +913,7 @@ impl PeerSession {
     /// Send one bounded Spurfire envelope returned by the protocol codec.
     #[func]
     fn send_packet(&mut self, packet: PackedByteArray, destination_ip: GString, port: i64) -> bool {
-        let Ok(destination) = format!("{}:{port}", destination_ip).parse::<SocketAddr>() else {
+        let Some(destination) = parse_destination(&destination_ip.to_string(), port) else {
             return false;
         };
         let Some(sender) = &self.command_tx else {
@@ -809,12 +945,15 @@ impl PeerSession {
         self.make_packet(tick, PeerPayload::Leave)
     }
 
+    /// Cancel in-flight enrollment or stop live traffic, whichever is active.
     #[func]
     fn shutdown(&mut self) {
         if let Some(sender) = self.command_tx.take() {
+            // The worker selects on this command even while enrollment is
+            // still blocked on the RustScale control server.
             let _ = sender.send(WorkerCommand::Stop);
+            self.connection_state = "disconnecting".into();
         }
-        self.connection_state = "disconnecting".into();
     }
 
     /// Forget all lobby-scoped identity after leave. Enrollment material is
@@ -822,6 +961,10 @@ impl PeerSession {
     #[func]
     fn clear_lobby_session(&mut self) {
         self.shutdown();
+        // Invalidate every event the orphaned worker can still emit so a late
+        // `connected` from a cancelled enrollment cannot resurrect state.
+        self.worker_generation = self.worker_generation.wrapping_add(1);
+        self.connection_state = "offline".into();
         self.session = None;
         self.secure_session = None;
         self.session_key = None;
@@ -881,46 +1024,56 @@ impl PeerSession {
         };
         loop {
             match receiver.try_recv() {
-                Ok(WorkerEvent::Connected { ip, port }) => {
-                    self.connection_state = "connected".into();
-                    self.tailnet_ip = GString::from(&ip);
-                    self.local_port = i64::from(port);
-                    let signal_ip = GString::from(&ip);
-                    self.signals().connected().emit(&signal_ip, i64::from(port));
-                }
-                Ok(WorkerEvent::Packet {
-                    packet,
-                    source,
-                    node_key,
-                }) => {
-                    let signal_packet = PackedByteArray::from(packet.as_slice());
-                    let source_ip = source.ip().to_string();
-                    let signal_ip = GString::from(&source_ip);
-                    let signal_node =
-                        GString::from(&node_key.map_or_else(String::new, |key| key.to_string()));
-                    self.signals().packet_received().emit(
-                        &signal_packet,
-                        &signal_ip,
-                        i64::from(source.port()),
-                        &signal_node,
-                    );
-                }
-                Ok(WorkerEvent::Route { peer_ip, route }) => {
-                    let signal_ip = GString::from(&peer_ip);
-                    let signal_route = GString::from(&route);
-                    self.signals()
-                        .route_updated()
-                        .emit(&signal_ip, &signal_route);
-                }
-                Ok(WorkerEvent::Failed(message)) => {
-                    self.connection_state = "error".into();
-                    let signal_message = GString::from(&message);
-                    self.signals().connection_failed().emit(&signal_message);
-                }
-                Ok(WorkerEvent::Stopped) => {
-                    self.connection_state = "offline".into();
-                    self.command_tx = None;
-                    self.signals().disconnected().emit();
+                Ok((generation, event)) => {
+                    // A worker from a cleared or replaced session must never
+                    // mutate state or re-emit signals.
+                    if generation != self.worker_generation {
+                        continue;
+                    }
+                    match event {
+                        WorkerEvent::Connected { ip, port } => {
+                            self.connection_state = "connected".into();
+                            self.tailnet_ip = GString::from(&ip);
+                            self.local_port = i64::from(port);
+                            let signal_ip = GString::from(&ip);
+                            self.signals().connected().emit(&signal_ip, i64::from(port));
+                        }
+                        WorkerEvent::Packet {
+                            packet,
+                            source,
+                            node_key,
+                        } => {
+                            let signal_packet = PackedByteArray::from(packet.as_slice());
+                            let source_ip = source.ip().to_string();
+                            let signal_ip = GString::from(&source_ip);
+                            let signal_node = GString::from(
+                                &node_key.map_or_else(String::new, |key| key.to_string()),
+                            );
+                            self.signals().packet_received().emit(
+                                &signal_packet,
+                                &signal_ip,
+                                i64::from(source.port()),
+                                &signal_node,
+                            );
+                        }
+                        WorkerEvent::Route { peer_ip, route } => {
+                            let signal_ip = GString::from(&peer_ip);
+                            let signal_route = GString::from(&route);
+                            self.signals()
+                                .route_updated()
+                                .emit(&signal_ip, &signal_route);
+                        }
+                        WorkerEvent::Failed(message) => {
+                            self.connection_state = "error".into();
+                            let signal_message = GString::from(&message);
+                            self.signals().connection_failed().emit(&signal_message);
+                        }
+                        WorkerEvent::Stopped => {
+                            self.connection_state = "offline".into();
+                            self.command_tx = None;
+                            self.signals().disconnected().emit();
+                        }
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -954,6 +1107,7 @@ impl INode for PeerSession {
             allowed_players: BTreeSet::new(),
             command_tx: None,
             event_rx: None,
+            worker_generation: 0,
         }
     }
 
@@ -962,5 +1116,133 @@ impl INode for PeerSession {
     }
     fn exit_tree(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_destination_accepts_ipv4_endpoint() {
+        let parsed = parse_destination("100.64.1.2", 41643).expect("valid IPv4 endpoint");
+        assert_eq!(parsed, SocketAddr::from(([100, 64, 1, 2], 41643)));
+        assert!(parsed.is_ipv4());
+    }
+
+    #[test]
+    fn parse_destination_accepts_ipv6_endpoint() {
+        // Regression: `format!("{ip}:{port}")` left every bare IPv6 literal
+        // unparseable, so an IPv6-selected peer registered but could not send.
+        let parsed = parse_destination("fd7a:115c:a1e0::1", 41643).expect("valid IPv6 endpoint");
+        assert_eq!(parsed, "[fd7a:115c:a1e0::1]:41643".parse().unwrap());
+        assert!(parsed.is_ipv6());
+    }
+
+    #[test]
+    fn parse_destination_rejects_invalid_endpoints() {
+        assert_eq!(
+            parse_destination("::1", 0),
+            Some("[::1]:0".parse().unwrap())
+        );
+        assert!(parse_destination("100.64.1.2", 65_535).is_some());
+        assert!(parse_destination("100.64.1.2", 65_536).is_none());
+        assert!(parse_destination("::1", -1).is_none());
+        assert!(parse_destination("[fd7a::1]", 41643).is_none());
+        assert!(parse_destination("100.64.1.2:41643", 41643).is_none());
+        assert!(parse_destination("not-an-ip", 41643).is_none());
+        assert!(parse_destination("", 41643).is_none());
+    }
+
+    #[tokio::test]
+    async fn enrollment_stop_cancels_in_flight_connect() {
+        // Leave/quit while enrollment still owns the one-use credential.
+        let (sender, mut commands) = tokio_mpsc::unbounded_channel();
+        sender.send(WorkerCommand::Stop).unwrap();
+        let mut deferred = Vec::new();
+        let outcome = enroll_with_cancellation(
+            std::future::pending::<Result<(), std::io::Error>>(),
+            &mut commands,
+            &mut deferred,
+        )
+        .await;
+        assert!(matches!(outcome, EnrollOutcome::Cancelled));
+        assert!(deferred.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enrollment_disconnect_cancels_in_flight_connect() {
+        // The Godot-side sender going away (node freed) must not trap the
+        // credential inside a pending connect either.
+        let (sender, mut commands) = tokio_mpsc::unbounded_channel::<WorkerCommand>();
+        drop(sender);
+        let mut deferred = Vec::new();
+        let outcome = enroll_with_cancellation(
+            std::future::pending::<Result<(), std::io::Error>>(),
+            &mut commands,
+            &mut deferred,
+        )
+        .await;
+        assert!(matches!(outcome, EnrollOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn enrollment_stop_wins_over_completed_connect() {
+        // Even when the connect future has already resolved, a Stop queued
+        // during the enrollment frame must cancel the session.
+        let (sender, mut commands) = tokio_mpsc::unbounded_channel();
+        sender.send(WorkerCommand::Stop).unwrap();
+        let mut deferred = Vec::new();
+        let outcome = enroll_with_cancellation(
+            async { Ok::<_, std::io::Error>(7_u8) },
+            &mut commands,
+            &mut deferred,
+        )
+        .await;
+        assert!(matches!(outcome, EnrollOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn enrollment_defers_queued_gameplay_commands_in_order() {
+        let (sender, mut commands) = tokio_mpsc::unbounded_channel();
+        sender
+            .send(WorkerCommand::QueryRoute {
+                peer_ip: IpAddr::from([100, 64, 0, 1]),
+            })
+            .unwrap();
+        sender
+            .send(WorkerCommand::Send {
+                packet: vec![1, 2, 3],
+                destination: SocketAddr::from(([100, 64, 0, 2], 41643)),
+            })
+            .unwrap();
+        let mut deferred = Vec::new();
+        let outcome = enroll_with_cancellation(
+            async { Ok::<_, std::io::Error>(42_u8) },
+            &mut commands,
+            &mut deferred,
+        )
+        .await;
+        assert!(matches!(outcome, EnrollOutcome::Connected(42)));
+        // Both gameplay commands survived enrollment in original order.
+        assert_eq!(deferred.len(), 2);
+        assert!(matches!(deferred[0], WorkerCommand::QueryRoute { .. }));
+        assert!(matches!(deferred[1], WorkerCommand::Send { .. }));
+    }
+
+    #[tokio::test]
+    async fn enrollment_reports_connect_failure() {
+        let (_sender, mut commands) = tokio_mpsc::unbounded_channel::<WorkerCommand>();
+        let mut deferred = Vec::new();
+        let outcome = enroll_with_cancellation(
+            async { Err::<u8, _>(std::io::Error::other("enrollment rejected")) },
+            &mut commands,
+            &mut deferred,
+        )
+        .await;
+        match outcome {
+            EnrollOutcome::Failed(message) => assert!(message.contains("enrollment rejected")),
+            _ => panic!("expected failed enrollment"),
+        }
     }
 }
