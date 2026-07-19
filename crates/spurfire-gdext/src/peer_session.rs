@@ -1015,6 +1015,7 @@ impl PeerSession {
             AcceptOutcome::RosterMismatch => 9,
             AcceptOutcome::BadSignature => 10,
             AcceptOutcome::InvalidAuthorityClaim => 11,
+            AcceptOutcome::InvalidPayloadRole => 12,
         }
     }
 

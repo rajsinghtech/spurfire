@@ -107,6 +107,7 @@ jobs:
             ([
               {name: "Validate client candidate", status: "completed", conclusion: "success"},
               {name: "Linux x86_64 client", status: "completed", conclusion: "success"},
+              {name: "Linux ARM64 client", status: "completed", conclusion: "success"},
               {name: "Windows x86_64 client", status: "completed", conclusion: "success"},
               {name: "macOS universal client", status: "completed", conclusion: "success"},
               {name: "Assemble checksummed nonpublishing candidate", status: "completed", conclusion: "success"},
@@ -159,9 +160,9 @@ jobs:
           jq -e \
             --arg candidate "alpha-candidate-$source_sha" \
             --arg trusted "alpha-trusted-candidate-$source_sha" '
-            (.total_count == 5) and
+            (.total_count == 6) and
             (([.artifacts[].name] | sort) ==
-             (["client-linux", "client-macos", "client-windows", $candidate, $trusted] | sort)) and
+             (["client-linux", "client-linux-arm64", "client-macos", "client-windows", $candidate, $trusted] | sort)) and
             all(.artifacts[]; (.expired == false) and (.size_in_bytes > 0))' \
             <<< "$artifacts_json" > /dev/null
 

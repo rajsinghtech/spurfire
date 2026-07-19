@@ -476,6 +476,30 @@ class CommandTests(unittest.TestCase):
             publisher,
         )
 
+    def test_publisher_accepts_exact_arm64_inclusive_trusted_inventory(self):
+        publisher = (ROOT / ".github/workflows/client-publish.yml").read_text(encoding="utf-8")
+        job_validation = publisher.split("jobs_json=", 1)[1].split("ci_runs_json=", 1)[0]
+        artifact_validation = publisher.split("artifacts_json=", 1)[1].split("releases_json=", 1)[0]
+        expected_jobs = (
+            "Validate client candidate",
+            "Linux x86_64 client",
+            "Linux ARM64 client",
+            "Windows x86_64 client",
+            "macOS universal client",
+            "Assemble checksummed nonpublishing candidate",
+            "Validate protected trusted release candidate",
+        )
+        for name in expected_jobs:
+            self.assertEqual(job_validation.count(f'name: "{name}"'), 1, name)
+        self.assertIn("(.total_count == 6)", artifact_validation)
+        for artifact in (
+            "client-linux",
+            "client-linux-arm64",
+            "client-macos",
+            "client-windows",
+        ):
+            self.assertIn(f'"{artifact}"', artifact_validation)
+
     def test_desktop_jobs_run_behavioral_native_smoke(self):
         # ABI, loader, input, and exported-method regressions must not ship in
         # desktop artifacts that only launched a bootstrap scene for 30 frames.

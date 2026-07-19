@@ -183,6 +183,7 @@ pub enum AcceptOutcome {
     RosterMismatch,
     BadSignature,
     InvalidAuthorityClaim,
+    InvalidPayloadRole,
 }
 
 #[derive(Clone, Debug)]
@@ -273,6 +274,32 @@ impl SessionState {
         }
         if !self.peers.contains_key(&envelope.sender) {
             return AcceptOutcome::UnknownSender;
+        }
+        let authority_claim = matches!(
+            envelope.payload,
+            PeerPayload::Authority { .. } | PeerPayload::MigrationSnapshot { .. }
+        );
+        // Ordinary gameplay traffic belongs to the installed epoch. Only a
+        // coherent authority claim may introduce the next epoch.
+        if envelope.authority_epoch != self.authority_epoch && !authority_claim {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        // Snapshots and resolved combat truth are authority-only. Signing proves
+        // roster identity, not permission to speak for the authority.
+        if matches!(
+            envelope.payload,
+            PeerPayload::RiderSnapshot { .. } | PeerPayload::ShotResult { .. }
+        ) && envelope.sender != self.authority
+        {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        // A rider may submit only its own command identity.
+        if matches!(
+            envelope.payload,
+            PeerPayload::ShotCommand { ref command }
+                if command.shooter_peer_id != envelope.sender
+        ) {
+            return AcceptOutcome::InvalidPayloadRole;
         }
         if envelope.sequence <= self.peers[&envelope.sender].last_sequence {
             return AcceptOutcome::DuplicateOrReplay;
@@ -787,6 +814,32 @@ mod tests {
             receiver.accept_with_source(&signed, source, Some(NodeKey::from_bytes([2; 32])), 8),
             AcceptOutcome::DuplicateOrReplay
         );
+    }
+
+    #[test]
+    fn signed_non_authority_snapshot_is_rejected_before_replay_mutation() {
+        let (mut sender, sender_key, source) = secure_fixture(player(2));
+        let (mut receiver, _, _) = secure_fixture(player(1));
+        let signed = sender
+            .envelope(
+                1,
+                PeerPayload::RiderSnapshot {
+                    position_mm: [1, 2, 3],
+                    velocity_mmps: [4, 5, 6],
+                    yaw_millidegrees: 7_000,
+                    stance: RiderStance::Mounted,
+                },
+                &sender_key,
+            )
+            .unwrap();
+        let before = receiver.state().peers[&player(2)].clone();
+        assert_eq!(
+            receiver.accept_with_source(&signed, source, None, 10),
+            AcceptOutcome::InvalidPayloadRole
+        );
+        let after = &receiver.state().peers[&player(2)];
+        assert_eq!(after.last_sequence, before.last_sequence);
+        assert_eq!(after.last_seen_ms, before.last_seen_ms);
     }
 
     #[test]
