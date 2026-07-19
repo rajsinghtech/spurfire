@@ -489,9 +489,9 @@ impl PeerSession {
                     if creator_join {
                         let display = self.creator_join_display.take();
                         let expected = self.creator_join_lobby.take();
-                        if let Some(display) = display.filter(|_| {
-                            expected.as_deref() == Some(lobby_id.as_str())
-                        }) {
+                        if let Some(display) =
+                            display.filter(|_| expected.as_deref() == Some(lobby_id.as_str()))
+                        {
                             self.lobby_client
                                 .join_creator(&lobby_id, &display, invitation);
                         }
