@@ -820,6 +820,31 @@ fn receive_envelope(socket: &UdpSocket) -> ProofResult<(Envelope, SocketAddr)> {
     Ok((decode(&bytes[..length])?, source))
 }
 
+fn transient_receive_error(error: &(dyn Error + Send + Sync + 'static)) -> bool {
+    error.downcast_ref::<io::Error>().is_some_and(|error| {
+        matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    })
+}
+
+/// Retry only scheduler-level UDP timeouts, bounded by the scenario deadline.
+/// The socket keeps its 25 ms timeout so migration remains responsive.
+fn receive_envelope_until(
+    socket: &UdpSocket,
+    deadline: Instant,
+    stage: &str,
+) -> ProofResult<(Envelope, SocketAddr)> {
+    loop {
+        match receive_envelope(socket) {
+            Ok(value) => return Ok(value),
+            Err(error) if transient_receive_error(error.as_ref()) && Instant::now() < deadline => {}
+            Err(error) if transient_receive_error(error.as_ref()) => {
+                return Err(proof_error(format!("two-peer {stage} timed out before its required signed packet")));
+            }
+            Err(error) => return Err(proof_error(format!("two-peer {stage} receive failed: {error}"))),
+        }
+    }
+}
+
 fn reject_tampered_signature(
     session: &mut SecureSession,
     envelope: &Envelope,
@@ -896,6 +921,7 @@ fn run_two_peer_child(
     signing_key: SigningKey,
     manifest: RosterManifest,
 ) -> ProofResult<()> {
+    let deadline = Instant::now() + PROOF_TIMEOUT;
     match node {
         Node::A => {
             let hello = session.envelope(
@@ -906,7 +932,7 @@ fn run_two_peer_child(
                 &signing_key,
             )?;
             send_envelope(&socket, &hello, endpoint_for(&manifest, Node::B)?)?;
-            let (reply, source) = receive_envelope(&socket)?;
+            let (reply, source) = receive_envelope_until(&socket, deadline, "peer-a rider-input")?;
             reject_tampered_signature(&mut session, &reply, source, 2)?;
             emit_event(
                 &mut writer,
@@ -921,7 +947,7 @@ fn run_two_peer_child(
                 return Err(proof_error("peer B reply was not rider input"));
             }
             emit_event(&mut writer, node, EventKind::SignedInputAccepted, &session)?;
-            let (command, source) = receive_envelope(&socket)?;
+            let (command, source) = receive_envelope_until(&socket, deadline, "peer-a shot-command")?;
             if session.accept_with_source(&command, source, None, 3) != AcceptOutcome::Accepted
                 || !matches!(command.payload, PeerPayload::ShotCommand { .. })
             {
@@ -940,7 +966,7 @@ fn run_two_peer_child(
             }
         }
         Node::B => {
-            let (hello, source) = receive_envelope(&socket)?;
+            let (hello, source) = receive_envelope_until(&socket, deadline, "peer-b hello")?;
             reject_tampered_signature(&mut session, &hello, source, 1)?;
             emit_event(
                 &mut writer,
@@ -973,12 +999,12 @@ fn run_two_peer_child(
                 &signing_key,
             )?;
             send_envelope(&socket, &command, endpoint_for(&manifest, Node::A)?)?;
-            let (first, source) = receive_envelope(&socket)?;
+            let (first, source) = receive_envelope_until(&socket, deadline, "peer-b shot-result")?;
             if session.accept_with_source(&first, source, None, 4) != AcceptOutcome::Accepted {
                 return Err(proof_error("peer B rejected authority shot result"));
             }
             emit_event(&mut writer, node, EventKind::ShotResultAccepted, &session)?;
-            let (duplicate, source) = receive_envelope(&socket)?;
+            let (duplicate, source) = receive_envelope_until(&socket, deadline, "peer-b duplicate-result")?;
             if session.accept_with_source(&duplicate, source, None, 5)
                 != AcceptOutcome::DuplicateShotResult
             {
@@ -1342,13 +1368,7 @@ fn run_migration_child(
                 }
             }
             Err(error) => {
-                let timed_out = error.downcast_ref::<io::Error>().is_some_and(|error| {
-                    matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    )
-                });
-                if !timed_out {
+                if !transient_receive_error(error.as_ref()) {
                     return Err(error);
                 }
             }
@@ -1378,6 +1398,37 @@ fn child_main(scenario: Scenario, node: Node, control: SocketAddr) -> ProofResul
         Scenario::Migration => {
             run_migration_child(node, socket, writer, reader, session, signing_key, manifest)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_receive_survives_an_initial_scheduler_timeout() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        receiver.set_read_timeout(Some(UDP_TIMEOUT)).unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let lobby = LobbyId::parse(Scenario::TwoPeer.lobby()).unwrap();
+        let local = Node::A.id().unwrap();
+        let mut state = SessionState::new(lobby, local, local, 0);
+        state.add_peer(Node::B.id().unwrap(), 0);
+        let envelope = state.envelope(1, PeerPayload::Hello { hostname: "delayed-valid-packet".into() });
+        let bytes = encode(&envelope).unwrap();
+        let worker = thread::spawn(move || {
+            thread::sleep(UDP_TIMEOUT + UDP_TIMEOUT);
+            sender.send_to(&bytes, destination).unwrap();
+        });
+        let received = receive_envelope_until(
+            &receiver,
+            Instant::now() + Duration::from_secs(1),
+            "delayed-regression",
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(received.0, envelope);
     }
 }
 

@@ -88,7 +88,8 @@ jobs:
 
       - name: Validate game and release helpers
         run: |
-          bash -n scripts/build-gdext.sh scripts/test-godot.sh scripts/install-just-ci.sh scripts/check-release-metadata.sh
+          bash -n scripts/build-gdext.sh scripts/test-godot.sh scripts/install-just-ci.sh scripts/check-release-metadata.sh scripts/check-godot-secret-paths.sh
+          scripts/check-godot-secret-paths.sh
           scripts/build-gdext.sh --self-test
           scripts/test-godot.sh --self-test
           scripts/check-release-metadata.sh
@@ -119,6 +120,7 @@ jobs:
           set -euo pipefail
           bash -n \
             scripts/check-alpha-smoke-log.sh \
+            scripts/check-godot-secret-paths.sh \
             scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh \
             scripts/check-release-metadata.sh
@@ -128,6 +130,7 @@ jobs:
             scripts/check-alpha-lifecycle-evidence.py \
             scripts/make-alpha-candidate-metadata.py
           python3 -m unittest discover -s scripts/tests -v
+          scripts/check-godot-secret-paths.sh
           if proof_output="$(TS_CLIENT_ID=sentinel scripts/prove-local-p2p.sh 2>&1)"; then
             echo 'error: signed process proof accepted an inherited credential variable' >&2
             exit 1

@@ -5,22 +5,21 @@ const RANDOM_NAMES := ["Dusty", "Sundown", "Juniper", "Longshot", "Mesa", "Coyot
 
 enum Screen { TITLE, WAITING, TEARDOWN, MATCH }
 
-@export var service_origin := "https://spurfire.rajsingh.info"
-@onready var api: SpurfireLobbyHttpClient = $LobbyHttpClient
 @onready var peer_session: Node = $PeerSession
+@onready var api: Node = peer_session
 @onready var background: ColorRect = $Background
 @onready var screens: Control = $Screens
 @onready var title_screen: Control = $Screens/Title
 @onready var waiting_screen: Control = $Screens/Waiting
 @onready var teardown_screen: Control = $Screens/Teardown
 @onready var name_edit: LineEdit = $Screens/Title/Card/Margin/VBox/Name
-@onready var create_grant_edit: LineEdit = $Screens/Title/Card/Margin/VBox/CreateGrant
-@onready var join_code_edit: LineEdit = $Screens/Title/Card/Margin/VBox/JoinCode
+@onready var create_grant_input: Control = $Screens/Title/Card/Margin/VBox/CreateGrant
+@onready var join_code_input: Control = $Screens/Title/Card/Margin/VBox/JoinCode
 @onready var create_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Create
 @onready var join_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Join
 @onready var title_status: Label = $Screens/Title/Card/Margin/VBox/Status
 @onready var lobby_name_label: Label = $Screens/Waiting/Card/Margin/VBox/LobbyName
-@onready var share_code_edit: LineEdit = $Screens/Waiting/Card/Margin/VBox/ShareCode
+@onready var share_status: Label = $Screens/Waiting/Card/Margin/VBox/ShareStatus
 @onready var roster_box: VBoxContainer = $Screens/Waiting/Card/Margin/VBox/Roster/Rows
 @onready var network_summary: Label = $Screens/Waiting/Card/Margin/VBox/NetworkSummary
 @onready var waiting_status: Label = $Screens/Waiting/Card/Margin/VBox/Status
@@ -39,7 +38,6 @@ var _session_generation := 0
 var _manifest_public_key := ""
 var _course: Node = null
 var _bridge: SpurfireLobbyPeerBridge = null
-var _creator_join_pending := false
 var _endpoint_registered := false
 var _registered_roster_revision := 0
 var _poll_elapsed := 0.0
@@ -55,11 +53,11 @@ func _ready() -> void:
 	name_edit.text = RANDOM_NAMES[randi() % RANDOM_NAMES.size()]
 	_player_id = SpurfireLobbyContract.new_uuid_v4()
 	_connect_signals()
-	if not api.configure(service_origin, _player_id):
+	if not api.configure_lobby_player(_player_id):
 		title_status.text = "Private lobbies unavailable • Practice Range is ready"
 	else:
 		title_status.text = "Checking private-lobby availability…"
-		api.probe_readiness()
+		api.probe_lobby_readiness()
 	_show(Screen.TITLE)
 
 func _process(delta: float) -> void:
@@ -77,7 +75,7 @@ func _process(delta: float) -> void:
 		var report := _bridge.measurement_report()
 		if not report.is_empty():
 			_report_elapsed = 0.0
-			api.submit_measurements(_lobby_id, report)
+			api.submit_measurements(_lobby_id, JSON.stringify(report))
 	if not _leaving and _endpoint_renew_elapsed >= 30.0 and api.has_participant_access():
 		_endpoint_renew_elapsed = 0.0
 		_try_register_endpoint("", 0, true)
@@ -103,7 +101,7 @@ func _notification(what: int) -> void:
 func _connect_signals() -> void:
 	api.readiness_changed.connect(_on_readiness)
 	api.create_completed.connect(_on_created)
-	api.invitation_completed.connect(_on_invitation)
+	api.invitation_copied.connect(_on_invitation_copied)
 	api.join_completed.connect(_on_joined)
 	api.lobby_updated.connect(_on_lobby_updated)
 	api.network_updated.connect(_on_network_updated)
@@ -120,69 +118,47 @@ func _connect_signals() -> void:
 func _on_readiness(create_authorized: bool, join_authorized: bool) -> void:
 	create_button.disabled = not create_authorized
 	join_button.disabled = not join_authorized
-	create_grant_edit.editable = create_authorized
-	join_code_edit.editable = join_authorized
+	create_grant_input.mouse_filter = Control.MOUSE_FILTER_STOP if create_authorized else Control.MOUSE_FILTER_IGNORE
+	join_code_input.mouse_filter = Control.MOUSE_FILTER_STOP if join_authorized else Control.MOUSE_FILTER_IGNORE
 	if create_authorized or join_authorized:
 		title_status.text = "One private lobby is available"
 	else:
 		title_status.text = "Invite lobbies are not open yet • Practice Range is ready"
 
 func _on_create_pressed() -> void:
-	var grant := create_grant_edit.text.strip_edges()
-	create_grant_edit.clear()
-	if grant.is_empty() or SpurfireLobbyContract.clean_display_name(name_edit.text).is_empty():
+	if SpurfireLobbyContract.clean_display_name(name_edit.text).is_empty():
 		title_status.text = "Enter your rider name and one-use alpha grant."
 		return
 	_set_title_busy("Creating one private posse…")
-	api.create_lobby(name_edit.text, grant)
-	grant = ""
+	api.submit_create(name_edit.text)
 
 func _on_join_pressed() -> void:
-	var parsed := SpurfireLobbyContract.parse_join_code(join_code_edit.text)
-	join_code_edit.clear()
-	if parsed.is_empty():
+	if SpurfireLobbyContract.clean_display_name(name_edit.text).is_empty():
 		title_status.text = SpurfireLobbyContract.SAFE_LOBBY_ERROR
 		return
-	_lobby_id = str(parsed.get("lobby_id", ""))
-	var invitation := str(parsed.get("invitation", ""))
-	parsed.clear()
 	_set_title_busy("Joining the posse…")
-	api.join_lobby(_lobby_id, invitation, name_edit.text)
-	invitation = ""
+	api.submit_join(name_edit.text)
 
 func _on_practice_pressed() -> void:
 	_start_practice()
 
-func _on_created(response: Dictionary) -> void:
+func _on_created(response_json: String) -> void:
+	var response := _public_response(response_json)
 	_lobby_id = str(response.get("lobby_id", ""))
 	if _lobby_id.is_empty():
-		_on_request_failed("create", SpurfireLobbyContract.SAFE_LOBBY_ERROR)
+		_on_request_failed("create", SpurfireLobbyContract.SAFE_LOBBY_ERROR, "json")
 		return
-	_creator_join_pending = true
-	api.issue_invitation(_lobby_id)
+	api.auto_join_creator(_lobby_id, name_edit.text)
 
-func _on_invitation(join_code: String) -> void:
-	if _creator_join_pending:
-		_creator_join_pending = false
-		var parsed := SpurfireLobbyContract.parse_join_code(join_code)
-		join_code = ""
-		if parsed.is_empty():
-			_on_request_failed("invitation", SpurfireLobbyContract.SAFE_LOBBY_ERROR)
-			return
-		var invitation := str(parsed.get("invitation", ""))
-		parsed.clear()
-		api.join_lobby(_lobby_id, invitation, name_edit.text)
-		invitation = ""
-		return
-	share_code_edit.text = join_code
-	waiting_status.text = "Share this one-use code with your posse."
-	join_code = ""
+func _on_invitation_copied(_lobby_id_value: String) -> void:
+	share_status.text = "One-use posse code copied explicitly. Clipboard history may retain it."
+	waiting_status.text = "Share the code once; it is consumed by the first successful join."
 
-func _on_joined(response: Dictionary, enrollment_key: String) -> void:
+func _on_joined(response_json: String) -> void:
+	var response := _public_response(response_json)
 	var lobby_value = response.get("lobby", response)
 	if not lobby_value is Dictionary:
-		enrollment_key = ""
-		_on_request_failed("join", SpurfireLobbyContract.SAFE_LOBBY_ERROR)
+		_on_request_failed("join", SpurfireLobbyContract.SAFE_LOBBY_ERROR, "json")
 		return
 	_lobby = lobby_value as Dictionary
 	_lobby_id = str(_lobby.get("lobby_id", _lobby_id))
@@ -193,25 +169,16 @@ func _on_joined(response: Dictionary, enrollment_key: String) -> void:
 		or not peer_session.bind_manifest_key(_manifest_public_key, _session_generation)
 		or not peer_session.generate_session_key(_session_generation)
 	):
-		enrollment_key = ""
-		_on_request_failed("join", SpurfireLobbyContract.SAFE_LOBBY_ERROR)
+		_on_request_failed("join", SpurfireLobbyContract.SAFE_LOBBY_ERROR, "public_projection")
 		return
 	if not _prepare_network_course(response):
-		enrollment_key = ""
 		waiting_status.text = "Joined the roster, but peer setup failed. Leaving safely…"
 		api.leave_lobby(_lobby_id)
 		return
-	var hostname := "spurfire-rider-%s" % _player_id.left(8)
-	if not peer_session.connect_rustscale(hostname, enrollment_key, 41643):
-		enrollment_key = ""
-		waiting_status.text = "Peer network did not start. Leaving safely…"
-		api.leave_lobby(_lobby_id)
-		return
-	enrollment_key = ""
 	_show(Screen.WAITING)
 	_render_waiting()
 	if api.has_creator_control():
-		api.issue_invitation(_lobby_id)
+		api.copy_invitation_to_clipboard(_lobby_id)
 
 func _prepare_network_course(projection: Dictionary) -> bool:
 	if _course == null:
@@ -269,7 +236,8 @@ func _try_register_endpoint(address: String = "", port: int = 0, force: bool = f
 		_lobby_id, _network_generation, _roster_revision, address, port, public_key, proof
 	)
 
-func _on_endpoint_registered(response: Dictionary) -> void:
+func _on_endpoint_registered(response_json: String) -> void:
+	var response := _public_response(response_json)
 	if _leaving:
 		return
 	_endpoint_registered = true
@@ -280,7 +248,7 @@ func _on_endpoint_registered(response: Dictionary) -> void:
 		_bridge.apply_projection(response)
 	waiting_status.text = "Network ready • measuring the posse"
 
-func _on_report_completed(_response: Dictionary) -> void:
+func _on_report_completed(_response_json: String) -> void:
 	if not _leaving:
 		waiting_status.text = "Network measured • waiting for the posse"
 
@@ -295,7 +263,8 @@ func _on_authority_departed() -> void:
 		# epoch and restore the bounded M2 checkpoint.
 		waiting_status.text = "Host lost • restoring the posse…"
 
-func _on_lobby_updated(response: Dictionary) -> void:
+func _on_lobby_updated(response_json: String) -> void:
+	var response := _public_response(response_json)
 	if _leaving:
 		return
 	var lobby_value = response.get("lobby", response)
@@ -330,7 +299,8 @@ func _on_lobby_updated(response: Dictionary) -> void:
 		_begin_leave()
 		teardown_status.text = "Match ended • closing this lobby session safely…"
 
-func _on_network_updated(response: Dictionary) -> void:
+func _on_network_updated(response_json: String) -> void:
+	var response := _public_response(response_json)
 	_network_view = response
 	_network_generation = int((response.get("backing", {}) as Dictionary).get("network_generation", 0))
 	if not _leaving:
@@ -347,7 +317,8 @@ func _on_start_pressed() -> void:
 	waiting_status.text = "Starting peer-hosted free ride…"
 	api.start_lobby(_lobby_id)
 
-func _on_started(response: Dictionary) -> void:
+func _on_started(response_json: String) -> void:
+	var response := _public_response(response_json)
 	if _leaving:
 		return
 	_authority_input_hash = str(response.get("input_hash", ""))
@@ -355,7 +326,8 @@ func _on_started(response: Dictionary) -> void:
 		_bridge.apply_projection(response)
 	_start_match()
 
-func _on_heartbeat(response: Dictionary) -> void:
+func _on_heartbeat(response_json: String) -> void:
+	var response := _public_response(response_json)
 	if not _leaving:
 		_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
 
@@ -393,7 +365,7 @@ func _stop_peer_transport() -> void:
 	while str(peer_session.get("connection_state")) != "offline" and Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 
-func _on_left(_response: Dictionary) -> void:
+func _on_left(_response_json: String) -> void:
 	if not _quit_after_leave:
 		_reset_to_title()
 
@@ -408,20 +380,24 @@ func _on_end_pressed() -> void:
 	await _stop_peer_transport()
 	api.end_lobby(_lobby_id)
 
-func _on_end_requested(_response: Dictionary) -> void:
+func _on_end_requested(_response_json: String) -> void:
 	teardown_status.text = "Still cleaning up — you can close the game; we'll keep at it."
 	api.poll_network(_lobby_id)
 
-func _on_request_failed(operation: String, safe_message: String) -> void:
+func _on_request_failed(operation: String, safe_message: String, _safe_code: String) -> void:
 	if operation in ["lobby", "network"]:
 		return
 	if _screen == Screen.TITLE:
 		title_status.text = safe_message
-		api.probe_readiness()
+		api.probe_lobby_readiness()
 	elif _screen == Screen.TEARDOWN:
 		teardown_status.text = "Still cleaning up — you can close the game; we'll keep at it."
 	else:
 		waiting_status.text = safe_message
+
+func _public_response(value: String) -> Dictionary:
+	var parsed = JSON.parse_string(value)
+	return parsed as Dictionary if parsed is Dictionary else {}
 
 func _render_waiting() -> void:
 	if _lobby.is_empty():
@@ -477,7 +453,7 @@ func _show(screen: Screen) -> void:
 		(_course as Node3D).visible = false
 
 func _reset_to_title() -> void:
-	api.clear_lobby_secrets()
+	api.cancel_lobby_operations()
 	peer_session.clear_lobby_session()
 	if is_instance_valid(_course):
 		_course.queue_free()
@@ -486,7 +462,7 @@ func _reset_to_title() -> void:
 	_lobby_id = ""
 	_lobby.clear()
 	_network_view.clear()
-	share_code_edit.clear()
+	share_status.text = "One-use code not copied yet."
 	_endpoint_registered = false
 	_registered_roster_revision = 0
 	_leaving = false
@@ -506,9 +482,7 @@ func _quit_after_budget() -> void:
 	_clear_and_quit()
 
 func _clear_and_quit() -> void:
-	api.clear_lobby_secrets()
+	api.cancel_lobby_operations()
 	peer_session.clear_lobby_session()
-	create_grant_edit.clear()
-	join_code_edit.clear()
-	share_code_edit.clear()
+	share_status.text = "One-use code not copied yet."
 	get_tree().quit()

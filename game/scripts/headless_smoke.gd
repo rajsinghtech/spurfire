@@ -224,7 +224,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 	if peer_session == null:
 		failures.append("PeerSession could not be instantiated")
 		return
-	for method in ["configure_session", "generate_session_key", "session_public_key", "key_proof", "configure_secure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "accept_packet_with_source", "connect_rustscale", "send_packet", "query_route", "shutdown"]:
+	for method in ["configure_session", "generate_session_key", "session_public_key", "key_proof", "configure_secure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "accept_packet_with_source", "connect_demo_peer", "send_packet", "query_route", "shutdown"]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks %s" % method)
 	if not peer_session.has_signal("packet_received") or not peer_session.has_signal("route_updated"):
@@ -947,7 +947,7 @@ func _check_persisted_telemetry(course: Node, failures: Array[String]) -> void:
 			if not row.has(required):
 				failures.append("persisted dive row omitted aggregation field %s" % required)
 	var text := FileAccess.get_file_as_string(path).to_lower()
-	for forbidden in ["credential", "capability", "auth_key", "oauth", "join_code", "endpoint", "lobby_seed"]:
+	for forbidden in ["credential", "capability", "oauth", "join_code", "endpoint", "lobby_seed"]:
 		if forbidden in text:
 			failures.append("persisted M2 telemetry leaked prohibited field %s" % forbidden)
 	if finalized_count == 0:

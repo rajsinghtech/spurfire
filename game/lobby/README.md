@@ -25,20 +25,27 @@ The integration branch aligns the shell with the capability-protected control su
    RustScale shutdown, then calls the control API. End Lobby reports cleanup as confirmed only when
    the exact network lifecycle says the resource is absent.
 
-`res://lobby/tests/lobby_contract_test.tscn` is a credential-free contract smoke. It proves strict
-origin and join-code parsing, exact-roster sender rejection, required HTTP glue, no secret sink in
-the adapter, unknown health behavior, and truthful cleanup copy. It is not a live provider,
-two-download, or human-play qualification.
+`res://lobby/tests/lobby_contract_test.tscn` is a credential-free contract smoke. It proves native
+class availability, removal of the secret-taking Godot transport ABI, exact-roster sender rejection,
+public control glue, unknown health behavior, cancellation, and truthful cleanup copy. It is not a
+live provider, two-download, or human-play qualification.
 
-## Activation blocker: native secret handoff
+## Native secret boundary
 
-Capabilities, invitations, and the first-response enrollment key are held only in memory, are never
-logged or persisted, and are cleared on leave/exit. However, Godot `HTTPRequest` necessarily creates
-GDScript `String` / `GString` copies before `PeerSession.connect_rustscale` moves the enrollment key
-into zeroizing Rust memory. This does **not** satisfy the final direct native secret-handoff design.
-Before real readiness can ever return true, replace `lobby_http_client.gd` with the planned native
-`lobby_client.rs` fixed-origin HTTPS worker and feed the key directly into the RustScale worker.
-Until then the explicit product-readiness gates must remain false.
+`PeerSession` now owns the fixed-origin rustls/WebPKI HTTPS client, creator/participant capabilities,
+first-response parser buffers, and the direct move-only RustScale enrollment handoff. Secret input is
+a Rust-backed masked `NativeSecretInput`; neither it nor lobby signals expose secret text through a
+Godot `String`, `Variant`, dictionary, byte array, text control, or `DisplayServer` clipboard call.
+Redirects and proxies are disabled, routes are closed, operations are bounded, and response bodies
+are streamed into bounded zeroizing buffers.
+
+Invitation sharing remains an explicit OS/human boundary. On supported Linux desktops the native
+client writes the one-use code directly to the platform clipboard helper without routing it through
+Godot. Clipboard managers/history, IMEs, accessibility services, key hooks, compositor capture,
+crash dumps, allocators, TLS internals, and the pinned RustScale builder may retain copies and cannot
+be promised zeroized. Unsupported clipboard platforms fail closed; there is no claim of OS clipboard
+zeroization. Product-readiness gates remain server-controlled and credentialed human qualification
+is still required before activation.
 
 ## Invited-friends M2 source path
 
@@ -51,7 +58,6 @@ combat-level deduplication. Authority loss no longer tears down the match: survi
 epoch and install a hash-checked bounded movement/combat checkpoint before continuing.
 
 This is **implemented source proof**, covered by credential-free Rust, Godot contract, and separate
-OS-process gates. It is not credentialed/human evidence. Real create/join stays dark until the native
-secret-handoff blocker above is closed, and route/quality, natural M2 tuning, packaged two-client,
+OS-process gates. It is not credentialed/human evidence. Real create/join stays dark until credentialed qualification closes the server readiness gate, and route/quality, natural M2 tuning, packaged two-client,
 and provider cleanup evidence remain required. No code here authorizes provider mutations,
 publishes an artifact, or changes the release gate.

@@ -1,7 +1,6 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/lobby_shell.gd" id="1_shell"]
-[ext_resource type="Script" path="res://lobby/lobby_http_client.gd" id="2_http"]
 
 [sub_resource type="StyleBoxFlat" id="StyleCard"]
 bg_color = Color(0.075, 0.063, 0.052, 0.97)
@@ -32,9 +31,6 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 color = Color(0.025, 0.02, 0.018, 1)
-
-[node name="LobbyHttpClient" type="Node" parent="."]
-script = ExtResource("2_http")
 
 [node name="PeerSession" type="PeerSession" parent="."]
 
@@ -107,21 +103,21 @@ placeholder_text = "Your name for this lobby"
 layout_mode = 2
 text = "ONE-USE ALPHA GRANT"
 
-[node name="CreateGrant" type="LineEdit" parent="Screens/Title/Card/Margin/VBox"]
+[node name="CreateGrant" type="NativeSecretInput" parent="Screens/Title/Card/Margin/VBox"]
+custom_minimum_size = Vector2(0, 42)
 layout_mode = 2
-editable = false
-secret = true
-placeholder_text = "Provided privately by the alpha operator"
+focus_mode = 2
+tooltip_text = "Click, then type the one-use grant. Native masked capture stores no Godot text."
 
 [node name="JoinCodeLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2
 text = "POSSE CODE"
 
-[node name="JoinCode" type="LineEdit" parent="Screens/Title/Card/Margin/VBox"]
+[node name="JoinCode" type="NativeSecretInput" parent="Screens/Title/Card/Margin/VBox"]
+custom_minimum_size = Vector2(0, 42)
 layout_mode = 2
-editable = false
-secret = true
-placeholder_text = "Paste the one-use code from your host"
+focus_mode = 2
+tooltip_text = "Click, then type the one-use posse code. Native masked capture stores no Godot text."
 
 [node name="Actions" type="HBoxContainer" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2
@@ -198,11 +194,10 @@ horizontal_alignment = 1
 layout_mode = 2
 text = "ONE-USE POSSE CODE"
 
-[node name="ShareCode" type="LineEdit" parent="Screens/Waiting/Card/Margin/VBox"]
+[node name="ShareStatus" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
 layout_mode = 2
-editable = false
-secret = true
-placeholder_text = "Creating invitation…"
+text = "One-use code not copied yet."
+autowrap_mode = 2
 
 [node name="RosterTitle" type="Label" parent="Screens/Waiting/Card/Margin/VBox"]
 layout_mode = 2

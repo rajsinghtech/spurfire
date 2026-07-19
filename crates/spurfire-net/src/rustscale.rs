@@ -52,16 +52,21 @@ impl RustScalePeer {
     /// Enroll an ephemeral node, clear the one-use key, and bind application UDP.
     pub async fn connect(
         hostname: impl Into<String>,
-        auth_key: Zeroizing<String>,
+        auth_key: Zeroizing<Vec<u8>>,
         port: u16,
     ) -> Result<Self, RustScaleTransportError> {
         let state_dir = tempfile::Builder::new()
             .prefix("spurfire-rustscale-")
             .tempdir()
             .map_err(|error| RustScaleTransportError::StateDirectory(error.to_string()))?;
+        // Keep the controlled owner byte-oriented until the pinned RustScale
+        // builder's final borrowed UTF-8 boundary. The builder may transiently
+        // copy internally; that third-party copy cannot be claimed zeroized.
+        let auth_key_text = std::str::from_utf8(&auth_key)
+            .map_err(|error| RustScaleTransportError::Netstack(error.to_string()))?;
         let mut server = Server::builder()
             .hostname(hostname)
-            .auth_key(auth_key.as_str())
+            .auth_key(auth_key_text)
             .state_dir(state_dir.path())
             .ephemeral(true)
             .build()?;

@@ -49,6 +49,7 @@ check:
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked
     bash scripts/check-control-plane-deps.sh
+    scripts/check-godot-secret-paths.sh
 
 # Live Tailscale API smoke test (skips cleanly without .env)
 e2e:
@@ -57,6 +58,10 @@ e2e:
         exit 0; \
     fi
     scripts/ts-api.sh token
+
+# Verify no bearer identifier or legacy secret API enters Godot resources
+secret-path-check:
+    scripts/check-godot-secret-paths.sh
 
 # Run credential-free signed two-process and three-process migration proofs over loopback UDP
 p2p-proof:

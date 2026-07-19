@@ -1,40 +1,13 @@
 class_name SpurfireLobbyContract
 extends RefCounted
 
-const JOIN_CODE_PREFIX := "SPURFIRE1"
 const SAFE_LOBBY_ERROR := "Lobby unavailable or invite code invalid. Check the code and try again."
-const MIN_INVITATION_CHARS := 32
-const MAX_INVITATION_CHARS := 512
-
-static func service_origin_is_safe(origin: String) -> bool:
-	var candidate := origin.strip_edges()
-	if not candidate.begins_with("https://"):
-		return false
-	if candidate.contains("@") or candidate.contains("?") or candidate.contains("#"):
-		return false
-	var authority := candidate.trim_prefix("https://")
-	return not authority.is_empty() and not authority.contains("/") and not authority.contains("\\")
 
 static func clean_display_name(value: String) -> String:
 	var cleaned := value.strip_edges()
 	if cleaned.length() > 64:
 		cleaned = cleaned.left(64)
 	return cleaned
-
-static func make_join_code(lobby_id: String, invitation: String) -> String:
-	if not uuid_v4_is_valid(lobby_id) or not invitation_is_valid(invitation):
-		return ""
-	return "%s:%s:%s" % [JOIN_CODE_PREFIX, lobby_id.to_lower(), invitation]
-
-static func parse_join_code(value: String) -> Dictionary:
-	var parts := value.strip_edges().split(":", false, 3)
-	if parts.size() != 3 or parts[0] != JOIN_CODE_PREFIX:
-		return {}
-	var lobby_id := str(parts[1]).to_lower()
-	var invitation := str(parts[2])
-	if not uuid_v4_is_valid(lobby_id) or not invitation_is_valid(invitation):
-		return {}
-	return {"lobby_id": lobby_id, "invitation": invitation}
 
 static func new_uuid_v4() -> String:
 	var random_bytes := Crypto.new().generate_random_bytes(16)
@@ -49,12 +22,6 @@ static func new_uuid_v4() -> String:
 		encoded.substr(16, 4), encoded.substr(20, 12)
 	]
 
-static func new_idempotency_key() -> String:
-	var random_bytes := Crypto.new().generate_random_bytes(24)
-	var encoded := random_bytes.hex_encode()
-	random_bytes.fill(0)
-	return encoded
-
 static func uuid_v4_is_valid(value: String) -> bool:
 	if value.length() != 36:
 		return false
@@ -68,16 +35,6 @@ static func uuid_v4_is_valid(value: String) -> bool:
 			continue
 		var scalar := value.unicode_at(index)
 		if not ((scalar >= 48 and scalar <= 57) or (scalar >= 65 and scalar <= 70) or (scalar >= 97 and scalar <= 102)):
-			return false
-	return true
-
-static func invitation_is_valid(value: String) -> bool:
-	if value.length() < MIN_INVITATION_CHARS or value.length() > MAX_INVITATION_CHARS:
-		return false
-	for index in value.length():
-		var scalar := value.unicode_at(index)
-		var alphanumeric := (scalar >= 48 and scalar <= 57) or (scalar >= 65 and scalar <= 90) or (scalar >= 97 and scalar <= 122)
-		if not alphanumeric and scalar != 45 and scalar != 95:
 			return false
 	return true
 

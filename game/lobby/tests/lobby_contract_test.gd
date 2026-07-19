@@ -4,12 +4,10 @@ const LOBBY_ID := "00000000-0000-4000-8000-000000000099"
 const PLAYER_A := "00000000-0000-4000-8000-000000000001"
 const PLAYER_B := "00000000-0000-4000-8000-000000000002"
 const PLAYER_C := "00000000-0000-4000-8000-000000000003"
-const INVITATION := "abcdefghijklmnopqrstuvwxyzABCDEFGH0123456789_-"
 
 func _ready() -> void:
 	var failures: Array[String] = []
-	_check_origins(failures)
-	_check_join_code(failures)
+	_check_native_boundary(failures)
 	_check_roster_projection(failures)
 	_check_peer_roster_binding(failures)
 	_check_secret_storage_contract(failures)
@@ -24,24 +22,34 @@ func _ready() -> void:
 			push_error(failure)
 		get_tree().quit(1)
 
-func _check_origins(failures: Array[String]) -> void:
-	if not SpurfireLobbyContract.service_origin_is_safe("https://lobby.example.test"):
-		failures.append("strict HTTPS origin was rejected")
-	for bad in [
-		"http://lobby.example.test", "https://user@lobby.example.test",
-		"https://lobby.example.test/path", "https://lobby.example.test?token=x",
+func _check_native_boundary(failures: Array[String]) -> void:
+	if not ClassDB.class_exists(&"PeerSession") or not ClassDB.class_exists(&"NativeSecretInput"):
+		failures.append("native lobby/input classes unavailable")
+		return
+	var session := ClassDB.instantiate(&"PeerSession") as Node
+	if session == null:
+		failures.append("native lobby owner could not be instantiated")
+		return
+	add_child(session)
+	if session.has_method(&("connect_" + "rustscale")):
+		failures.append("legacy Godot secret-taking transport method remains exported")
+	for method in [
+		"configure_lobby_player", "probe_lobby_readiness", "capture_create_grant",
+		"capture_join_code", "submit_create", "submit_join", "auto_join_creator",
+		"copy_invitation_to_clipboard", "cancel_lobby_operations",
 	]:
-		if SpurfireLobbyContract.service_origin_is_safe(bad):
-			failures.append("unsafe service origin accepted: %s" % bad)
-
-func _check_join_code(failures: Array[String]) -> void:
-	var code := SpurfireLobbyContract.make_join_code(LOBBY_ID, INVITATION)
-	var decoded := SpurfireLobbyContract.parse_join_code(code)
-	if str(decoded.get("lobby_id", "")) != LOBBY_ID or str(decoded.get("invitation", "")) != INVITATION:
-		failures.append("one-use join code did not round trip exactly")
-	for bad in ["", LOBBY_ID, "SPURFIRE1:%s:short" % LOBBY_ID, "SPURFIRE1:not-a-uuid:%s" % INVITATION]:
-		if not SpurfireLobbyContract.parse_join_code(bad).is_empty():
-			failures.append("malformed join code was accepted")
+		if not session.has_method(method):
+			failures.append("native lobby method unavailable: %s" % method)
+	var signals := ClassDB.class_get_signal_list(&"PeerSession", true)
+	for descriptor in signals:
+		var signal_name := str((descriptor as Dictionary).get("name", ""))
+		if signal_name in ["create_completed", "join_completed", "invitation_copied"]:
+			for argument in (descriptor as Dictionary).get("args", []):
+				var argument_name := str((argument as Dictionary).get("name", ""))
+				if argument_name.contains("secret") or argument_name.contains("token"):
+					failures.append("native signal exposes secret-shaped argument")
+	session.cancel_lobby_operations()
+	session.queue_free()
 
 func _check_roster_projection(failures: Array[String]) -> void:
 	var lobby := {
@@ -94,23 +102,23 @@ func _check_peer_roster_binding(failures: Array[String]) -> void:
 	outsider.queue_free()
 
 func _check_secret_storage_contract(failures: Array[String]) -> void:
-	var source := FileAccess.get_file_as_string("res://lobby/lobby_http_client.gd")
-	for forbidden in ["FileAccess.open", "user://", "OS.set_environment", "print(", "push_error("]:
-		if source.contains(forbidden):
-			failures.append("lobby HTTP client contains forbidden secret sink: %s" % forbidden)
-	if not source.contains("request.max_redirects = 0"):
-		failures.append("lobby HTTP client does not disable redirects")
-	if not source.contains("real_lobby_creation_authorized\", false"):
-		failures.append("missing readiness must not default open")
+	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
+	var scene_source := FileAccess.get_file_as_string("res://lobby/lobby_shell.tscn")
+	for forbidden in [
+		"connect_" + "rustscale", "make_" + "join_code", "parse_" + "join_code",
+		"clipboard_" + "get", "clipboard_" + "set",
+	]:
+		if shell_source.contains(forbidden) or scene_source.contains(forbidden):
+			failures.append("Godot lobby boundary contains forbidden secret path")
+	if shell_source.contains("LineEdit = $Screens/Title/Card/Margin/VBox/CreateGrant"):
+		failures.append("create grant still uses a Godot text control")
+	if scene_source.contains("name=\"ShareCode\""):
+		failures.append("share code is still rendered into a Godot control")
+	for required in ["NativeSecretInput", "cancel_lobby_operations", "_public_response"]:
+		if not (shell_source + scene_source).contains(required):
+			failures.append("native lobby containment contract omitted: %s" % required)
 
 func _check_control_glue(failures: Array[String]) -> void:
-	var client_source := FileAccess.get_file_as_string("res://lobby/lobby_http_client.gd")
-	for required in [
-		"X-Spurfire-Player-Id", "/session/endpoint", "/network/reports",
-		"creator_player_id", "real_lobby_join_authorized",
-	]:
-		if not client_source.contains(required):
-			failures.append("lobby HTTP contract omitted integration field: %s" % required)
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
 	for required in ["submit_measurements", "_stop_peer_transport"]:
 		if not shell_source.contains(required):
