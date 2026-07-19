@@ -822,7 +822,10 @@ fn receive_envelope(socket: &UdpSocket) -> ProofResult<(Envelope, SocketAddr)> {
 
 fn transient_receive_error(error: &(dyn Error + Send + Sync + 'static)) -> bool {
     error.downcast_ref::<io::Error>().is_some_and(|error| {
-        matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
     })
 }
 
@@ -838,9 +841,15 @@ fn receive_envelope_until(
             Ok(value) => return Ok(value),
             Err(error) if transient_receive_error(error.as_ref()) && Instant::now() < deadline => {}
             Err(error) if transient_receive_error(error.as_ref()) => {
-                return Err(proof_error(format!("two-peer {stage} timed out before its required signed packet")));
+                return Err(proof_error(format!(
+                    "two-peer {stage} timed out before its required signed packet"
+                )));
             }
-            Err(error) => return Err(proof_error(format!("two-peer {stage} receive failed: {error}"))),
+            Err(error) => {
+                return Err(proof_error(format!(
+                    "two-peer {stage} receive failed: {error}"
+                )))
+            }
         }
     }
 }
@@ -947,7 +956,8 @@ fn run_two_peer_child(
                 return Err(proof_error("peer B reply was not rider input"));
             }
             emit_event(&mut writer, node, EventKind::SignedInputAccepted, &session)?;
-            let (command, source) = receive_envelope_until(&socket, deadline, "peer-a shot-command")?;
+            let (command, source) =
+                receive_envelope_until(&socket, deadline, "peer-a shot-command")?;
             if session.accept_with_source(&command, source, None, 3) != AcceptOutcome::Accepted
                 || !matches!(command.payload, PeerPayload::ShotCommand { .. })
             {
@@ -1004,7 +1014,8 @@ fn run_two_peer_child(
                 return Err(proof_error("peer B rejected authority shot result"));
             }
             emit_event(&mut writer, node, EventKind::ShotResultAccepted, &session)?;
-            let (duplicate, source) = receive_envelope_until(&socket, deadline, "peer-b duplicate-result")?;
+            let (duplicate, source) =
+                receive_envelope_until(&socket, deadline, "peer-b duplicate-result")?;
             if session.accept_with_source(&duplicate, source, None, 5)
                 != AcceptOutcome::DuplicateShotResult
             {
@@ -1415,7 +1426,12 @@ mod tests {
         let local = Node::A.id().unwrap();
         let mut state = SessionState::new(lobby, local, local, 0);
         state.add_peer(Node::B.id().unwrap(), 0);
-        let envelope = state.envelope(1, PeerPayload::Hello { hostname: "delayed-valid-packet".into() });
+        let envelope = state.envelope(
+            1,
+            PeerPayload::Hello {
+                hostname: "delayed-valid-packet".into(),
+            },
+        );
         let bytes = encode(&envelope).unwrap();
         let worker = thread::spawn(move || {
             thread::sleep(UDP_TIMEOUT + UDP_TIMEOUT);

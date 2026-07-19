@@ -378,7 +378,12 @@ pub struct PeerSession {
 }
 
 impl PeerSession {
-    fn connect_native(&mut self, hostname: String, enrollment: Zeroizing<Vec<u8>>, port: u16) -> bool {
+    fn connect_native(
+        &mut self,
+        hostname: String,
+        enrollment: Zeroizing<Vec<u8>>,
+        port: u16,
+    ) -> bool {
         if self.command_tx.is_some() {
             return false;
         }
@@ -400,11 +405,17 @@ impl PeerSession {
     }
 
     fn secret_input(&self, path: &str) -> Option<Gd<NativeSecretInput>> {
-        self.base().try_get_node_as::<NativeSecretInput>(&NodePath::from(path))
+        self.base()
+            .try_get_node_as::<NativeSecretInput>(&NodePath::from(path))
     }
 
     fn clean_public_name(value: &GString) -> Option<String> {
-        let cleaned = value.to_string().trim().chars().take(64).collect::<String>();
+        let cleaned = value
+            .to_string()
+            .trim()
+            .chars()
+            .take(64)
+            .collect::<String>();
         (!cleaned.is_empty()).then_some(cleaned)
     }
 
@@ -425,11 +436,20 @@ impl PeerSession {
                 continue;
             }
             match event {
-                LobbyEvent::Public { operation, json, .. } => {
+                LobbyEvent::Public {
+                    operation, json, ..
+                } => {
                     if operation == LobbyOperation::Readiness {
-                        let value = serde_json::from_str::<serde_json::Value>(&json).unwrap_or_default();
-                        let create = value.get("real_lobby_creation_authorized").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                        let join = value.get("real_lobby_join_authorized").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                        let value =
+                            serde_json::from_str::<serde_json::Value>(&json).unwrap_or_default();
+                        let create = value
+                            .get("real_lobby_creation_authorized")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let join = value
+                            .get("real_lobby_join_authorized")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
                         self.signals().readiness_changed().emit(create, join);
                         continue;
                     }
@@ -437,54 +457,88 @@ impl PeerSession {
                     match operation {
                         LobbyOperation::Lobby => self.signals().lobby_updated().emit(&json),
                         LobbyOperation::Network => self.signals().network_updated().emit(&json),
-                        LobbyOperation::Endpoint => self.signals().endpoint_registered().emit(&json),
+                        LobbyOperation::Endpoint => {
+                            self.signals().endpoint_registered().emit(&json)
+                        }
                         LobbyOperation::Report => self.signals().report_completed().emit(&json),
                         LobbyOperation::Start => self.signals().start_completed().emit(&json),
-                        LobbyOperation::Heartbeat => self.signals().heartbeat_completed().emit(&json),
+                        LobbyOperation::Heartbeat => {
+                            self.signals().heartbeat_completed().emit(&json)
+                        }
                         LobbyOperation::Leave => self.signals().leave_completed().emit(&json),
                         LobbyOperation::End => self.signals().end_completed().emit(&json),
                         _ => {}
                     }
                 }
-                LobbyEvent::Created { public_json, creator, .. } => {
+                LobbyEvent::Created {
+                    public_json,
+                    creator,
+                    ..
+                } => {
                     self.lobby_client.install_creator(creator);
-                    self.signals().create_completed().emit(&GString::from(&public_json));
+                    self.signals()
+                        .create_completed()
+                        .emit(&GString::from(&public_json));
                 }
-                LobbyEvent::Invitation { creator_join, lobby_id, invitation, .. } => {
+                LobbyEvent::Invitation {
+                    creator_join,
+                    lobby_id,
+                    invitation,
+                    ..
+                } => {
                     if creator_join {
                         let display = self.creator_join_display.take();
                         let expected = self.creator_join_lobby.take();
                         if display.is_some() && expected.as_deref() == Some(lobby_id.as_str()) {
-                            self.lobby_client.join_creator(&lobby_id, &display.expect("checked"), invitation);
+                            self.lobby_client.join_creator(
+                                &lobby_id,
+                                &display.expect("checked"),
+                                invitation,
+                            );
                         }
                     } else if copy_invitation(&lobby_id, &invitation).is_ok() {
-                        self.signals().invitation_copied().emit(&GString::from(&lobby_id));
+                        self.signals()
+                            .invitation_copied()
+                            .emit(&GString::from(&lobby_id));
                     } else {
                         let operation = GString::from("invitation");
                         let message = GString::from(safe_error());
                         let code = GString::from("clipboard");
-                        self.signals().request_failed().emit(&operation, &message, &code);
+                        self.signals()
+                            .request_failed()
+                            .emit(&operation, &message, &code);
                     }
                 }
                 LobbyEvent::Joined { joined, .. } => {
                     let player = self.lobby_client.player_id().unwrap_or_default();
-                    let hostname = format!("spurfire-rider-{}", player.chars().take(8).collect::<String>());
+                    let hostname = format!(
+                        "spurfire-rider-{}",
+                        player.chars().take(8).collect::<String>()
+                    );
                     if self.connect_native(hostname, joined.enrollment.into_zeroizing(), 41_643) {
                         self.lobby_client.install_participant(joined.participant);
-                        self.signals().join_completed().emit(&GString::from(&joined.public_json));
+                        self.signals()
+                            .join_completed()
+                            .emit(&GString::from(&joined.public_json));
                     } else {
                         drop(joined.participant);
                         let operation = GString::from("join");
                         let message = GString::from(safe_error());
                         let code = GString::from("worker");
-                        self.signals().request_failed().emit(&operation, &message, &code);
+                        self.signals()
+                            .request_failed()
+                            .emit(&operation, &message, &code);
                     }
                 }
-                LobbyEvent::Failed { operation, error, .. } => {
+                LobbyEvent::Failed {
+                    operation, error, ..
+                } => {
                     let operation = GString::from(operation.code());
                     let message = GString::from(safe_error());
                     let code = GString::from(error.code());
-                    self.signals().request_failed().emit(&operation, &message, &code);
+                    self.signals()
+                        .request_failed()
+                        .emit(&operation, &message, &code);
                 }
             }
         }
@@ -1502,7 +1556,8 @@ impl PeerSession {
 
     #[func]
     fn capture_create_grant(&self) {
-        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant") {
+        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
+        {
             input.bind_mut().arm_capture();
         }
     }
@@ -1519,12 +1574,15 @@ impl PeerSession {
         let Some(name) = Self::clean_public_name(&display_name) else {
             return;
         };
-        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant") else {
+        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
+        else {
             return;
         };
         match input.bind_mut().consume() {
             Ok(grant) => self.lobby_client.create(&name, grant),
-            Err(_) => self.lobby_client.fail_now(LobbyOperation::Create, NativeLobbyError::Secret),
+            Err(_) => self
+                .lobby_client
+                .fail_now(LobbyOperation::Create, NativeLobbyError::Secret),
         }
     }
 
@@ -1533,12 +1591,15 @@ impl PeerSession {
         let Some(name) = Self::clean_public_name(&display_name) else {
             return;
         };
-        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/JoinCode") else {
+        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/JoinCode")
+        else {
             return;
         };
         match input.bind_mut().consume_join_code() {
             Ok((lobby_id, invitation)) => self.lobby_client.join(&lobby_id, &name, invitation),
-            Err(_) => self.lobby_client.fail_now(LobbyOperation::Join, NativeLobbyError::Secret),
+            Err(_) => self
+                .lobby_client
+                .fail_now(LobbyOperation::Join, NativeLobbyError::Secret),
         }
     }
 
@@ -1571,19 +1632,52 @@ impl PeerSession {
     #[func]
     fn poll_lobby(&self, lobby_id: GString) {
         let id = lobby_id.to_string();
-        self.lobby_client.request_public(LobbyOperation::Lobby, Method::GET, route_for(LobbyOperation::Lobby, &id), None, false, false);
+        self.lobby_client.request_public(
+            LobbyOperation::Lobby,
+            Method::GET,
+            route_for(LobbyOperation::Lobby, &id),
+            None,
+            false,
+            false,
+        );
     }
 
     #[func]
     fn poll_network(&self, lobby_id: GString) {
         let id = lobby_id.to_string();
-        self.lobby_client.request_public(LobbyOperation::Network, Method::GET, route_for(LobbyOperation::Network, &id), None, false, false);
+        self.lobby_client.request_public(
+            LobbyOperation::Network,
+            Method::GET,
+            route_for(LobbyOperation::Network, &id),
+            None,
+            false,
+            false,
+        );
     }
 
     #[func]
-    fn register_endpoint(&mut self, lobby_id: GString, network_generation: i64, roster_revision: i64, address: GString, port: i64, session_public_key: GString, key_proof: GString) {
-        let (Ok(network_generation), Ok(roster_revision), Ok(port)) = (u64::try_from(network_generation), u64::try_from(roster_revision), u16::try_from(port)) else { return; };
-        self.lobby_client.last_endpoint_sequence = self.lobby_client.last_endpoint_sequence.saturating_add(1).max(unix_millis());
+    fn register_endpoint(
+        &mut self,
+        lobby_id: GString,
+        network_generation: i64,
+        roster_revision: i64,
+        address: GString,
+        port: i64,
+        session_public_key: GString,
+        key_proof: GString,
+    ) {
+        let (Ok(network_generation), Ok(roster_revision), Ok(port)) = (
+            u64::try_from(network_generation),
+            u64::try_from(roster_revision),
+            u16::try_from(port),
+        ) else {
+            return;
+        };
+        self.lobby_client.last_endpoint_sequence = self
+            .lobby_client
+            .last_endpoint_sequence
+            .saturating_add(1)
+            .max(unix_millis());
         let body = serde_json::json!({
             "network_generation": network_generation,
             "roster_revision": roster_revision,
@@ -1594,7 +1688,14 @@ impl PeerSession {
             "key_proof": key_proof.to_string(),
         });
         let id = lobby_id.to_string();
-        self.lobby_client.request_public(LobbyOperation::Endpoint, Method::POST, route_for(LobbyOperation::Endpoint, &id), Some(body.to_string()), false, true);
+        self.lobby_client.request_public(
+            LobbyOperation::Endpoint,
+            Method::POST,
+            route_for(LobbyOperation::Endpoint, &id),
+            Some(body.to_string()),
+            false,
+            true,
+        );
     }
 
     #[func]
@@ -1602,40 +1703,84 @@ impl PeerSession {
         let (Ok(mut body), Some(player)) = (
             serde_json::from_str::<serde_json::Value>(&report_json.to_string()),
             self.lobby_client.player_id(),
-        ) else { return; };
+        ) else {
+            return;
+        };
         if let serde_json::Value::Object(map) = &mut body {
-            map.insert("player_id".into(), serde_json::Value::String(player.to_owned()));
+            map.insert(
+                "player_id".into(),
+                serde_json::Value::String(player.to_owned()),
+            );
         }
         let id = lobby_id.to_string();
-        self.lobby_client.request_public(LobbyOperation::Report, Method::POST, route_for(LobbyOperation::Report, &id), Some(body.to_string()), false, false);
+        self.lobby_client.request_public(
+            LobbyOperation::Report,
+            Method::POST,
+            route_for(LobbyOperation::Report, &id),
+            Some(body.to_string()),
+            false,
+            false,
+        );
     }
 
     #[func]
     fn start_lobby(&self, lobby_id: GString) {
         let id = lobby_id.to_string();
         let body = serde_json::json!({"creator_player_id": self.lobby_client.player_id().unwrap_or_default()}).to_string();
-        self.lobby_client.request_public(LobbyOperation::Start, Method::POST, route_for(LobbyOperation::Start, &id), Some(body), true, true);
+        self.lobby_client.request_public(
+            LobbyOperation::Start,
+            Method::POST,
+            route_for(LobbyOperation::Start, &id),
+            Some(body),
+            true,
+            true,
+        );
     }
 
     #[func]
     fn authority_heartbeat(&self, lobby_id: GString, input_hash: GString) {
-        if input_hash.len() != 64 { return; }
+        if input_hash.len() != 64 {
+            return;
+        }
         let id = lobby_id.to_string();
         let body = serde_json::json!({"player_id": self.lobby_client.player_id().unwrap_or_default(), "input_hash": input_hash.to_string()}).to_string();
-        self.lobby_client.request_public(LobbyOperation::Heartbeat, Method::POST, route_for(LobbyOperation::Heartbeat, &id), Some(body), false, false);
+        self.lobby_client.request_public(
+            LobbyOperation::Heartbeat,
+            Method::POST,
+            route_for(LobbyOperation::Heartbeat, &id),
+            Some(body),
+            false,
+            false,
+        );
     }
 
     #[func]
     fn leave_lobby(&self, lobby_id: GString) {
         let id = lobby_id.to_string();
-        let body = serde_json::json!({"player_id": self.lobby_client.player_id().unwrap_or_default()}).to_string();
-        self.lobby_client.request_public(LobbyOperation::Leave, Method::POST, route_for(LobbyOperation::Leave, &id), Some(body), false, true);
+        let body =
+            serde_json::json!({"player_id": self.lobby_client.player_id().unwrap_or_default()})
+                .to_string();
+        self.lobby_client.request_public(
+            LobbyOperation::Leave,
+            Method::POST,
+            route_for(LobbyOperation::Leave, &id),
+            Some(body),
+            false,
+            true,
+        );
     }
 
     #[func]
     fn end_lobby(&self, lobby_id: GString) {
         let id = lobby_id.to_string();
-        self.lobby_client.request_public(LobbyOperation::End, Method::DELETE, route_for(LobbyOperation::End, &id), None, true, true);
+        self.lobby_client.request_public(
+            LobbyOperation::End,
+            Method::DELETE,
+            route_for(LobbyOperation::End, &id),
+            None,
+            true,
+            true,
+        );
     }
 
     #[func]
@@ -1644,23 +1789,42 @@ impl PeerSession {
         self.creator_join_display = None;
         self.creator_join_lobby = None;
         self.shutdown();
-        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant") { input.bind_mut().clear_capture(); }
-        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/JoinCode") { input.bind_mut().clear_capture(); }
+        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
+        {
+            input.bind_mut().clear_capture();
+        }
+        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/JoinCode") {
+            input.bind_mut().clear_capture();
+        }
     }
 
     /// Explicit local-demo enrollment. The file path and bytes are read and
     /// removed entirely in Rust; no bearer value crosses the Godot ABI.
     #[func]
     fn connect_demo_peer(&mut self, hostname: GString, port: i64) -> bool {
-        let Ok(port) = u16::try_from(port) else { return false; };
-        let Some(path) = std::env::var_os("SPURFIRE_P2P_DEMO_KEY_FILE") else { return false; };
-        let Ok(bytes) = std::fs::read(&path) else { return false; };
+        let Ok(port) = u16::try_from(port) else {
+            return false;
+        };
+        let Some(path) = std::env::var_os("SPURFIRE_P2P_DEMO_KEY_FILE") else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
         let mut enrollment = Zeroizing::new(bytes);
-        while enrollment.last().is_some_and(u8::is_ascii_whitespace) { enrollment.pop(); }
-        while enrollment.first().is_some_and(u8::is_ascii_whitespace) { enrollment.remove(0); }
-        if enrollment.is_empty() { return false; }
+        while enrollment.last().is_some_and(u8::is_ascii_whitespace) {
+            enrollment.pop();
+        }
+        while enrollment.first().is_some_and(u8::is_ascii_whitespace) {
+            enrollment.remove(0);
+        }
+        if enrollment.is_empty() {
+            return false;
+        }
         let started = self.connect_native(hostname.to_string(), enrollment, port);
-        if started { let _ = std::fs::remove_file(path); }
+        if started {
+            let _ = std::fs::remove_file(path);
+        }
         started
     }
 

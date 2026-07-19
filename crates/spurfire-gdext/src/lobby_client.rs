@@ -343,31 +343,43 @@ impl LobbyClientState {
         let generation = self.generation;
         let lobby_id = lobby_id.to_owned();
         let auth = sensitive_authorization(capability);
-        spawn_request(move || {
-            let result = async {
-                let auth = auth?;
-                let mut body = request(Method::POST, &path, Some("{}".into()), Some(auth), true, None)
+        spawn_request(
+            move || {
+                let result = async {
+                    let auth = auth?;
+                    let mut body = request(
+                        Method::POST,
+                        &path,
+                        Some("{}".into()),
+                        Some(auth),
+                        true,
+                        None,
+                    )
                     .await?;
-                let invitation = extract_secret(&mut body, b"token")?;
-                let public_json = public_json(body)?;
-                let _ = public_json;
-                Ok::<_, NativeLobbyError>(invitation)
-            };
-            let event = match run_async(result) {
-                Ok(invitation) => LobbyEvent::Invitation {
-                    generation,
-                    creator_join,
-                    lobby_id,
-                    invitation,
-                },
-                Err(error) => LobbyEvent::Failed {
-                    generation,
-                    operation,
-                    error,
-                },
-            };
-            let _ = sender.send(event);
-        }, self.sender.clone(), self.generation, operation);
+                    let invitation = extract_secret(&mut body, b"token")?;
+                    let public_json = public_json(body)?;
+                    let _ = public_json;
+                    Ok::<_, NativeLobbyError>(invitation)
+                };
+                let event = match run_async(result) {
+                    Ok(invitation) => LobbyEvent::Invitation {
+                        generation,
+                        creator_join,
+                        lobby_id,
+                        invitation,
+                    },
+                    Err(error) => LobbyEvent::Failed {
+                        generation,
+                        operation,
+                        error,
+                    },
+                };
+                let _ = sender.send(event);
+            },
+            self.sender.clone(),
+            self.generation,
+            operation,
+        );
     }
 
     pub(crate) fn join(&self, lobby_id: &str, display_name: &str, invitation: SecretBytes) {
@@ -386,12 +398,7 @@ impl LobbyClientState {
         self.spawn_join(lobby_id, body, invitation);
     }
 
-    pub(crate) fn join_creator(
-        &self,
-        lobby_id: &str,
-        display_name: &str,
-        invitation: SecretBytes,
-    ) {
+    pub(crate) fn join_creator(&self, lobby_id: &str, display_name: &str, invitation: SecretBytes) {
         self.join(lobby_id, display_name, invitation);
     }
 
@@ -403,32 +410,38 @@ impl LobbyClientState {
         let sender = self.sender.clone();
         let generation = self.generation;
         let auth = sensitive_authorization(&invitation);
-        spawn_request(move || {
-            let result = async {
-                let auth = auth?;
-                let mut response = request(Method::POST, &path, Some(body), Some(auth), true, None).await?;
-                let enrollment = extract_secret(&mut response, b"auth_key")?;
-                if enrollment.as_bytes() == b"DRY_RUN_NO_KEY" {
-                    return Err(NativeLobbyError::Secret);
-                }
-                let participant = extract_secret(&mut response, b"token")?;
-                let public_json = public_json(response)?;
-                Ok::<_, NativeLobbyError>(NativeJoin {
-                    public_json,
-                    participant,
-                    enrollment,
-                })
-            };
-            let event = match run_async(result) {
-                Ok(joined) => LobbyEvent::Joined { generation, joined },
-                Err(error) => LobbyEvent::Failed {
-                    generation,
-                    operation: LobbyOperation::Join,
-                    error,
-                },
-            };
-            let _ = sender.send(event);
-        }, self.sender.clone(), self.generation, LobbyOperation::Join);
+        spawn_request(
+            move || {
+                let result = async {
+                    let auth = auth?;
+                    let mut response =
+                        request(Method::POST, &path, Some(body), Some(auth), true, None).await?;
+                    let enrollment = extract_secret(&mut response, b"auth_key")?;
+                    if enrollment.as_bytes() == b"DRY_RUN_NO_KEY" {
+                        return Err(NativeLobbyError::Secret);
+                    }
+                    let participant = extract_secret(&mut response, b"token")?;
+                    let public_json = public_json(response)?;
+                    Ok::<_, NativeLobbyError>(NativeJoin {
+                        public_json,
+                        participant,
+                        enrollment,
+                    })
+                };
+                let event = match run_async(result) {
+                    Ok(joined) => LobbyEvent::Joined { generation, joined },
+                    Err(error) => LobbyEvent::Failed {
+                        generation,
+                        operation: LobbyOperation::Join,
+                        error,
+                    },
+                };
+                let _ = sender.send(event);
+            },
+            self.sender.clone(),
+            self.generation,
+            LobbyOperation::Join,
+        );
     }
 
     fn spawn(
@@ -448,37 +461,43 @@ impl LobbyClientState {
         let auth = capability.map(sensitive_authorization).transpose();
         let sender = self.sender.clone();
         let generation = self.generation;
-        spawn_request(move || {
-            let result = async {
-                let mut response = request(method, &path, body, auth?, idempotent, actor).await?;
-                match operation {
-                    LobbyOperation::Create => {
-                        let creator = extract_secret(&mut response, b"token")?;
-                        let public_json = public_json(response)?;
-                        Ok(SpawnResult::Created(public_json, creator))
+        spawn_request(
+            move || {
+                let result = async {
+                    let mut response =
+                        request(method, &path, body, auth?, idempotent, actor).await?;
+                    match operation {
+                        LobbyOperation::Create => {
+                            let creator = extract_secret(&mut response, b"token")?;
+                            let public_json = public_json(response)?;
+                            Ok(SpawnResult::Created(public_json, creator))
+                        }
+                        _ => Ok(SpawnResult::Public(public_json(response)?)),
                     }
-                    _ => Ok(SpawnResult::Public(public_json(response)?)),
-                }
-            };
-            let event = match run_async(result) {
-                Ok(SpawnResult::Created(public_json, creator)) => LobbyEvent::Created {
-                    generation,
-                    public_json,
-                    creator,
-                },
-                Ok(SpawnResult::Public(json)) => LobbyEvent::Public {
-                    generation,
-                    operation,
-                    json,
-                },
-                Err(error) => LobbyEvent::Failed {
-                    generation,
-                    operation,
-                    error,
-                },
-            };
-            let _ = sender.send(event);
-        }, self.sender.clone(), self.generation, operation);
+                };
+                let event = match run_async(result) {
+                    Ok(SpawnResult::Created(public_json, creator)) => LobbyEvent::Created {
+                        generation,
+                        public_json,
+                        creator,
+                    },
+                    Ok(SpawnResult::Public(json)) => LobbyEvent::Public {
+                        generation,
+                        operation,
+                        json,
+                    },
+                    Err(error) => LobbyEvent::Failed {
+                        generation,
+                        operation,
+                        error,
+                    },
+                };
+                let _ = sender.send(event);
+            },
+            self.sender.clone(),
+            self.generation,
+            operation,
+        );
     }
 
     pub(crate) fn fail_now(&self, operation: LobbyOperation, error: NativeLobbyError) {
@@ -514,7 +533,9 @@ fn spawn_request(
     }
 }
 
-fn run_async<T>(future: impl std::future::Future<Output = Result<T, NativeLobbyError>>) -> Result<T, NativeLobbyError> {
+fn run_async<T>(
+    future: impl std::future::Future<Output = Result<T, NativeLobbyError>>,
+) -> Result<T, NativeLobbyError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -590,7 +611,10 @@ async fn request(
     headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if body.is_some() {
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
     }
     if let Some(value) = authorization {
         headers.insert(header::AUTHORIZATION, value);
@@ -622,7 +646,10 @@ async fn request(
         return Err(NativeLobbyError::Status);
     }
     strict_json_mime(response.headers())?;
-    if response.content_length().is_some_and(|length| length > MAX_BODY as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY as u64)
+    {
         return Err(NativeLobbyError::Overflow);
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BODY));
@@ -654,7 +681,10 @@ fn strict_json_mime(headers: &HeaderMap) -> Result<(), NativeLobbyError> {
     }
 }
 
-fn extract_secret(body: &mut Zeroizing<Vec<u8>>, key: &[u8]) -> Result<SecretBytes, NativeLobbyError> {
+fn extract_secret(
+    body: &mut Zeroizing<Vec<u8>>,
+    key: &[u8],
+) -> Result<SecretBytes, NativeLobbyError> {
     let mut needle = Vec::with_capacity(key.len() + 2);
     needle.push(b'"');
     needle.extend_from_slice(key);
@@ -729,7 +759,9 @@ fn remove_secret_members(value: &mut Value) {
     }
 }
 
-pub(crate) fn parse_join_code(mut bytes: Zeroizing<Vec<u8>>) -> Result<(String, SecretBytes), NativeLobbyError> {
+pub(crate) fn parse_join_code(
+    mut bytes: Zeroizing<Vec<u8>>,
+) -> Result<(String, SecretBytes), NativeLobbyError> {
     while bytes.first().is_some_and(u8::is_ascii_whitespace) {
         bytes.remove(0);
     }
@@ -740,17 +772,27 @@ pub(crate) fn parse_join_code(mut bytes: Zeroizing<Vec<u8>>) -> Result<(String, 
         return Err(NativeLobbyError::Secret);
     }
     let rest = &bytes[JOIN_PREFIX.len()..];
-    let split = rest.iter().position(|byte| *byte == b':').ok_or(NativeLobbyError::Secret)?;
+    let split = rest
+        .iter()
+        .position(|byte| *byte == b':')
+        .ok_or(NativeLobbyError::Secret)?;
     let lobby = std::str::from_utf8(&rest[..split]).map_err(|_| NativeLobbyError::Secret)?;
-    let lobby_id = LobbyId::parse(lobby).map_err(|_| NativeLobbyError::Route)?.to_string();
+    let lobby_id = LobbyId::parse(lobby)
+        .map_err(|_| NativeLobbyError::Route)?
+        .to_string();
     let invitation = SecretBytes::new(Zeroizing::new(rest[split + 1..].to_vec()))?;
     bytes.zeroize();
     Ok((lobby_id, invitation))
 }
 
-pub(crate) fn copy_invitation(lobby_id: &str, invitation: &SecretBytes) -> Result<(), NativeLobbyError> {
+pub(crate) fn copy_invitation(
+    lobby_id: &str,
+    invitation: &SecretBytes,
+) -> Result<(), NativeLobbyError> {
     LobbyId::parse(lobby_id).map_err(|_| NativeLobbyError::Route)?;
-    let mut code = Zeroizing::new(Vec::with_capacity(JOIN_PREFIX.len() + 36 + 1 + invitation.as_bytes().len()));
+    let mut code = Zeroizing::new(Vec::with_capacity(
+        JOIN_PREFIX.len() + 36 + 1 + invitation.as_bytes().len(),
+    ));
     code.extend_from_slice(JOIN_PREFIX);
     code.extend_from_slice(lobby_id.as_bytes());
     code.push(b':');
@@ -763,7 +805,10 @@ fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
     // The OS clipboard and helper process are an explicit human-sharing
     // boundary. They cannot be promised zeroizable; no Godot String or
     // DisplayServer clipboard API is involved.
-    for (program, arguments) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
+    for (program, arguments) in [
+        ("wl-copy", &[][..]),
+        ("xclip", &["-selection", "clipboard"][..]),
+    ] {
         let Ok(mut child) = Command::new(program)
             .args(arguments)
             .stdin(Stdio::piped())
@@ -773,7 +818,10 @@ fn native_clipboard_write(value: &[u8]) -> Result<(), NativeLobbyError> {
         else {
             continue;
         };
-        let wrote = child.stdin.take().is_some_and(|mut input| input.write_all(value).is_ok());
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut input| input.write_all(value).is_ok());
         if wrote && child.wait().is_ok_and(|status| status.success()) {
             return Ok(());
         }
@@ -852,7 +900,12 @@ impl IControl for NativeSecretInput {
         let Ok(key) = event.try_cast::<InputEventKey>() else {
             return;
         };
-        if !key.is_pressed() || key.is_echo() || key.is_ctrl_pressed() || key.is_meta_pressed() || key.is_alt_pressed() {
+        if !key.is_pressed()
+            || key.is_echo()
+            || key.is_ctrl_pressed()
+            || key.is_meta_pressed()
+            || key.is_alt_pressed()
+        {
             return;
         }
         let unicode = key.get_unicode();
@@ -906,7 +959,10 @@ pub(crate) fn route_for(operation: LobbyOperation, lobby_id: &str) -> Route<'_> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
     fn exact_origin_rejects_every_alternate_shape() {
@@ -928,7 +984,10 @@ mod tests {
 
     #[test]
     fn secret_debug_and_error_are_redacted() {
-        let secret = SecretBytes::new(Zeroizing::new(b"abcdefghijklmnopqrstuvwxyzABCDEFGH".to_vec())).unwrap();
+        let secret = SecretBytes::new(Zeroizing::new(
+            b"abcdefghijklmnopqrstuvwxyzABCDEFGH".to_vec(),
+        ))
+        .unwrap();
         let debug = format!("{secret:?} {:?}", NativeLobbyError::Secret);
         assert!(!debug.contains("abcdefghijklmnopqrstuvwxyz"));
         assert_eq!(debug, "SecretBytes(<redacted>) secret");
@@ -937,13 +996,22 @@ mod tests {
     #[test]
     fn parser_rejects_duplicate_escaped_malformed_and_dry_run_values() {
         let valid = b"abcdefghijklmnopqrstuvwxyzABCDEFGH";
-        let mut duplicate = Zeroizing::new(format!(r#"{{"token":"{}","token":"{}"}}"#, String::from_utf8_lossy(valid), String::from_utf8_lossy(valid)).into_bytes());
+        let mut duplicate = Zeroizing::new(
+            format!(
+                r#"{{"token":"{}","token":"{}"}}"#,
+                String::from_utf8_lossy(valid),
+                String::from_utf8_lossy(valid)
+            )
+            .into_bytes(),
+        );
         assert!(extract_secret(&mut duplicate, b"token").is_err());
-        let mut escaped = Zeroizing::new(br#"{"token":"abcdefghijklmnopqrstuvwxyzABCDE\u0046GH"}"#.to_vec());
+        let mut escaped =
+            Zeroizing::new(br#"{"token":"abcdefghijklmnopqrstuvwxyzABCDE\u0046GH"}"#.to_vec());
         assert!(extract_secret(&mut escaped, b"token").is_err());
         let mut malformed = Zeroizing::new(br#"{"token":12}"#.to_vec());
         assert!(extract_secret(&mut malformed, b"token").is_err());
-        let dry = SecretBytes::new(Zeroizing::new(b"DRY_RUN_NO_KEY__________________".to_vec())).unwrap();
+        let dry =
+            SecretBytes::new(Zeroizing::new(b"DRY_RUN_NO_KEY__________________".to_vec())).unwrap();
         assert_ne!(dry.as_bytes(), b"DRY_RUN_NO_KEY");
     }
 
@@ -958,14 +1026,21 @@ mod tests {
 
     #[test]
     fn join_code_never_uses_a_godot_string() {
-        let code = Zeroizing::new(b"SPURFIRE1:00000000-0000-4000-8000-000000000099:abcdefghijklmnopqrstuvwxyzABCDEFGH".to_vec());
+        let code = Zeroizing::new(
+            b"SPURFIRE1:00000000-0000-4000-8000-000000000099:abcdefghijklmnopqrstuvwxyzABCDEFGH"
+                .to_vec(),
+        );
         let (lobby, invitation) = parse_join_code(code).unwrap();
         assert_eq!(lobby, "00000000-0000-4000-8000-000000000099");
         assert_eq!(invitation.as_bytes(), b"abcdefghijklmnopqrstuvwxyzABCDEFGH");
     }
 
     struct DropCanary(Arc<AtomicUsize>);
-    impl Drop for DropCanary { fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); } }
+    impl Drop for DropCanary {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn cancellation_and_failure_drop_owned_canaries() {
@@ -983,7 +1058,12 @@ mod tests {
     fn state_cancel_invalidates_events_and_drops_capabilities() {
         let mut state = LobbyClientState::default();
         let old = state.generation();
-        state.install_creator(SecretBytes::new(Zeroizing::new(b"abcdefghijklmnopqrstuvwxyzABCDEFGH".to_vec())).unwrap());
+        state.install_creator(
+            SecretBytes::new(Zeroizing::new(
+                b"abcdefghijklmnopqrstuvwxyzABCDEFGH".to_vec(),
+            ))
+            .unwrap(),
+        );
         state.cancel();
         assert_ne!(state.generation(), old);
         assert!(!state.has_creator());
