@@ -215,6 +215,17 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 			failures.append("frontier arena missing visual landmark: %s" % path)
 	if not arena.has_node("WaterTower/TankBand") or not arena.has_node("WaterTower/Finial"):
 		failures.append("water tower lost its hero silhouette pass")
+	var crossbeam := arena.get_node("SunArch/Crossbeam") as Node3D
+	if crossbeam.position.y - 0.225 < 6.0:
+		failures.append("sun arch crossbeam does not clear the mounted rider silhouette")
+	if (arena.get_node("SunArch/SunsetFlatsSign") as Node3D).position.y < 5.75:
+		failures.append("sun arch sign does not clear the mounted rider silhouette")
+	if not arena.has_node("FrontierGround/TerrainZones") or arena.has_node("FrontierGround/Mosaic"):
+		failures.append("frontier ground must use broad terrain zones rather than a tile mosaic")
+	else:
+		var terrain := arena.get_node("FrontierGround/TerrainZones") as MeshInstance3D
+		if terrain.mesh.get_surface_count() != 1 or terrain.mesh.surface_get_array_len(0) > 400:
+			failures.append("frontier ground terrain zones are too finely tiled")
 	var multimeshes := arena.find_children("*", "MultiMeshInstance3D", true, false)
 	if multimeshes.size() != 2:
 		failures.append("frontier ground detail must use exactly two MultiMeshInstance3D nodes")

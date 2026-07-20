@@ -102,8 +102,8 @@ func _build_flat_basin() -> void:
 	ground.name = "FrontierGround"
 	ground.position.y = -0.3
 	var visual := MeshInstance3D.new()
-	visual.name = "Mosaic"
-	visual.mesh = _ground_mosaic_mesh()
+	visual.name = "TerrainZones"
+	visual.mesh = _ground_zone_mesh()
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	ground.add_child(visual)
 	var collider := CollisionShape3D.new()
@@ -113,28 +113,43 @@ func _build_flat_basin() -> void:
 	ground.add_child(collider)
 	add_child(ground)
 
-func _ground_mosaic_mesh() -> ArrayMesh:
+func _ground_zone_mesh() -> ArrayMesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var cells := 24
-	var cell_size := 360.0 / float(cells)
+	# A few broad, skewed zones avoid a tile-grid read while retaining a flat collider.
+	var cells := 7
 	for z in cells:
 		for x in cells:
-			var hash := posmod(x * 37 + z * 71 + SCATTER_SEED, 20)
-			var color := SAND if hash < 12 else (SAND_DARK if hash < 17 else SAND_LIGHT)
-			if x < 9 and posmod(hash, 9) == 0:
-				color = SAND.lerp(SCRUB, 0.22)
-			var x0 := -180.0 + float(x) * cell_size
-			var z0 := -180.0 + float(z) * cell_size
-			_add_surface_quad(surface, Vector3(x0, 0.25, z0), Vector3(x0 + cell_size, 0.25, z0), Vector3(x0 + cell_size, 0.25, z0 + cell_size), Vector3(x0, 0.25, z0 + cell_size), color)
+			var a := _ground_zone_point(x, z, cells)
+			var b := _ground_zone_point(x + 1, z, cells)
+			var c := _ground_zone_point(x + 1, z + 1, cells)
+			var d := _ground_zone_point(x, z + 1, cells)
+			var warm := 0.035 + 0.045 * (0.5 + 0.5 * sin(float(x) * 1.31 + float(z) * 0.73))
+			var first_color := SAND.lerp(SAND_DARK, warm)
+			var second_color := SAND.lerp(SAND_LIGHT, 0.025 + warm * 0.45)
+			if sin(float(x) * 2.17 + float(z) * 1.43) > 0.0:
+				_add_surface_triangle(surface, a, b, d, first_color)
+				_add_surface_triangle(surface, b, c, d, second_color)
+			else:
+				_add_surface_triangle(surface, a, b, c, second_color)
+				_add_surface_triangle(surface, a, c, d, first_color)
 	var material := StandardMaterial3D.new()
 	material.vertex_color_use_as_albedo = true
 	material.roughness = 0.94
 	surface.set_material(material)
 	return surface.commit()
 
-func _add_surface_quad(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, color: Color) -> void:
-	for point in [a, b, c, a, c, d]:
+func _ground_zone_point(x: int, z: int, cells: int) -> Vector3:
+	var spacing := 360.0 / float(cells)
+	var point := Vector3(-180.0 + float(x) * spacing, 0.25, -180.0 + float(z) * spacing)
+	if x > 0 and x < cells:
+		point.x += sin(float(x) * 4.73 + float(z) * 2.11) * 13.0
+	if z > 0 and z < cells:
+		point.z += cos(float(x) * 1.87 + float(z) * 3.91) * 13.0
+	return point
+
+func _add_surface_triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, color: Color) -> void:
+	for point in [a, b, c]:
 		surface.set_color(color)
 		surface.set_normal(Vector3.UP)
 		surface.add_vertex(point)
@@ -167,10 +182,10 @@ func _build_trails() -> void:
 
 func _build_sun_arch() -> void:
 	var arch := _landmark("SunArch")
-	_box(arch, "LeftPost", Vector3(0.45, 5.5, 0.45), Vector3(-5.5, 2.75, 14.0), WOOD_DARK)
-	_box(arch, "RightPost", Vector3(0.45, 5.5, 0.45), Vector3(5.5, 2.75, 14.0), WOOD_DARK)
-	_box(arch, "Crossbeam", Vector3(11.5, 0.45, 0.45), Vector3(0.0, 5.25, 14.0), WOOD_DARK)
-	_asset(arch, SIGN, Vector3(0.0, 4.15, 14.0), PI * 0.5, "SunsetFlatsSign")
+	_box(arch, "LeftPost", Vector3(0.45, 7.25, 0.45), Vector3(-5.5, 3.625, 14.0), WOOD_DARK)
+	_box(arch, "RightPost", Vector3(0.45, 7.25, 0.45), Vector3(5.5, 3.625, 14.0), WOOD_DARK)
+	_box(arch, "Crossbeam", Vector3(11.5, 0.45, 0.45), Vector3(0.0, 7.0, 14.0), WOOD_DARK)
+	_asset(arch, SIGN, Vector3(0.0, 6.0, 14.0), PI * 0.5, "SunsetFlatsSign")
 
 func _build_bounty_bell() -> void:
 	var bell := _landmark("BountyBell")

@@ -26,8 +26,6 @@ func _ready() -> void:
 	flash.visible = false
 	_apply_identity()
 	_install_verified_art()
-	if muzzle == null:
-		muzzle = %Muzzle
 	if controller != null:
 		bind_controller(controller)
 
@@ -76,6 +74,9 @@ func _on_shot_fired(_shot_tick: Variant, fired_weapon_id: Variant) -> void:
 	_spawn_gunsmoke()
 
 func _install_verified_art() -> void:
+	var fallback_muzzle := get_node_or_null("Muzzle") as Marker3D
+	if flash.get_parent() != fallback_muzzle:
+		flash.reparent(fallback_muzzle, false)
 	var previous := get_node_or_null("WeaponArt")
 	if previous:
 		remove_child(previous)
@@ -87,6 +88,9 @@ func _install_verified_art() -> void:
 	var art := ART_SCENES[clampi(weapon_id, 0, 2)].instantiate() as Node3D
 	art.name = "WeaponArt"
 	add_child(art)
+	muzzle = art.get_node("Muzzle") as Marker3D
+	flash.reparent(muzzle, false)
+	flash.position = Vector3.ZERO
 
 func _apply_identity() -> void:
 	for path in ["Receiver", "Stock"]:

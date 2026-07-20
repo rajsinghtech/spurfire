@@ -16,6 +16,8 @@ class FakeWeaponController:
 	var reload_calls := 0
 	var mag := 30
 	var reserve := 120
+	var last_shot_origin := Vector3.ZERO
+	var last_shot_direction := Vector3.FORWARD
 
 	func equip_weapon(id) -> bool:
 		weapon_id = int(id)
@@ -23,6 +25,8 @@ class FakeWeaponController:
 		return true
 
 	func request_fire(origin: Vector3, direction: Vector3, tick: int) -> bool:
+		last_shot_origin = origin
+		last_shot_direction = direction
 		fire_calls.append([origin, direction, tick])
 		mag -= 1
 		ammo_changed.emit(mag, reserve)
@@ -36,7 +40,17 @@ class FakeWeaponController:
 		return true
 
 	func get_weapon_stats() -> Dictionary:
-		return {"weapon_id": weapon_id, "display_name": "SF-C30 Dustwalker", "magazine": 30, "reserve": 120, "ammo_mag": mag, "ammo_reserve": reserve, "base_spread_deg": 0.8, "is_reloading": false, "reload_progress": 0.0, "reload_ticks": 126}
+		return {"weapon_id": weapon_id, "display_name": "SF-C30 Dustwalker", "magazine": 30, "reserve": 120, "ammo_mag": mag, "ammo_reserve": reserve, "base_spread_deg": 0.8, "hitscan_clamp_m": 120.0, "is_reloading": false, "reload_progress": 0.0, "reload_ticks": 126}
+
+class FakeEffects:
+	extends Node3D
+	var tracer_colors: Array[Color] = []
+
+	func show_tracer(_origin: Vector3, _endpoint: Vector3, color: Color = Color.WHITE) -> Node3D:
+		tracer_colors.append(color)
+		var tracer := Node3D.new()
+		add_child(tracer)
+		return tracer
 
 const SCENES := {
 	"hud": "res://ui/combat/combat_hud.tscn",
@@ -131,6 +145,33 @@ func _ready() -> void:
 		add_child(loaded[key])
 	if int(loaded.longspur.weapon_id) != 1 or int(loaded.rattler.weapon_id) != 2:
 		failures.append("rifle sidegrade identities are incorrect")
+	for key in ["rifle", "longspur", "rattler"]:
+		var rig: Node3D = loaded[key]
+		var art_muzzle := rig.get_node("WeaponArt/Muzzle") as Marker3D
+		if rig.get("muzzle") != art_muzzle:
+			failures.append("%s effects are not bound to WeaponArt/Muzzle" % key)
+		if rig.get_node("%MuzzleFlash").get_parent() != art_muzzle:
+			failures.append("%s muzzle flash is detached from the installed art" % key)
+
+	var tracer_effects := FakeEffects.new()
+	var tracer_rider := CharacterBody3D.new()
+	var tracer_camera := Camera3D.new()
+	add_child(tracer_effects)
+	add_child(tracer_rider)
+	add_child(tracer_camera)
+	var combat_player := CombatPlayer.new()
+	combat_player.rider = tracer_rider
+	combat_player.controller = controller
+	combat_player.rifle = rifle
+	combat_player.aim_camera = tracer_camera
+	combat_player.effects = tracer_effects
+	add_child(combat_player)
+	rifle.call("set_weapon", 2)
+	combat_player._fire_once(84)
+	if tracer_effects.tracer_colors.is_empty() or tracer_effects.tracer_colors[-1] != (rifle.get("tracer_color") as Color):
+		failures.append("combat tracer did not use the equipped rifle color")
+	if not controller.last_shot_origin.is_equal_approx((rifle.get_node("WeaponArt/Muzzle") as Marker3D).global_position):
+		failures.append("fire command did not originate at the installed art muzzle")
 
 	_check_native_api_if_available(failures)
 	await get_tree().process_frame
