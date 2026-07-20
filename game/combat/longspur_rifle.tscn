@@ -4,7 +4,7 @@
 
 [node name="LongspurRifle" instance=ExtResource("1")]
 weapon_id = 1
-tracer_color = Color(0.94, 0.97, 1, 1)
-identity_color = Color(0.18, 0.21, 0.23, 1)
+tracer_color = Color(1, 0.913725, 0.690196, 1)
+identity_color = Color(0.94902, 0.784314, 0.47451, 1)
 stock_color = Color(0.42, 0.22, 0.1, 1)
 scale = Vector3(1.0, 1.0, 1.18)

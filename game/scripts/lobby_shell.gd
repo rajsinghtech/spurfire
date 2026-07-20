@@ -1,13 +1,15 @@
 extends Control
 
 const COURSE_SCENE := preload("res://scenes/frontier_arena.tscn")
+const PALETTE := preload("res://scripts/ui_palette.gd")
 const RANDOM_NAMES := ["Dusty", "Sundown", "Juniper", "Longshot", "Mesa", "Coyote", "Red Rock"]
+const ROSTER_ACCENTS := [Color("3fb6c9"), Color("f07a3f"), Color("ef5aaa")]
 
 enum Screen { TITLE, WAITING, TEARDOWN, MATCH }
 
 @onready var peer_session: Node = $PeerSession
 @onready var api: Node = peer_session
-@onready var background: ColorRect = $Background
+@onready var background: TextureRect = $Background
 @onready var screens: Control = $Screens
 @onready var title_screen: Control = $Screens/Title
 @onready var waiting_screen: Control = $Screens/Waiting
@@ -47,12 +49,20 @@ var _endpoint_renew_elapsed := 0.0
 var _authority_input_hash := ""
 var _quit_after_leave := false
 var _leaving := false
+var _match_fade: ColorRect
 
 func _ready() -> void:
 	get_tree().auto_accept_quit = false
 	name_edit.text = RANDOM_NAMES[randi() % RANDOM_NAMES.size()]
 	_player_id = SpurfireLobbyContract.new_uuid_v4()
 	_connect_signals()
+	_match_fade = ColorRect.new()
+	_match_fade.name = "MatchFade"
+	_match_fade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_match_fade.color = PALETTE.SLATE
+	_match_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_match_fade.visible = false
+	add_child(_match_fade)
 	if not api.configure_lobby_player(_player_id):
 		title_status.text = "Private lobbies unavailable • Practice Range is ready"
 	else:
@@ -352,6 +362,7 @@ func _start_match() -> void:
 	if _course is Node3D:
 		(_course as Node3D).visible = true
 	_show(Screen.MATCH)
+	_fade_into_match()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _start_practice() -> void:
@@ -359,6 +370,7 @@ func _start_practice() -> void:
 	add_child(_course)
 	_bind_capture_gate()
 	_show(Screen.MATCH)
+	_fade_into_match()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _bind_capture_gate() -> void:
@@ -450,16 +462,27 @@ func _render_waiting() -> void:
 	for child in roster_box.get_children():
 		child.queue_free()
 	var health := _bridge.peer_health() if _bridge else {}
+	var roster_index := 0
 	for row in SpurfireLobbyContract.safe_roster(_lobby, _player_id, health):
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 10)
+		var pip := Label.new()
+		pip.text = "▌"
+		pip.add_theme_color_override("font_color", ROSTER_ACCENTS[roster_index % ROSTER_ACCENTS.size()])
+		pip.add_theme_font_size_override("font_size", 28)
+		line.add_child(pip)
 		var label := Label.new()
 		var badges := ""
 		if bool(row.you): badges += " • YOU"
 		if bool(row.authority): badges += " • HOST"
 		var rtt := "measuring…" if row.rtt_ms == null else "%d ms" % int(row.rtt_ms)
-		label.text = "%s%s\n    %s • %s • %s" % [
+		label.text = "%s%s\n%s • %s • %s" % [
 			str(row.display_name), badges, _route_label(str(row.route)), rtt, str(row.freshness).to_upper()
 		]
-		roster_box.add_child(label)
+		label.add_theme_color_override("font_color", PALETTE.CREAM)
+		line.add_child(label)
+		roster_box.add_child(line)
+		roster_index += 1
 	var count := (_lobby.get("roster", []) as Array).size()
 	var direct_value = ((_network_view.get("routes", {}) as Dictionary).get("direct_count", {}) as Dictionary).get("value", null)
 	var rtt_value = ((_network_view.get("application_quality", {}) as Dictionary).get("application_rtt_ms_median", {}) as Dictionary).get("value", null)
@@ -474,6 +497,13 @@ func _route_label(value: String) -> String:
 		"derp_relay": return "DERP Relay"
 		"unavailable": return "Unavailable"
 		_: return "Measuring…"
+
+func _fade_into_match() -> void:
+	_match_fade.modulate.a = 1.0
+	_match_fade.visible = true
+	var tween := create_tween()
+	tween.tween_property(_match_fade, "modulate:a", 0.0, 0.25)
+	tween.tween_callback(func(): _match_fade.visible = false)
 
 func _set_title_busy(message: String) -> void:
 	create_button.disabled = true

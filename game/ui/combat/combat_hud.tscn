@@ -4,12 +4,12 @@
 [ext_resource type="Script" path="res://scripts/combat_crosshair.gd" id="2_cross"]
 
 [sub_resource type="StyleBoxFlat" id="Card"]
-bg_color = Color(0.075, 0.094, 0.12, 0.92)
-border_width_left = 4
-border_width_top = 4
-border_width_right = 4
-border_width_bottom = 4
-border_color = Color(0.98, 0.55, 0.2, 1)
+bg_color = Color(0.168627, 0.113725, 0.0705882, 0.92)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.545098, 0.298039, 0.196078, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
 corner_radius_bottom_right = 10
@@ -132,7 +132,7 @@ layout_mode = 2
 [node name="WeaponName" type="Label" parent="WeaponCard/Margin/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 0.72, 0.25, 1)
+theme_override_colors/font_color = Color(0.94902, 0.784314, 0.47451, 1)
 theme_override_font_sizes/font_size = 19
 text = "SF-C30 DUSTWALKER"
 

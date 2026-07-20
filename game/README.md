@@ -30,3 +30,12 @@ panel with H. Fire the mounted rifle with Mouse 1, aim with Mouse 2, reload with
 and switch rifles with 4/5/6. The course uses license-tracked CC0 subsets of Kenney
 Nature Kit, Survival Kit, and Blaster Kit; see `../docs/asset-licenses.md` and
 `../docs/combat-m1.md`.
+
+`ui/rowel.svg` is a source-only copy of the repository-original
+`../assets/spurfire-logo.svg`, used to carry Spurfire's rowel palette from the lobby
+into Practice and match presentation. It is project artwork, not a third-party
+asset; no generated import cache or binary derivative is tracked.
+
+`scenes/visual_capture.tscn` is the deterministic presentation-review scene. Its
+`ScreenshotAnchors` preserve the spawn-axis, street, cactus-flats, and dive-landing
+review positions without changing the gameplay camera or movement contract.

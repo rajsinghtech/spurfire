@@ -1,6 +1,7 @@
 extends Control
 class_name GameplayToast
 
+const PALETTE := preload("res://scripts/ui_palette.gd")
 const ALLOWED_TEXT := [
 	"FLYING DISMOUNT",
 	"SADDLE DIVE HEADSHOT",
@@ -39,8 +40,14 @@ func _show_next() -> void:
 	if _queue.is_empty():
 		label.visible = false
 		return
-	label.text = _queue.pop_front()
+	var message: String = _queue.pop_front()
+	label.text = "✦  %s" % message
+	label.modulate = PALETTE.LOGO_GOLD if message in ["SADDLE DIVE HEADSHOT", "AIRBORNE REVERSAL"] else PALETTE.LOGO_ORANGE
+	label.pivot_offset = label.size * 0.5
+	label.scale = Vector2.ONE * 1.2
 	label.visible = true
+	var punch := create_tween()
+	punch.tween_property(label, "scale", Vector2.ONE, 0.16).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Burst events (for example a headshot reversal) remain attributable without
 	# leaving the final notification several seconds behind the action.
 	var backlog_scale := 1.0 + float(_queue.size())

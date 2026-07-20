@@ -114,4 +114,4 @@ func _fire_once(tick: int) -> void:
 	if not networked_match and not resolved_hit and controller.has_method("resolve_local_miss"):
 		controller.call("resolve_local_miss")
 	if effects and effects.has_method("show_tracer"):
-		effects.call("show_tracer", origin, endpoint)
+		effects.call("show_tracer", origin, endpoint, rifle.get("tracer_color") as Color)

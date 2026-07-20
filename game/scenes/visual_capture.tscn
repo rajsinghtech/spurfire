@@ -1,0 +1,29 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/frontier_arena.tscn" id="1_arena"]
+
+[node name="VisualCapture" instance=ExtResource("1_arena")]
+
+[node name="ScreenshotAnchors" type="Node3D" parent="."]
+
+[node name="SpawnAxis" type="Marker3D" parent="ScreenshotAnchors"]
+position = Vector3(0, 5.6, 32)
+rotation_degrees = Vector3(-8, 0, 0)
+
+[node name="StreetThreeQuarter" type="Marker3D" parent="ScreenshotAnchors"]
+position = Vector3(-4, 4.5, -8)
+rotation_degrees = Vector3(-7, -24, 0)
+
+[node name="CactusGallop" type="Marker3D" parent="ScreenshotAnchors"]
+position = Vector3(-50, 4.2, 8)
+rotation_degrees = Vector3(-6, -66, 0)
+
+[node name="DiveLanding" type="Marker3D" parent="ScreenshotAnchors"]
+position = Vector3(10, 3.8, 6)
+rotation_degrees = Vector3(-12, 26, 0)
+
+[node name="ReviewCamera" type="Camera3D" parent="."]
+position = Vector3(0, 5.6, 32)
+rotation_degrees = Vector3(-8, 0, 0)
+fov = 70.0
+current = true
