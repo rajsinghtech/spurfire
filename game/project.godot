@@ -114,3 +114,7 @@ release_mouse={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":4194305)]
 }
+toggle_diagnostics={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194334)]
+}

@@ -20,8 +20,9 @@ to `user://m0_telemetry.csv`.
 
 Controls: W naturally accelerates through walk/trot/gallop; S brakes, pauses, then
 reverses. A/D steer, Shift/Ctrl optionally change gait, Option/Alt hard-brakes,
-Space jumps, and T resets. Escape releases the captured mouse; press
-Escape again to quit. Left-click recaptures the mouse.
+Space jumps, and T resets. The gameplay gate captures on one click. Escape
+releases capture without quitting; click to recapture or use the gate's Quit button.
+F3 toggles movement diagnostics and the live mouse-delta readout.
 
 At rest, A/D performs a short horse-like lateral step; once moving, it blends into
 rein steering. Select Courser/Warhorse/Mustang with 1/2/3 and toggle the attribute

@@ -9,7 +9,7 @@ Spurfire M1 adds a playable, deterministic mounted-rifle range on top of the M0.
 - **R:** reload.
 - **4 / 5 / 6:** equip Dustwalker / Longspur / Rattler.
 - **T:** reset horse (moved from R).
-- Horse controls, archetype keys 1/2/3, panel H, and Escape behavior remain unchanged.
+- Horse controls, archetype keys 1/2/3, and panel H remain unchanged. Gameplay begins at an explicit click-to-capture gate; Escape releases capture and never quits, while the gate's Quit button follows lobby cleanup.
 
 ## Rifle sidegrades
 

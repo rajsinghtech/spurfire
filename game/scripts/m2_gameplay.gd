@@ -47,6 +47,8 @@ var _telemetry_file: FileAccess
 var _session_id := ""
 var _session_closed := false
 var _persisted_dive_keys: Dictionary = {}
+var _presentation_input_enabled := false
+var _capture_button_blocked := false
 
 func _ready() -> void:
 	process_physics_priority = -100
@@ -63,7 +65,11 @@ func _physics_process(_delta: float) -> void:
 	simulation_tick += 1
 	_stance_changed_this_tick = false
 
-	if Input.is_action_just_pressed(&"reset_horse") or _course_reset_requested:
+	if _capture_button_blocked and not Input.is_action_pressed(&"combat_fire"):
+		_capture_button_blocked = false
+	var accepts_input := _presentation_input_enabled and not _capture_button_blocked
+
+	if (accepts_input and Input.is_action_just_pressed(&"reset_horse")) or _course_reset_requested:
 		_course_reset_requested = false
 		rider.call("reset_rider", simulation_tick)
 		horse.call("set_external_simulation_tick", simulation_tick)
@@ -74,10 +80,12 @@ func _physics_process(_delta: float) -> void:
 
 	var chosen_direction := -aim_camera.global_basis.z if aim_camera else -rider.global_basis.z
 	_update_dive_preview(chosen_direction)
-	var move_input := Vector2(
-		Input.get_axis(&"steer_left", &"steer_right"),
-		Input.get_axis(&"move_back", &"move_forward")
-	)
+	var move_input := Vector2.ZERO
+	if accepts_input:
+		move_input = Vector2(
+			Input.get_axis(&"steer_left", &"steer_right"),
+			Input.get_axis(&"move_back", &"move_forward")
+		)
 	var weapon_id := int(weapon_controller.get("weapon_id"))
 	# Install current horse handling while combat still holds the previous
 	# authoritative stance. The Rust rider transition then opens/closes dive
@@ -88,7 +96,7 @@ func _physics_process(_delta: float) -> void:
 	rider.call(
 		"advance_tick",
 		simulation_tick,
-		Input.is_action_just_pressed(&"combat_interact"),
+		accepts_input and Input.is_action_just_pressed(&"combat_interact"),
 		chosen_direction,
 		move_input,
 		weapon_id
@@ -127,7 +135,7 @@ func _install_combat_context() -> bool:
 		float(stats.get("gallop_mps", 13.0)),
 		float(horse.get("yaw_rate_degrees")),
 		false,
-		Input.is_action_pressed(&"combat_aim"),
+		_presentation_input_enabled and not _capture_button_blocked and Input.is_action_pressed(&"combat_aim"),
 		false
 	))
 
@@ -157,6 +165,10 @@ func _update_dive_preview(chosen_direction: Vector3) -> void:
 
 func request_course_reset() -> void:
 	_course_reset_requested = true
+
+func set_presentation_input_enabled(enabled: bool, suppress_button := false) -> void:
+	_presentation_input_enabled = enabled
+	_capture_button_blocked = enabled and suppress_button
 
 func _reset_presentation_after_teleport() -> void:
 	var camera_rig := get_parent().get_node_or_null("CameraRig")

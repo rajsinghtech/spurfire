@@ -1,11 +1,12 @@
 extends Node
 
 const CAMERA_RIG_SCRIPT := preload("res://scripts/camera_rig.gd")
+const RIDER_POSE_SCRIPT := preload("res://scripts/rider_pose.gd")
 
 const REQUIRED_ACTIONS := [
 	&"move_forward", &"move_back", &"steer_left", &"steer_right",
 	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse", &"scoreboard",
-	&"combat_fire", &"combat_reload", &"combat_interact"
+	&"combat_fire", &"combat_reload", &"combat_interact", &"toggle_diagnostics"
 ]
 const REQUIRED_NODES := [
 	"Horse", "Horse/CollisionShape3D", "Rider", "Rider/CollisionShape3D",
@@ -20,7 +21,8 @@ const REQUIRED_NODES := [
 	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
 	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "RemoteRider", "NetworkReplication",
 	"GameplayEventLayer/GameplayToast/Notification", "HUD/Panel/Margin/VBox/RemountHint",
-	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows"
+	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows",
+	"CaptureLayer/CaptureGate", "DustFx/HoofDust", "DustFx/LandingDust"
 ]
 const STANCE_MOUNTED := 1
 const STANCE_MOUNTED_AIRBORNE := 2
@@ -34,6 +36,7 @@ func _ready() -> void:
 	var failures: Array[String] = []
 	_check_input_map(failures)
 	_check_render_interpolation(failures)
+	_check_airborne_yaw_limiter(failures)
 	_check_network_rider(failures)
 	_check_peer_session(failures)
 	if not ClassDB.class_exists(&"HorseController"):
@@ -55,6 +58,13 @@ func _ready() -> void:
 	for path in REQUIRED_NODES:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
+	await _check_capture_contract(course, failures)
+	await _check_frontier_arena_contract(course, failures)
+	# The remaining deterministic simulation scenarios drive InputMap directly;
+	# explicitly open the presentation gate after its dedicated assertions.
+	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
+	course.get_node("M2Gameplay").call("set_presentation_input_enabled", true, false)
+	course.get_node("Rider/CombatInput").call("set_presentation_input_enabled", true, false)
 	Input.action_press(&"scoreboard")
 	await get_tree().process_frame
 	await get_tree().process_frame
@@ -104,6 +114,108 @@ func _check_input_map(failures: Array[String]) -> void:
 	e_event.physical_keycode = KEY_E
 	if not InputMap.event_is_action(e_event, &"combat_interact"):
 		failures.append("physical E is not mapped to combat_interact")
+	var f3_event := InputEventKey.new()
+	f3_event.physical_keycode = KEY_F3
+	if not InputMap.event_is_action(f3_event, &"toggle_diagnostics"):
+		failures.append("physical F3 is not mapped to toggle_diagnostics")
+
+func _check_capture_contract(course: Node, failures: Array[String]) -> void:
+	var gate := course.get_node("CaptureLayer/CaptureGate")
+	var camera_rig := course.get_node("CameraRig")
+	var horse := course.get_node("Horse")
+	var gameplay := course.get_node("M2Gameplay")
+	var combat := course.get_node("Rider/CombatInput")
+	if bool(gate.get("captured")):
+		failures.append("capture gate did not begin released")
+	if bool(horse.get("presentation_input_enabled")):
+		failures.append("horse input did not begin neutralized behind the capture gate")
+	gate.call("request_capture")
+	if not bool(gate.get("captured")) or int(gate.get("capture_count")) != 1:
+		failures.append("capture gate did not capture in one click")
+	if not bool(horse.get("presentation_input_enabled")):
+		failures.append("capture gate did not enable horse input")
+	if not bool(gameplay.get("_capture_button_blocked")) or not bool(combat.get("_capture_button_blocked")):
+		failures.append("capture click was not suppressed from movement/combat")
+	var yaw_before := float(camera_rig.get("_world_yaw"))
+	var motion := InputEventMouseMotion.new()
+	motion.relative = Vector2(80.0, -20.0)
+	camera_rig.call("_input", motion)
+	if is_equal_approx(float(camera_rig.get("_world_yaw")), yaw_before):
+		failures.append("captured mouse motion did not reach CameraRig._input")
+	var escape := InputEventKey.new()
+	escape.physical_keycode = KEY_ESCAPE
+	escape.pressed = true
+	camera_rig.call("_input", escape)
+	if (
+		bool(gate.get("captured"))
+		or bool(horse.get("presentation_input_enabled"))
+		or bool(gameplay.get("_presentation_input_enabled"))
+		or bool(combat.get("_presentation_input_enabled"))
+	):
+		failures.append("Escape did not release capture and neutralize all gameplay input")
+	# A released Escape is intentionally a no-op; quitting is gate-button-only.
+	camera_rig.call("_input", escape)
+	if bool(gate.get("captured")):
+		failures.append("released Escape unexpectedly changed capture state")
+	gate.call("request_capture")
+	camera_rig.call("_notification", NOTIFICATION_APPLICATION_FOCUS_OUT)
+	if (
+		bool(gate.get("captured"))
+		or bool(horse.get("presentation_input_enabled"))
+		or bool(gameplay.get("_presentation_input_enabled"))
+		or bool(combat.get("_presentation_input_enabled"))
+	):
+		failures.append("focus loss did not release capture and neutralize all gameplay input")
+	var gait_events: Array[int] = []
+	var gait_callback := func(_old_gait: int, new_gait: int): gait_events.append(new_gait)
+	horse.gait_changed.connect(gait_callback)
+	for action in [&"move_forward", &"steer_right", &"gait_up", &"jump", &"reset_horse"]:
+		Input.action_press(action)
+	for _frame in 3:
+		await get_tree().physics_frame
+	for action in [&"move_forward", &"steer_right", &"gait_up", &"jump", &"reset_horse"]:
+		Input.action_release(action)
+	horse.gait_changed.disconnect(gait_callback)
+	var horizontal_speed := Vector2(horse.velocity.x, horse.velocity.z).length()
+	if not gait_events.is_empty() or horizontal_speed > 0.05 or horse.velocity.y > 0.05:
+		failures.append("released horse applied movement, gait, jump, or reset input")
+	camera_rig.set("_world_yaw", deg_to_rad(90.0))
+	camera_rig.call("_on_telemetry", {"speed_mps": 13.0, "stance_id": STANCE_MOUNTED})
+	camera_rig.call("_process", 2.0)
+	if not is_equal_approx(float(camera_rig.get("_world_yaw")), deg_to_rad(90.0)):
+		failures.append("camera forced recenter after player stopped aiming")
+
+func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> void:
+	var packed := load("res://scenes/frontier_arena.tscn") as PackedScene
+	if packed == null:
+		failures.append("frontier_arena.tscn could not be loaded")
+		return
+	var arena := packed.instantiate()
+	add_child(arena)
+	await get_tree().process_frame
+	for path in REQUIRED_NODES:
+		if path != "TestCourse/BroadGround" and not arena.has_node(path):
+			failures.append("frontier arena lost inherited node: %s" % path)
+	if arena.has_node("TestCourse/BroadGround"):
+		failures.append("frontier arena retained overlapping BroadGround")
+	for path in ["FrontierGround", "Corral", "MainStreet", "WaterTower", "CactusFlats", "DryWash", "TerracottaMesas"]:
+		if not arena.has_node(path):
+			failures.append("frontier arena missing landmark: %s" % path)
+			continue
+		var landmark := arena.get_node(path)
+		if landmark.find_children("*", "CollisionShape3D", true, false).is_empty():
+			failures.append("frontier arena landmark has no collision: %s" % path)
+	for fixture in ["SpeedMarker_-40", "SlalomPost_0", "TurnCircle_0", "SpawnPad", "CourseResetPad"]:
+		var fixture_mesh := arena.get_node("TestCourse/" + fixture).get_child(0) as MeshInstance3D
+		if fixture_mesh.material_override != null:
+			failures.append("frontier restyle erased authored fixture color: %s" % fixture)
+	for fixture in ["FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31", "JumpFence_0Rail", "BridgeDeck"]:
+		var expected := graybox.get_node("TestCourse/" + fixture) as Node3D
+		var actual := arena.get_node("TestCourse/" + fixture) as Node3D
+		if expected.transform != actual.transform:
+			failures.append("frontier arena moved smoke fixture: %s" % fixture)
+	arena.queue_free()
+	await get_tree().process_frame
 
 func _check_render_interpolation(failures: Array[String]) -> void:
 	if int(Engine.physics_ticks_per_second) != 60:
@@ -161,6 +273,96 @@ func _check_render_interpolation(failures: Array[String]) -> void:
 		failures.append("144 Hz interpolated p95 linear motion exceeded the 60 Hz bound")
 	if float(p95_angular_speed_by_rate[144]) > float(p95_angular_speed_by_rate[60]) * 1.02:
 		failures.append("144 Hz interpolated p95 angular motion exceeded the 60 Hz bound")
+
+func _check_airborne_yaw_limiter(failures: Array[String]) -> void:
+	var degrees_per_second := 360.0
+	var tick_budget := deg_to_rad(degrees_per_second) / 60.0
+	var scenarios := [
+		{"label": "right_clamped", "start": 0.0, "target": 75.0, "sign": 1.0},
+		{"label": "left_clamped", "start": 0.0, "target": -75.0, "sign": -1.0},
+		{"label": "right_return", "start": 75.0, "target": 0.0, "sign": -1.0},
+		{"label": "left_return", "start": -75.0, "target": 0.0, "sign": 1.0},
+		{"label": "positive_seam", "start": 179.0, "target": -179.0, "sign": 1.0},
+		{"label": "negative_seam", "start": -179.0, "target": 179.0, "sign": -1.0},
+	]
+	for scenario in scenarios:
+		var start := deg_to_rad(float(scenario.start))
+		var target := deg_to_rad(float(scenario.target))
+		var next: float = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+			start, target, degrees_per_second, 60
+		)
+		var change := wrapf(next - start, -PI, PI)
+		if absf(change) > deg_to_rad(6.05):
+			failures.append("%s yaw exceeded one fixed-tick budget" % scenario.label)
+		if change * float(scenario.sign) <= 0.0:
+			failures.append("%s yaw did not take the shortest arc" % scenario.label)
+
+	# Render cadence only chooses which fixed-step states are displayed. It must
+	# never alter, merge, or bank the six-degree mutations that create those states.
+	for render_hz in [20, 30, 60, 120, 144]:
+		var yaw := 0.0
+		var target := deg_to_rad(75.0)
+		var physics_tick := 0
+		var frame_count := int(ceil(float(render_hz) * 0.4))
+		for frame in frame_count:
+			var wanted_tick := int(floor(float(frame + 1) * 60.0 / float(render_hz)))
+			while physics_tick < wanted_tick:
+				var previous := yaw
+				yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+					yaw, target, degrees_per_second, 60
+				)
+				if absf(wrapf(yaw - previous, -PI, PI)) > deg_to_rad(6.05):
+					failures.append("%d Hz schedule exceeded one fixed-tick yaw budget" % render_hz)
+					break
+				physics_tick += 1
+		if absf(wrapf(target - yaw, -PI, PI)) > deg_to_rad(0.01):
+			failures.append("%d Hz schedule changed yaw convergence" % render_hz)
+
+	# A long render frame recovers by running distinct fixed steps, not by applying
+	# an elapsed-frame lump. Every recoverable state remains within the 6.05° gate.
+	var recovered_yaw := deg_to_rad(-75.0)
+	for _tick in 30:
+		var previous := recovered_yaw
+		recovered_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+			recovered_yaw, deg_to_rad(75.0), degrees_per_second, 60
+		)
+		if absf(wrapf(recovered_yaw - previous, -PI, PI)) > deg_to_rad(6.05):
+			failures.append("long-frame recovery banked a yaw allowance")
+			break
+	if absf(wrapf(deg_to_rad(75.0) - recovered_yaw, -PI, PI)) > deg_to_rad(0.01):
+		failures.append("long-frame yaw recovery did not converge")
+
+	# Stance transitions and repeated opposite dives use the same state machine.
+	var forward := Vector3(0.0, 0.0, -9.0)
+	if absf(RIDER_POSE_SCRIPT.wanted_local_yaw(STANCE_MOUNTED, forward, 0.0)) > 0.000001:
+		failures.append("mounted stance retained an airborne yaw target")
+	var repeated_yaw := 0.0
+	for dive_target_degrees in [75.0, -75.0, 75.0, -75.0]:
+		var radians := deg_to_rad(dive_target_degrees)
+		var dive_velocity := Vector3(-sin(radians) * 9.0, 0.0, -cos(radians) * 9.0)
+		var target: float = RIDER_POSE_SCRIPT.wanted_local_yaw(
+			STANCE_DIVE, dive_velocity, 0.0
+		)
+		if absf(wrapf(target - radians, -PI, PI)) > deg_to_rad(0.001):
+			failures.append("repeated dive lost its signed clamped target")
+		for _tick in 25:
+			var previous := repeated_yaw
+			repeated_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+				repeated_yaw, target, degrees_per_second, 60
+			)
+			if absf(wrapf(repeated_yaw - previous, -PI, PI)) > tick_budget + deg_to_rad(0.05):
+				failures.append("repeated dive exceeded its fixed-tick yaw budget")
+				break
+		for _tick in 25:
+			repeated_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+				repeated_yaw,
+				RIDER_POSE_SCRIPT.wanted_local_yaw(STANCE_MOUNTED, forward, 0.0),
+				degrees_per_second,
+				60
+			)
+		if absf(repeated_yaw) > deg_to_rad(0.01):
+			failures.append("stance transition did not reset repeated dive yaw")
+
 
 func _synthetic_physics_transform(tick: int) -> Transform3D:
 	var time := float(tick) / 60.0
@@ -606,6 +808,14 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	# horse object running out under collision feedback.
 	var horse_identity := horse.get_instance_id()
 	var horse_launch_position := horse.global_position
+	# Align the fixture before pinning aim 90 degrees right, making the regression
+	# independent of earlier steering while deterministically exercising the clamp.
+	horse.rotation = Vector3.ZERO
+	horse.velocity = Vector3.ZERO
+	await get_tree().physics_frame
+	# reset_follow preserves player-owned yaw while synchronizing the rendered camera.
+	camera_rig.set("_world_yaw", deg_to_rad(90.0))
+	camera_rig.call("reset_follow")
 	horse.velocity = Vector3(0, 0, -9.0)
 	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_DIVE or int(rider.get("dive_id")) <= 0:
@@ -627,21 +837,9 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	else:
 		failures.append("first legal Saddle Dive shot was rejected")
 
-	var previous_pose_yaw := pose.rotation.y
-	var max_pose_delta := 0.0
-	var airborne_frames := 0
-	while int(rider.get("stance_id")) == STANCE_DIVE and airborne_frames < 70:
-		await get_tree().physics_frame
-		var yaw_delta := absf(wrapf(pose.rotation.y - previous_pose_yaw, -PI, PI))
-		max_pose_delta = maxf(max_pose_delta, yaw_delta)
-		previous_pose_yaw = pose.rotation.y
-		airborne_frames += 1
-		if not rider.global_position.is_finite() or not camera.global_position.is_finite():
-			failures.append("rider/camera transform became nonfinite during dive")
-			break
-		if camera.fov < 69.99 or camera.fov > 78.01 or absf(camera.global_rotation.z) > 0.001:
-			failures.append("M2 introduced camera FOV/roll outside conservative plan")
-			break
+	var first_visual := await _measure_airborne_pose(
+		rider, pose, camera, failures, "right clamped dive"
+	)
 	if int(rider.get("stance_id")) != STANCE_PRONE:
 		failures.append("actual collision arc did not enter landing prone")
 	if synchronous_landing_fire != [false]:
@@ -649,8 +847,10 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	var airtime := float(rider.get("airtime_seconds"))
 	if airtime < 0.7 or airtime > 0.9:
 		failures.append("scene Saddle Dive airtime %.3f was outside 0.7-0.9 s" % airtime)
-	if max_pose_delta > deg_to_rad(6.05):
-		failures.append("airborne visual yaw exceeded 6 degrees per 60 Hz frame")
+	if float(first_visual.max_delta) > deg_to_rad(6.05):
+		failures.append("right clamped airborne visual yaw exceeded 6 degrees per 60 Hz frame")
+	if float(first_visual.maximum_yaw) <= 0.0:
+		failures.append("right clamped airborne pose turned away from its launch direction")
 	if bool(rider.get("can_fire")) or bool(rider.get("can_reload")) or float(rider.get("movement_scale")) != 0.0:
 		failures.append("landing prone did not block fire/reload/movement input")
 	if bool(controller.call("request_reload")):
@@ -699,9 +899,50 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	await _pulse_action(&"combat_interact")
 	if int(rider.get("stance_id")) != STANCE_MOUNTED:
 		failures.append("eligible E remount did not complete")
-	if telemetry.is_empty():
-		failures.append("per-dive telemetry emitted no rows")
+
+	# Repeat in the opposite direction after the full land/remount cycle. This
+	# catches stale limiter state and both signs of the protocol's 75-degree clamp.
+	await _wait_physics_frames(10)
+	horse.rotation = Vector3.ZERO
+	horse.velocity = Vector3.ZERO
+	await get_tree().physics_frame
+	camera_rig.set("_world_yaw", deg_to_rad(-90.0))
+	camera_rig.call("reset_follow")
+	horse.velocity = Vector3(0, 0, -9.0)
+	await _pulse_action(&"combat_interact")
+	if int(rider.get("stance_id")) != STANCE_DIVE:
+		failures.append("repeated left-clamped Saddle Dive did not start")
 	else:
+		var second_visual := await _measure_airborne_pose(
+			rider, pose, camera, failures, "left clamped dive"
+		)
+		if float(second_visual.max_delta) > deg_to_rad(6.05):
+			failures.append("left clamped airborne visual yaw exceeded 6 degrees per 60 Hz frame")
+		if float(second_visual.minimum_yaw) >= 0.0:
+			failures.append("left clamped airborne pose turned away from its launch direction")
+	if synchronous_landing_fire != [false, false]:
+		failures.append("repeated landing signal observed an open airborne combat context")
+	for _frame in 100:
+		if int(rider.get("stance_id")) == STANCE_ON_FOOT:
+			break
+		await get_tree().physics_frame
+	for _frame in 150:
+		if bool(horse.get("is_retrievable")):
+			break
+		await get_tree().physics_frame
+	rider.global_position = horse.global_position + Vector3(0, 0, 1.0)
+	await _pulse_action(&"combat_interact")
+	if int(rider.get("stance_id")) != STANCE_MOUNTED:
+		failures.append("repeated dive did not complete its remount reset")
+	if telemetry.size() < 2:
+		failures.append("repeated dives emitted fewer than two telemetry rows")
+	else:
+		for row_index in range(telemetry.size() - 2, telemetry.size()):
+			var dive_row := telemetry[row_index] as Dictionary
+			if not bool(dive_row.get("direction_was_clamped", false)):
+				failures.append("repeated dive did not report a clamped launch direction")
+			if absf(absf(float(dive_row.get("clamped_angle_degrees", 0.0))) - 75.0) > 0.01:
+				failures.append("repeated dive did not retain the 75-degree launch clamp")
 		var row := telemetry.back() as Dictionary
 		for key in ["prelaunch_speed_mps", "requested_angle_degrees", "clamped_angle_degrees", "airtime_ticks", "shots_fired", "shots_hit", "damage_dealt", "landing_terrain", "landing_slope_degrees", "landing_outcome", "time_to_remount_ticks"]:
 			if not row.has(key):
@@ -709,6 +950,39 @@ func _exercise_m2(course: Node, horse: CharacterBody3D, rider: CharacterBody3D, 
 	for expected in ["FLYING DISMOUNT", "SADDLE DIVE HEADSHOT", "FULL-GALLOP HIT", "AIRBORNE REVERSAL"]:
 		if expected not in events:
 			failures.append("deterministic gameplay event missing: %s" % expected)
+
+func _measure_airborne_pose(
+	rider: CharacterBody3D,
+	pose: Node3D,
+	camera: Camera3D,
+	failures: Array[String],
+	label: String
+) -> Dictionary:
+	var previous_yaw := pose.rotation.y
+	var maximum_delta := 0.0
+	var minimum_yaw := previous_yaw
+	var maximum_yaw := previous_yaw
+	var airborne_frames := 0
+	while int(rider.get("stance_id")) == STANCE_DIVE and airborne_frames < 70:
+		await get_tree().physics_frame
+		var yaw := pose.rotation.y
+		maximum_delta = maxf(maximum_delta, absf(wrapf(yaw - previous_yaw, -PI, PI)))
+		minimum_yaw = minf(minimum_yaw, yaw)
+		maximum_yaw = maxf(maximum_yaw, yaw)
+		previous_yaw = yaw
+		airborne_frames += 1
+		if not rider.global_position.is_finite() or not camera.global_position.is_finite():
+			failures.append("%s rider/camera transform became nonfinite" % label)
+			break
+		if camera.fov < 69.99 or camera.fov > 78.01 or absf(camera.global_rotation.z) > 0.001:
+			failures.append("%s introduced camera FOV/roll outside conservative plan" % label)
+			break
+	return {
+		"max_delta": maximum_delta,
+		"minimum_yaw": minimum_yaw,
+		"maximum_yaw": maximum_yaw,
+		"airborne_frames": airborne_frames,
+	}
 
 func _wait_for_remount_hint(
 	hint: Label,

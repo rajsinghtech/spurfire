@@ -3,10 +3,10 @@ extends Control
 
 @export var horse: Node
 @export var rider: Node
-@export_range(0.0, 1.0, 0.05) var maximum_opacity := 0.32
+@export_range(0.0, 1.0, 0.05) var maximum_opacity := 0.26
 @export_range(4, 24, 1) var maximum_line_count := 14
-@export var line_color := Color("b9f7ee")
-@export var dust_color := Color("d9b879")
+@export var line_color := Color("3fb6c9")
+@export var dust_color := Color("d9a05b")
 
 var _speed_fraction := 0.0
 var _lateral_fraction := 0.0

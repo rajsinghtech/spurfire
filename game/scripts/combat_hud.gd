@@ -96,8 +96,11 @@ func _process(delta: float) -> void:
 			_refresh_state_text()
 	if marker_remaining > 0.0:
 		marker_remaining -= delta
+		var pulse := sin(clampf(marker_remaining / 0.16, 0.0, 1.0) * PI)
+		hit_marker.scale = Vector2.ONE * lerpf(1.0, 1.4, pulse)
 		if marker_remaining <= 0.0:
 			hit_marker.visible = false
+			hit_marker.scale = Vector2.ONE
 
 func _refresh_state_text() -> void:
 	if feedback_remaining > 0.0:
