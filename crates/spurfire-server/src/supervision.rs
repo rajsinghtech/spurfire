@@ -1249,6 +1249,7 @@ mod tests {
         assert!(LedgerStore::open(private).is_err());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct FakeBroker {
         delete: OperationOutcome,
         observations: Vec<AbsenceObservation>,
@@ -1257,6 +1258,7 @@ mod tests {
         calls: Vec<Operation>,
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl CredentialBroker for FakeBroker {
         fn delete_exact(
             &mut self,
@@ -1295,12 +1297,14 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(Default)]
     struct FakeClock {
         elapsed: std::cell::Cell<Duration>,
         advances_when_waited: bool,
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl FakeClock {
         fn advancing() -> Self {
             Self {
@@ -1310,6 +1314,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl MonotonicClock for FakeClock {
         type Mark = Duration;
 
@@ -1328,6 +1333,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn observation() -> AbsenceObservation {
         AbsenceObservation {
             provider_stable_id: "TtStable99".into(),
