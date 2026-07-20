@@ -14,9 +14,8 @@ var _last_rider_raw := Transform3D.IDENTITY
 var _remount_from := Transform3D.IDENTITY
 var _remount_elapsed := -1.0
 var _visual_velocity := Vector3.ZERO
+var _yaw_velocity := Vector3.ZERO
 var _has_rider_raw := false
-var _yaw_tick := -1
-var _yaw_budget_remaining := 0.0
 var _cape: MeshInstance3D
 var _hat: Node3D
 
@@ -30,6 +29,24 @@ func _ready() -> void:
 	if rider and rider.has_signal(&"stance_changed"):
 		rider.stance_changed.connect(_on_stance_changed)
 	_build_frontier_silhouette()
+
+func _physics_process(delta: float) -> void:
+	if rider == null or _remount_elapsed >= 0.0 or not is_finite(delta) or delta <= 0.0:
+		return
+	var velocity := _rider_velocity()
+	var blend := 1.0 - exp(-maxf(pose_response, 0.01) * delta)
+	_yaw_velocity = _yaw_velocity.lerp(velocity, blend)
+	var wanted_yaw := wanted_local_yaw(
+		_stance_id,
+		_yaw_velocity,
+		rider.global_basis.get_euler().y
+	)
+	rotation.y = yaw_after_physics_tick(
+		rotation.y,
+		wanted_yaw,
+		maximum_yaw_degrees_per_second,
+		Engine.physics_ticks_per_second
+	)
 
 func _process(delta: float) -> void:
 	if rider == null or not is_finite(delta) or delta <= 0.0:
@@ -61,12 +78,7 @@ func _process(delta: float) -> void:
 		_last_global = global_transform
 		return
 
-	var velocity := Vector3.ZERO
-	if rider is CharacterBody3D:
-		velocity = (rider as CharacterBody3D).velocity
-	elif rider.has_method("sample_at"):
-		var sample := rider.call("sample_at", float(rider.get("render_tick"))) as Dictionary
-		velocity = sample.get("velocity", Vector3.ZERO)
+	var velocity := _rider_velocity()
 	var blend := 1.0 - exp(-maxf(pose_response, 0.01) * delta)
 	_visual_velocity = _visual_velocity.lerp(velocity, blend)
 	var horizontal := Vector2(_visual_velocity.x, _visual_velocity.z).length()
@@ -89,66 +101,37 @@ func _process(delta: float) -> void:
 		var hat_tilt := deg_to_rad(14.0) if _stance_id in [4, 5] else 0.0
 		_hat.rotation.z = lerp_angle(_hat.rotation.z, hat_tilt, blend)
 
-	if _stance_id == 3 and horizontal > 0.01:
-		var wanted_global_yaw := atan2(-_visual_velocity.x, -_visual_velocity.z)
-		var wanted_local_yaw := wrapf(
-			wanted_global_yaw - rider_sample.basis.get_euler().y,
-			-PI,
-			PI
-		)
-		_apply_limited_yaw(wanted_local_yaw, delta)
-	else:
-		_apply_limited_yaw(0.0, delta)
 	_last_global = global_transform
 
-func _apply_limited_yaw(wanted_local_yaw: float, delta: float) -> void:
-	var tick := Engine.get_physics_frames()
-	var tick_budget := (
-		deg_to_rad(maximum_yaw_degrees_per_second)
-		/ maxf(float(Engine.physics_ticks_per_second), 1.0)
-	)
-	_yaw_budget_remaining = yaw_budget_after_tick(
-		_yaw_tick,
-		tick,
-		tick_budget,
-		_yaw_budget_remaining
-	)
-	_yaw_tick = tick
-	var applied := limited_yaw_change(
-		rotation.y,
-		wanted_local_yaw,
-		delta,
-		maximum_yaw_degrees_per_second,
-		_yaw_budget_remaining
-	)
-	rotation.y = wrapf(rotation.y + applied, -PI, PI)
-	_yaw_budget_remaining = maxf(_yaw_budget_remaining - absf(applied), 0.0)
+func _rider_velocity() -> Vector3:
+	if rider is CharacterBody3D:
+		return (rider as CharacterBody3D).velocity
+	if rider.has_method("sample_at"):
+		var sample := rider.call("sample_at", float(rider.get("render_tick"))) as Dictionary
+		return sample.get("velocity", Vector3.ZERO)
+	return Vector3.ZERO
 
-static func yaw_budget_after_tick(
-	previous_tick: int,
-	current_tick: int,
-	tick_budget: float,
-	current_budget: float
-) -> float:
-	if previous_tick < 0:
-		return maxf(tick_budget, 0.0)
-	if current_tick == previous_tick:
-		return maxf(current_budget, 0.0)
-	# A render frame may span multiple physics ticks below 60 FPS or after a stall.
-	# Grant each elapsed tick its own allowance, but never bank an unused old allowance.
-	return float(maxi(current_tick - previous_tick, 1)) * maxf(tick_budget, 0.0)
+static func wanted_local_yaw(stance_id: int, velocity: Vector3, rider_yaw: float) -> float:
+	var horizontal := Vector2(velocity.x, velocity.z).length()
+	if stance_id != 3 or horizontal <= 0.01:
+		return 0.0
+	var wanted_global_yaw := atan2(-velocity.x, -velocity.z)
+	return wrapf(wanted_global_yaw - rider_yaw, -PI, PI)
 
-static func limited_yaw_change(
+static func yaw_after_physics_tick(
 	current_yaw: float,
 	wanted_yaw: float,
-	delta: float,
 	maximum_degrees_per_second: float,
-	tick_budget_remaining: float
+	physics_ticks_per_second: int
 ) -> float:
-	var frame_budget := deg_to_rad(maxf(maximum_degrees_per_second, 0.0)) * maxf(delta, 0.0)
-	var step := minf(frame_budget, maxf(tick_budget_remaining, 0.0))
+	# Yaw is fixed-step presentation state. Render scheduling can interpolate it,
+	# but can never combine several missed physics allowances into one mutation.
+	var step := (
+		deg_to_rad(maxf(maximum_degrees_per_second, 0.0))
+		/ maxf(float(physics_ticks_per_second), 1.0)
+	)
 	var shortest_arc := wrapf(wanted_yaw - current_yaw, -PI, PI)
-	return clampf(shortest_arc, -step, step)
+	return wrapf(current_yaw + clampf(shortest_arc, -step, step), -PI, PI)
 
 func _build_frontier_silhouette() -> void:
 	var cream := StandardMaterial3D.new()
@@ -198,8 +181,7 @@ func reset_pose_interpolation() -> void:
 	reset_physics_interpolation()
 
 func _reset_yaw_limiter() -> void:
-	_yaw_tick = -1
-	_yaw_budget_remaining = 0.0
+	_yaw_velocity = _rider_velocity() if rider else Vector3.ZERO
 
 func _is_teleport(raw_rider: Transform3D) -> bool:
 	if not _has_rider_raw:

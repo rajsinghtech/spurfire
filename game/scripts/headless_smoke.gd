@@ -277,97 +277,92 @@ func _check_render_interpolation(failures: Array[String]) -> void:
 func _check_airborne_yaw_limiter(failures: Array[String]) -> void:
 	var degrees_per_second := 360.0
 	var tick_budget := deg_to_rad(degrees_per_second) / 60.0
-	var old_stalled_step := deg_to_rad(degrees_per_second) * (1.0 / 60.0 + 0.003)
-	if old_stalled_step <= deg_to_rad(6.05):
-		failures.append("airborne yaw regression cadence no longer reproduces the old spike")
-	# Render frames below the physics rate must receive the allowance for every elapsed
-	# physics tick. The previous implementation granted only 6 degrees per render frame,
-	# reducing a nominal 360 degrees/second turn to 120 or 180 degrees/second.
-	for render_hz in [20, 30]:
-		var yaw := 0.0
-		var target := deg_to_rad(179.0)
-		var elapsed_ticks := int(60.0 / float(render_hz))
-		var frame_count := int(render_hz / 5)
-		var previous_tick := 0
-		var current_tick := elapsed_ticks
-		var remaining_budget := 0.0
-		for frame in frame_count:
-			remaining_budget = RIDER_POSE_SCRIPT.yaw_budget_after_tick(
-				previous_tick,
-				current_tick,
-				tick_budget,
-				remaining_budget
-			)
-			var change: float = RIDER_POSE_SCRIPT.limited_yaw_change(
-				yaw,
-				target,
-				1.0 / float(render_hz),
-				degrees_per_second,
-				remaining_budget
-			)
-			remaining_budget -= absf(change)
-			previous_tick = current_tick
-			current_tick += elapsed_ticks
-			yaw = wrapf(yaw + change, -PI, PI)
-		var expected := deg_to_rad(degrees_per_second * float(frame_count) / float(render_hz))
-		if absf(yaw - expected) > deg_to_rad(0.001):
-			failures.append(
-				"%d Hz airborne yaw was %.2f degrees, expected %.2f after elapsed physics ticks" % [
-					render_hz,
-					rad_to_deg(yaw),
-					rad_to_deg(expected),
-				]
-			)
 	var scenarios := [
-		{"label": "right_clamped_1", "start": 0.0, "target": 75.0, "sign": 1.0},
-		{"label": "left_clamped_1", "start": 0.0, "target": -75.0, "sign": -1.0},
-		{"label": "right_clamped_2", "start": 0.0, "target": 75.0, "sign": 1.0},
-		{"label": "left_clamped_2", "start": 0.0, "target": -75.0, "sign": -1.0},
+		{"label": "right_clamped", "start": 0.0, "target": 75.0, "sign": 1.0},
+		{"label": "left_clamped", "start": 0.0, "target": -75.0, "sign": -1.0},
 		{"label": "right_return", "start": 75.0, "target": 0.0, "sign": -1.0},
 		{"label": "left_return", "start": -75.0, "target": 0.0, "sign": 1.0},
 		{"label": "positive_seam", "start": 179.0, "target": -179.0, "sign": 1.0},
 		{"label": "negative_seam", "start": -179.0, "target": 179.0, "sign": -1.0},
 	]
-	for render_hz in [60, 120, 144]:
-		for scenario in scenarios:
-			var yaw := deg_to_rad(float(scenario.start))
-			var target := deg_to_rad(float(scenario.target))
-			var first_change := 0.0
-			var converged := false
-			for tick in 24:
-				var frames_this_tick := 1
-				if render_hz == 120:
-					frames_this_tick = 2
-				elif render_hz == 144:
-					frames_this_tick = [2, 2, 3, 2, 3][tick % 5]
-				var spent := 0.0
-				for frame in frames_this_tick:
-					var delta := 1.0 / float(render_hz)
-					if tick == 1 and frame == 0:
-						delta += 0.003
-					elif tick == 4 and frame == 0:
-						delta += 0.020
-					var change: float = RIDER_POSE_SCRIPT.limited_yaw_change(
-						yaw,
-						target,
-						delta,
-						degrees_per_second,
-						tick_budget - spent
-					)
-					if tick == 0 and frame == 0:
-						first_change = change
-					yaw = wrapf(yaw + change, -PI, PI)
-					spent += absf(change)
-				if spent > tick_budget + deg_to_rad(0.0001):
-					failures.append("%s %d Hz airborne yaw exceeded one tick budget" % [scenario.label, render_hz])
+	for scenario in scenarios:
+		var start := deg_to_rad(float(scenario.start))
+		var target := deg_to_rad(float(scenario.target))
+		var next: float = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+			start, target, degrees_per_second, 60
+		)
+		var change := wrapf(next - start, -PI, PI)
+		if absf(change) > deg_to_rad(6.05):
+			failures.append("%s yaw exceeded one fixed-tick budget" % scenario.label)
+		if change * float(scenario.sign) <= 0.0:
+			failures.append("%s yaw did not take the shortest arc" % scenario.label)
+
+	# Render cadence only chooses which fixed-step states are displayed. It must
+	# never alter, merge, or bank the six-degree mutations that create those states.
+	for render_hz in [20, 30, 60, 120, 144]:
+		var yaw := 0.0
+		var target := deg_to_rad(75.0)
+		var physics_tick := 0
+		var frame_count := int(ceil(float(render_hz) * 0.4))
+		for frame in frame_count:
+			var wanted_tick := int(floor(float(frame + 1) * 60.0 / float(render_hz)))
+			while physics_tick < wanted_tick:
+				var previous := yaw
+				yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+					yaw, target, degrees_per_second, 60
+				)
+				if absf(wrapf(yaw - previous, -PI, PI)) > deg_to_rad(6.05):
+					failures.append("%d Hz schedule exceeded one fixed-tick yaw budget" % render_hz)
 					break
-				if absf(wrapf(target - yaw, -PI, PI)) <= deg_to_rad(0.01):
-					converged = true
-					break
-			if first_change * float(scenario.sign) <= 0.0:
-				failures.append("%s %d Hz airborne yaw did not take the shortest arc" % [scenario.label, render_hz])
-			if not converged:
-				failures.append("%s %d Hz airborne yaw did not converge within 0.4 seconds" % [scenario.label, render_hz])
+				physics_tick += 1
+		if absf(wrapf(target - yaw, -PI, PI)) > deg_to_rad(0.01):
+			failures.append("%d Hz schedule changed yaw convergence" % render_hz)
+
+	# A long render frame recovers by running distinct fixed steps, not by applying
+	# an elapsed-frame lump. Every recoverable state remains within the 6.05° gate.
+	var recovered_yaw := deg_to_rad(-75.0)
+	for _tick in 30:
+		var previous := recovered_yaw
+		recovered_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+			recovered_yaw, deg_to_rad(75.0), degrees_per_second, 60
+		)
+		if absf(wrapf(recovered_yaw - previous, -PI, PI)) > deg_to_rad(6.05):
+			failures.append("long-frame recovery banked a yaw allowance")
+			break
+	if absf(wrapf(deg_to_rad(75.0) - recovered_yaw, -PI, PI)) > deg_to_rad(0.01):
+		failures.append("long-frame yaw recovery did not converge")
+
+	# Stance transitions and repeated opposite dives use the same state machine.
+	var forward := Vector3(0.0, 0.0, -9.0)
+	if absf(RIDER_POSE_SCRIPT.wanted_local_yaw(STANCE_MOUNTED, forward, 0.0)) > 0.000001:
+		failures.append("mounted stance retained an airborne yaw target")
+	var repeated_yaw := 0.0
+	for dive_target_degrees in [75.0, -75.0, 75.0, -75.0]:
+		var radians := deg_to_rad(dive_target_degrees)
+		var dive_velocity := Vector3(-sin(radians) * 9.0, 0.0, -cos(radians) * 9.0)
+		var target: float = RIDER_POSE_SCRIPT.wanted_local_yaw(
+			STANCE_DIVE, dive_velocity, 0.0
+		)
+		if absf(wrapf(target - radians, -PI, PI)) > deg_to_rad(0.001):
+			failures.append("repeated dive lost its signed clamped target")
+		for _tick in 25:
+			var previous := repeated_yaw
+			repeated_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+				repeated_yaw, target, degrees_per_second, 60
+			)
+			if absf(wrapf(repeated_yaw - previous, -PI, PI)) > tick_budget + deg_to_rad(0.05):
+				failures.append("repeated dive exceeded its fixed-tick yaw budget")
+				break
+		for _tick in 25:
+			repeated_yaw = RIDER_POSE_SCRIPT.yaw_after_physics_tick(
+				repeated_yaw,
+				RIDER_POSE_SCRIPT.wanted_local_yaw(STANCE_MOUNTED, forward, 0.0),
+				degrees_per_second,
+				60
+			)
+		if absf(repeated_yaw) > deg_to_rad(0.01):
+			failures.append("stance transition did not reset repeated dive yaw")
+
 
 func _synthetic_physics_transform(tick: int) -> Transform3D:
 	var time := float(tick) / 60.0
