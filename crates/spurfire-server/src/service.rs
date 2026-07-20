@@ -237,6 +237,9 @@ pub struct AppState {
     lobby_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     observation_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     provider_observations: Arc<RwLock<BTreeMap<LobbyId, CachedProviderObservation>>>,
+    /// Process-local monotonic anchors. A restart deliberately discards them and
+    /// restarts the two-observation proof rather than trusting wall time.
+    absence_observation_starts: Arc<RwLock<BTreeMap<LobbyId, (u64, tokio::time::Instant)>>>,
     session_endpoints: Arc<RwLock<BTreeMap<LobbyId, BTreeMap<PlayerId, SessionEndpointRecord>>>>,
     manifest_keys: Arc<RwLock<BTreeMap<LobbyId, ManifestKey>>>,
     provider_limit: Arc<Semaphore>,
@@ -262,6 +265,7 @@ impl AppState {
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             provider_observations: Arc::new(RwLock::new(BTreeMap::new())),
+            absence_observation_starts: Arc::new(RwLock::new(BTreeMap::new())),
             session_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
             manifest_keys: Arc::new(RwLock::new(BTreeMap::new())),
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
@@ -284,26 +288,17 @@ impl AppState {
         state
     }
 
-    /// Installs one verified receipt and constructs exact rehearsal authority.
-    /// Only the dedicated local-rehearsal binary calls this path.
+    /// Refuses real local-rehearsal activation until the dedicated path has a
+    /// globally fenced receipt, cleanup-only restart authority, and an attested
+    /// supervisor protocol. Keeping this constructor fail-closed prevents a
+    /// library caller from bypassing the disabled supervisor.
     pub async fn new_local_rehearsal(
-        config: Config,
-        store: Arc<dyn LobbyStore>,
-        provider: Arc<dyn NetworkProvider>,
-        qualification: LocalRehearsalQualification,
+        _config: Config,
+        _store: Arc<dyn LobbyStore>,
+        _provider: Arc<dyn NetworkProvider>,
+        _qualification: LocalRehearsalQualification,
     ) -> Result<Self, crate::store::StoreError> {
-        store
-            .install_local_rehearsal_receipt(&qualification)
-            .await?;
-        let gated = Arc::new(MutationGatedProvider::local_rehearsal(
-            provider,
-            qualification.lobby_id,
-            qualification.network_generation,
-            qualification.expires_at,
-        ));
-        let mut state = Self::new(config, store, gated);
-        state.local_rehearsal = Some(Arc::new(qualification));
-        Ok(state)
+        Err(crate::store::StoreError::RehearsalDisabled)
     }
 
     /// Replaces the wall clock, normally for deterministic tests.
@@ -3971,16 +3966,52 @@ fn finalize_lobby_cleanup(stored: &mut StoredLobby, now: UnixMillis, finalize: b
     }
 }
 
-async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby, now: UnixMillis) {
+async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby, _now: UnixMillis) {
     let Some(identity) = provider_identity(stored) else {
         stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
         stored.cleanup_pending = true;
         stored.lobby.state_reason = Some("provider_identity_missing_manual_remediation".to_owned());
         return;
     };
+    let Some(provider_id) = identity.provider_tailnet_id.clone() else {
+        stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+        stored.cleanup_pending = true;
+        return;
+    };
+    let lobby_id = stored.lobby.lobby_id;
+    let generation = stored.network_generation;
+
+    // Wall timestamps survive restart but cannot prove an interval. If the
+    // process-local monotonic anchor is unavailable or belongs to another
+    // generation, discard the first observation and collect a fresh pair.
+    if stored.first_absence_observed_at.is_some() {
+        let anchor = state
+            .absence_observation_starts
+            .read()
+            .await
+            .get(&lobby_id)
+            .copied();
+        match anchor {
+            Some((anchor_generation, started)) if anchor_generation == generation => {
+                if started.elapsed() < Duration::from_millis(CLEANUP_ABSENCE_MIN_SEPARATION_MS) {
+                    stored.cleanup_pending = true;
+                    return;
+                }
+            }
+            _ => {
+                clear_absence_proof(stored);
+                if state.store.replace(stored.clone()).await.is_err() {
+                    stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                    stored.lobby.state_reason = Some("absence_reset_persistence_failed".to_owned());
+                    return;
+                }
+            }
+        }
+    }
+
     let request = TailnetPresenceRequest {
-        lobby_id: stored.lobby.lobby_id,
-        network_generation: stored.network_generation,
+        lobby_id,
+        network_generation: generation,
         identity,
     };
     let present = tokio::time::timeout(
@@ -3990,49 +4021,86 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
     .await;
     match present {
         Ok(Ok(true)) => {
-            stored.first_absence_observed_at = None;
-            stored.cleanup_pending = true;
-        }
-        Ok(Ok(false)) => match stored.first_absence_observed_at {
-            None => {
-                stored.first_absence_observed_at = Some(now);
-                stored.cleanup_pending = true;
-            }
-            Some(first)
-                if now
-                    .checked_duration_since(first)
-                    .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS) =>
-            {
-                // Absence evidence is complete; only now may the exact
-                // generation-bound vault tuple be erased. Failure remains
-                // fail-closed and retains the singleton lease.
-                match tokio::time::timeout(
-                    PROVIDER_OPERATION_TIMEOUT,
-                    state.provider.erase_child_secret(request),
-                )
+            clear_absence_proof(stored);
+            state
+                .absence_observation_starts
+                .write()
                 .await
-                {
-                    Ok(Ok(())) => {
-                        stored.child_secret_erased_at = Some(now);
-                        stored.absence_confirmed_at = Some(now);
-                        stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
-                        stored.cleanup_pending = false;
-                        stored.lobby.state_reason = None;
-                    }
-                    Ok(Err(error)) => {
-                        stored.cleanup_pending = true;
-                        stored.lobby.state_reason = Some(error.state_reason().to_owned());
-                    }
-                    Err(_) => {
-                        stored.cleanup_pending = true;
-                        stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
-                    }
+                .remove(&lobby_id);
+            stored.cleanup_pending = true;
+            if state.store.replace(stored.clone()).await.is_err() {
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason = Some("absence_reset_persistence_failed".to_owned());
+            }
+        }
+        Ok(Ok(false)) if stored.first_absence_observed_at.is_none() => {
+            // Capture the interval start after the successful provider response,
+            // then durably record observation identity before returning.
+            stored.first_absence_observed_at = Some(state.clock.now());
+            stored.absence_observation_generation = Some(generation);
+            stored.absence_observation_provider_id = Some(provider_id);
+            stored.absence_monotonic_verified = false;
+            stored.cleanup_pending = true;
+            state
+                .absence_observation_starts
+                .write()
+                .await
+                .insert(lobby_id, (generation, tokio::time::Instant::now()));
+            if state.store.replace(stored.clone()).await.is_err() {
+                clear_absence_proof(stored);
+                state
+                    .absence_observation_starts
+                    .write()
+                    .await
+                    .remove(&lobby_id);
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason =
+                    Some("absence_observation_persistence_failed".to_owned());
+            }
+        }
+        Ok(Ok(false)) => {
+            // Persist complete exact-tuple observation evidence before touching
+            // the vault. A crash can then retry only the idempotent verified
+            // erasure path, never infer evidence from mutable wall time.
+            stored.absence_confirmed_at = Some(state.clock.now());
+            stored.absence_observation_generation = Some(generation);
+            stored.absence_observation_provider_id = Some(provider_id);
+            stored.absence_monotonic_verified = true;
+            stored.cleanup_pending = true;
+            if state.store.replace(stored.clone()).await.is_err() {
+                stored.absence_monotonic_verified = false;
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason = Some("absence_proof_persistence_failed".to_owned());
+                return;
+            }
+            match tokio::time::timeout(
+                PROVIDER_OPERATION_TIMEOUT,
+                state.provider.erase_child_secret(request),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    let completed_at = state.clock.now();
+                    stored.child_secret_erased_at = Some(completed_at);
+                    stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+                    stored.cleanup_pending = false;
+                    stored.lobby.state_reason = None;
+                    state
+                        .absence_observation_starts
+                        .write()
+                        .await
+                        .remove(&lobby_id);
+                }
+                Ok(Err(error)) => {
+                    stored.cleanup_pending = true;
+                    stored.lobby.state_reason = Some(error.state_reason().to_owned());
+                }
+                Err(_) => {
+                    stored.cleanup_pending = true;
+                    stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
                 }
             }
-            Some(_) => {
-                stored.cleanup_pending = true;
-            }
-        },
+        }
         Ok(Err(ProviderError::IdentityMismatch)) => {
             stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
             stored.cleanup_pending = true;
@@ -4040,11 +4108,17 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
                 Some("provider_identity_mismatch_manual_remediation".to_owned());
         }
         Ok(Err(_)) | Err(_) => {
-            // Preserve the last absence evidence without converting uncertainty
-            // into absence. The singleton lease remains held.
             stored.cleanup_pending = true;
         }
     }
+}
+
+fn clear_absence_proof(stored: &mut StoredLobby) {
+    stored.first_absence_observed_at = None;
+    stored.absence_confirmed_at = None;
+    stored.absence_observation_generation = None;
+    stored.absence_observation_provider_id = None;
+    stored.absence_monotonic_verified = false;
 }
 
 fn apply_cleanup_result(

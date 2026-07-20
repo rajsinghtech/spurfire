@@ -57,10 +57,19 @@ struct EncryptedRecord {
     ciphertext: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ErasureReceipt {
+    identity: ChildVaultIdentity,
+    version: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct VaultImage {
     schema_version: u32,
     records: BTreeMap<LobbyId, EncryptedRecord>,
+    /// Non-secret, exact-tuple proof that custody existed and was CAS-erased.
+    #[serde(default)]
+    erasures: BTreeMap<LobbyId, ErasureReceipt>,
 }
 
 #[derive(Debug, Error)]
@@ -98,6 +107,18 @@ impl std::fmt::Debug for EncryptedChildVault {
 }
 
 impl EncryptedChildVault {
+    #[cfg(not(unix))]
+    pub async fn open(
+        path: impl Into<PathBuf>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<Self, VaultError> {
+        let _ = (path.into(), key_path.as_ref());
+        // Durable secret custody requires atomic replacement plus directory
+        // durability. Unsupported platforms fail before provider activation.
+        Err(VaultError::Invalid)
+    }
+
+    #[cfg(unix)]
     pub async fn open(
         path: impl Into<PathBuf>,
         key_path: impl AsRef<Path>,
@@ -125,6 +146,7 @@ impl EncryptedChildVault {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => VaultImage {
                 schema_version: VAULT_SCHEMA,
                 records: BTreeMap::new(),
+                erasures: BTreeMap::new(),
             },
             Err(_) => return Err(VaultError::Io),
         };
@@ -152,6 +174,16 @@ impl EncryptedChildVault {
             .collect())
     }
 
+    /// Checks the loaded, lifetime-lock-protected image for an exact erasure receipt.
+    pub fn has_erasure_receipt(&self, identity: &ChildVaultIdentity) -> Result<bool, VaultError> {
+        let image = self.image.read().map_err(|_| VaultError::Io)?;
+        Ok(!image.records.contains_key(&identity.lobby_id)
+            && image
+                .erasures
+                .get(&identity.lobby_id)
+                .is_some_and(|receipt| &receipt.identity == identity && receipt.version > 0))
+    }
+
     pub async fn put_if_absent(
         &self,
         identity: ChildVaultIdentity,
@@ -170,6 +202,9 @@ impl EncryptedChildVault {
                 } else {
                     Err(VaultError::Conflict)
                 };
+            }
+            if next.erasures.contains_key(&identity.lobby_id) {
+                return Err(VaultError::Conflict);
             }
             let version = 1;
             let mut nonce_bytes = [0_u8; NONCE_BYTES];
@@ -255,12 +290,54 @@ impl EncryptedChildVault {
             return Err(VaultError::Conflict);
         }
         next.records.remove(&identity.lobby_id);
+        next.erasures.insert(
+            identity.lobby_id,
+            ErasureReceipt {
+                identity: identity.clone(),
+                version,
+            },
+        );
         self.persist(&next).await?;
-        *self.image.write().map_err(|_| VaultError::Io)? = next;
-        if self.contains_lobby(identity.lobby_id) {
+        let readback = self.read_image_from_disk().await?;
+        if readback.records.contains_key(&identity.lobby_id)
+            || readback.erasures.get(&identity.lobby_id)
+                != Some(&ErasureReceipt {
+                    identity: identity.clone(),
+                    version,
+                })
+        {
             return Err(VaultError::Conflict);
         }
+        *self.image.write().map_err(|_| VaultError::Io)? = readback;
         Ok(())
+    }
+
+    /// Verifies a prior exact CAS erase after a crash between vault and lobby commits.
+    pub async fn verify_erased(&self, identity: &ChildVaultIdentity) -> Result<u64, VaultError> {
+        let _mutation = self.mutation_lock.lock().await;
+        let readback = self.read_image_from_disk().await?;
+        if readback.records.contains_key(&identity.lobby_id) {
+            return Err(VaultError::Conflict);
+        }
+        let receipt = readback
+            .erasures
+            .get(&identity.lobby_id)
+            .filter(|receipt| &receipt.identity == identity)
+            .ok_or(VaultError::Missing)?;
+        let version = receipt.version;
+        *self.image.write().map_err(|_| VaultError::Io)? = readback;
+        Ok(version)
+    }
+
+    async fn read_image_from_disk(&self) -> Result<VaultImage, VaultError> {
+        let bytes = tokio::fs::read(self.path.as_ref())
+            .await
+            .map_err(|_| VaultError::Io)?;
+        let image: VaultImage = serde_json::from_slice(&bytes).map_err(|_| VaultError::Invalid)?;
+        if image.schema_version != VAULT_SCHEMA {
+            return Err(VaultError::Invalid);
+        }
+        Ok(image)
     }
 
     async fn persist(&self, image: &VaultImage) -> Result<(), VaultError> {
@@ -288,13 +365,28 @@ impl EncryptedChildVault {
             .await
             .map_err(|_| VaultError::Io)?
         {
-            tokio::fs::remove_file(self.path.as_ref())
-                .await
-                .map_err(|_| VaultError::Io)?;
+            // Never delete the last durable custody image to emulate replace.
+            // Windows activation remains fail-closed until atomic replacement
+            // with directory durability is implemented.
+            return Err(VaultError::Io);
         }
         tokio::fs::rename(&temporary, self.path.as_ref())
             .await
             .map_err(|_| VaultError::Io)?;
+        #[cfg(unix)]
+        {
+            let parent = self
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            tokio::fs::File::open(parent)
+                .await
+                .map_err(|_| VaultError::Io)?
+                .sync_all()
+                .await
+                .map_err(|_| VaultError::Io)?;
+        }
         Ok(())
     }
 }
@@ -447,6 +539,19 @@ mod tests {
         reopened.delete_cas(&identity, version).await.unwrap();
         assert!(matches!(
             reopened.get_exact(&identity),
+            Err(VaultError::Missing)
+        ));
+        assert_eq!(reopened.verify_erased(&identity).await.unwrap(), version);
+        drop(reopened);
+        let recovered = EncryptedChildVault::open(&path, &key_path).await.unwrap();
+        assert_eq!(recovered.verify_erased(&identity).await.unwrap(), version);
+
+        let unknown = ChildVaultIdentity {
+            lobby_id: LobbyId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
+            ..identity
+        };
+        assert!(matches!(
+            recovered.verify_erased(&unknown).await,
             Err(VaultError::Missing)
         ));
         let _ = tokio::fs::remove_dir_all(&root).await;

@@ -37,7 +37,6 @@ pub const MAX_CREATE_REPLAYS: usize = 20_000;
 pub const CREATOR_CAPABILITY_CLEANUP_GRACE_MS: u64 = 15 * 60 * 1_000;
 
 const IDEMPOTENCY_DIGEST_DOMAIN: &[u8] = b"spurfire-real-lobby-lease-v1\0";
-const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 
 const fn default_network_generation() -> u64 {
     1
@@ -274,6 +273,12 @@ pub struct StoredLobby {
     #[serde(default)]
     pub(crate) absence_confirmed_at: Option<UnixMillis>,
     #[serde(default)]
+    pub(crate) absence_observation_generation: Option<u64>,
+    #[serde(default)]
+    pub(crate) absence_observation_provider_id: Option<String>,
+    #[serde(default)]
+    pub(crate) absence_monotonic_verified: bool,
+    #[serde(default)]
     pub(crate) capabilities: Vec<StoredCapabilityVerifier>,
     pub(crate) idle_ttl_ms: u64,
     pub(crate) measurements: BTreeMap<PlayerId, ConnectivitySample>,
@@ -330,6 +335,9 @@ impl StoredLobby {
             child_secret_erased_at: None,
             first_absence_observed_at: None,
             absence_confirmed_at: None,
+            absence_observation_generation: None,
+            absence_observation_provider_id: None,
+            absence_monotonic_verified: false,
             capabilities: Vec::new(),
             idle_ttl_ms,
             measurements: BTreeMap::new(),
@@ -525,9 +533,15 @@ struct StoredLocalRehearsalReceipt {
     lobby_id: LobbyId,
     network_generation: u64,
     expires_at: UnixMillis,
+    #[serde(default = "default_rehearsal_deadline")]
+    absolute_deadline: UnixMillis,
     participant_cap: u8,
     policy_profile_digest: [u8; 32],
     consumed_at: Option<UnixMillis>,
+}
+
+fn default_rehearsal_deadline() -> UnixMillis {
+    UnixMillis::new(u64::MAX)
 }
 
 impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
@@ -538,6 +552,7 @@ impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
             lobby_id: value.lobby_id,
             network_generation: value.network_generation,
             expires_at: value.expires_at,
+            absolute_deadline: value.absolute_deadline,
             participant_cap: value.participant_cap,
             policy_profile_digest: value.policy_profile_digest,
             consumed_at: None,
@@ -588,6 +603,9 @@ pub enum StoreError {
     /// The typed local-rehearsal receipt was incompatible or already installed.
     #[error("local rehearsal receipt invalid")]
     InvalidRehearsalReceipt,
+    /// Real local-rehearsal activation is fail-closed until durable recovery exists.
+    #[error("local rehearsal activation is disabled")]
+    RehearsalDisabled,
     /// Durable state could not be read or replaced.
     #[error("durable lobby state I/O failed")]
     Io,
@@ -1136,16 +1154,15 @@ fn has_release_proof(stored: &StoredLobby) -> bool {
                 && stored.cleanup_requested_at.is_some()
                 && stored.delete_acknowledged_at.is_some()
                 && stored.child_secret_erased_at.is_some()
-                && matches!(
-                    (
-                        stored.first_absence_observed_at,
-                        stored.absence_confirmed_at
-                    ),
-                    (Some(first), Some(confirmed))
-                        if confirmed
-                            .checked_duration_since(first)
-                            .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS)
-                )
+                && stored.absence_monotonic_verified
+                && stored.absence_observation_generation == Some(stored.network_generation)
+                && stored.absence_observation_provider_id.as_deref()
+                    == stored
+                        .network_identity
+                        .as_ref()
+                        .and_then(|identity| identity.provider_tailnet_id.as_deref())
+                && stored.first_absence_observed_at.is_some()
+                && stored.absence_confirmed_at.is_some()
                 && !stored.cleanup_pending
         }
         NetworkLifecycle::SharedResourcesClean => {
@@ -1623,6 +1640,7 @@ mod tests {
             lobby_id,
             network_generation: 1,
             expires_at: UnixMillis::new(1_000),
+            absolute_deadline: UnixMillis::new(1_000),
             participant_cap: 8,
             policy_profile_digest: [10; 32],
         };
@@ -1730,7 +1748,10 @@ mod tests {
         stored.delete_acknowledged_at = Some(UnixMillis::new(21));
         stored.child_secret_erased_at = Some(UnixMillis::new(21));
         stored.first_absence_observed_at = Some(UnixMillis::new(30));
-        stored.absence_confirmed_at = Some(UnixMillis::new(35 + 5_000));
+        stored.absence_confirmed_at = Some(UnixMillis::new(31));
+        stored.absence_observation_generation = Some(1);
+        stored.absence_observation_provider_id = Some("TtReleaseCNTRL".to_owned());
+        stored.absence_monotonic_verified = true;
         stored.cleanup_pending = false;
         store.replace(stored).await.unwrap();
         assert!(!store.real_lobby_lease_held().await);

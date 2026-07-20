@@ -17,19 +17,17 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use spurfire_control::{ChildPolicyEvidence, ChildTailnetPolicy};
 use spurfire_protocol::{
-    canonical_keyreg_digest, canonical_manifest_digest, LobbyId, NetworkLifecycle, PlayerId,
-    ProvisioningMode, ResponseMetadata, RosterManifest, RosterManifestEntry, SessionPublicKey,
-    SessionSignature, TailnetDnsName, UnixMillis, DRY_RUN_AUTH_KEY,
+    LobbyId, NetworkLifecycle, ProvisioningMode, ResponseMetadata, TailnetDnsName, UnixMillis,
+    DRY_RUN_AUTH_KEY,
 };
 use spurfire_server::{
-    build_local_rehearsal_router, build_router, verify_local_rehearsal_receipt, AppState,
-    ChildPolicyStatus, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider, InMemoryStore,
-    JsonFileStore, LobbyStore, LocalRehearsalClaims, LocalRehearsalReceipt, ManualClock,
-    MintCredentialRequest, MintedCredential, NetworkProvider, ObserveNetworkRequest,
-    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
-    ProviderError, ProviderNetworkIdentity, RehearsalVerificationContext, SecretString,
-    TailnetPresenceRequest, LOCAL_REHEARSAL_AUDIENCE, REHEARSAL_POLICY_PROFILE,
-    REVIEWED_SOURCE_SHA,
+    build_router, verify_local_rehearsal_receipt, AppState, ChildPolicyStatus, CleanupLobbyRequest,
+    CleanupOutcome, Config, DryRunProvider, InMemoryStore, JsonFileStore, LobbyStore,
+    LocalRehearsalClaims, LocalRehearsalReceipt, ManualClock, MintCredentialRequest,
+    MintedCredential, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
+    ProviderCapabilities, ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity,
+    RehearsalVerificationContext, SecretString, TailnetPresenceRequest, LOCAL_REHEARSAL_AUDIENCE,
+    REHEARSAL_POLICY_PROFILE, REVIEWED_SOURCE_SHA,
 };
 use tower::ServiceExt;
 
@@ -1121,10 +1119,12 @@ async fn dedicated_cleanup_needs_two_exact_absence_polls_before_lease_release() 
 
     state.cleanup_expired_now().await;
     assert!(store.real_lobby_lease_held().await);
-    clock.advance(4_999);
+    // Mutable wall time cannot satisfy the safety interval. Only elapsed
+    // monotonic runtime advances the second provider observation gate.
+    clock.advance(60 * 60 * 1_000);
     state.cleanup_expired_now().await;
     assert!(store.real_lobby_lease_held().await);
-    clock.advance(1);
+    tokio::time::sleep(std::time::Duration::from_millis(5_000)).await;
     state.cleanup_expired_now().await;
     assert!(!store.real_lobby_lease_held().await);
 
@@ -1774,8 +1774,7 @@ async fn legacy_assertions_never_reach_real_provider_mutations() {
 }
 
 #[tokio::test]
-async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
-    let clock = Arc::new(ManualClock::new(UnixMillis::new(9_000_000)));
+async fn local_rehearsal_activation_is_globally_fail_closed() {
     let provider = Arc::new(RecordingProvider::available());
     let store = Arc::new(InMemoryStore::new());
     let config = Config {
@@ -1830,343 +1829,23 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
         },
     )
     .unwrap();
-    let state = AppState::new_local_rehearsal(config, store, provider, qualification)
-        .await
-        .unwrap()
-        .with_clock(clock.clone());
-    assert!(state.reconcile_startup().await);
-    let app = build_local_rehearsal_router(state);
-    let create_body = json!({
-        "display_name":"Secure High Noon",
-        "max_players":2
-    });
-    let (created_status, created) = json_request(
-        &app,
-        Method::POST,
-        "/local-rehearsal/v1/lobbies",
-        Some(create_body.clone()),
-        &[
-            ("idempotency-key", "secure-create"),
-            ("x-spurfire-player-id", PLAYER_1),
-        ],
-    )
-    .await;
-    assert_eq!(created_status, StatusCode::CREATED);
-    let lobby_id = created["lobby_id"].as_str().unwrap();
-    let creator_capability = created["creator_capability"]["token"].as_str().unwrap();
-
-    let (replay_status, replay) = json_request(
-        &app,
-        Method::POST,
-        "/local-rehearsal/v1/lobbies",
-        Some(create_body),
-        &[
-            ("idempotency-key", "secure-create"),
-            ("x-spurfire-player-id", PLAYER_1),
-        ],
-    )
-    .await;
-    assert_eq!(replay_status, StatusCode::OK);
-    assert!(replay.get("creator_capability").is_none());
-
-    let creator_authorization = format!("Spurfire-Capability {creator_capability}");
-    let (invitation_status, invitation) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/invitations"),
-        Some(json!({})),
-        &[("authorization", creator_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(invitation_status, StatusCode::CREATED, "{invitation:?}");
-    let invitation_token = invitation["invitation"]["token"].as_str().unwrap();
-    let invitation_authorization = format!("Spurfire-Capability {invitation_token}");
-    let join_body = json!({
-        "player_id":PLAYER_2,
-        "display_name":"Secure Rider",
-        "client_wire_version":"1.2",
-        "authority_formula_version":"election_v1"
-    });
-    let (join_status, joined) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/join"),
-        Some(join_body.clone()),
-        &[
-            ("idempotency-key", "secure-join"),
-            ("authorization", invitation_authorization.as_str()),
-        ],
-    )
-    .await;
-    assert_eq!(join_status, StatusCode::CREATED);
-    let participant_token = joined["participant_capability"]["token"].as_str().unwrap();
-    let participant_authorization = format!("Spurfire-Capability {participant_token}");
-
-    let (lobby_status, selected) = json_request(
-        &app,
-        Method::GET,
-        &format!("/v1/lobbies/{lobby_id}"),
-        None,
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(lobby_status, StatusCode::OK);
-    assert_eq!(selected["network_generation"], 1);
-    assert!(selected["roster_revision"].as_u64().unwrap() >= 2);
-    assert_eq!(selected["session"]["peers"], json!([]));
-
-    let session_signing = SigningKey::from_bytes(&[42; 32]);
-    let session_public = SessionPublicKey::from_bytes(session_signing.verifying_key().to_bytes());
-    let proof_digest = canonical_keyreg_digest(
-        LobbyId::parse(lobby_id).unwrap(),
-        PlayerId::parse(PLAYER_2).unwrap(),
-        selected["network_generation"].as_u64().unwrap(),
-        selected["roster_revision"].as_u64().unwrap(),
-        "100.64.0.10".parse().unwrap(),
-        41643,
-        session_public,
+    let second_store = Arc::new(InMemoryStore::new());
+    let (first, second) = tokio::join!(
+        AppState::new_local_rehearsal(
+            config.clone(),
+            store,
+            provider.clone(),
+            qualification.clone(),
+        ),
+        AppState::new_local_rehearsal(config, second_store, provider.clone(), qualification),
     );
-    let key_proof = SessionSignature::from_bytes(session_signing.sign(&proof_digest).to_bytes());
-    let endpoint_body = json!({
-        "network_generation": selected["network_generation"],
-        "roster_revision": selected["roster_revision"],
-        "sequence": 1,
-        "tailnet_address": "100.64.0.10",
-        "application_port": 41643,
-        "session_public_key": session_public,
-        "key_proof": key_proof,
-        "node_key": format!("nodekey:{}", "11".repeat(32))
-    });
-    let mut bad_proof = endpoint_body.clone();
-    bad_proof["key_proof"] = serde_json::to_value(SessionSignature::from_bytes([0; 64])).unwrap();
-    let (bad_status, bad_body) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
-        Some(bad_proof),
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(bad_status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(bad_body["code"], "session_key_proof_invalid");
-    let (endpoint_status, endpoint) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
-        Some(endpoint_body.clone()),
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(endpoint_status, StatusCode::OK);
-    assert_eq!(endpoint["session"]["peers"][0]["player_id"], PLAYER_2);
-    assert_eq!(
-        endpoint["session"]["peers"][0]["tailnet_address"],
-        "100.64.0.10"
-    );
-    assert_eq!(endpoint["session"]["secure"], true);
-    let manifest_public: SessionPublicKey =
-        serde_json::from_value(endpoint["session"]["manifest_public_key"].clone()).unwrap();
-    let manifest_signature: SessionSignature =
-        serde_json::from_value(endpoint["session"]["manifest_signature"].clone()).unwrap();
-    let manifest = RosterManifest {
-        lobby_id: LobbyId::parse(lobby_id).unwrap(),
-        network_generation: endpoint["session"]["network_generation"].as_u64().unwrap(),
-        session_generation: endpoint["session"]["session_generation"].as_u64().unwrap(),
-        roster_revision: endpoint["session"]["roster_revision"].as_u64().unwrap(),
-        entries: vec![RosterManifestEntry {
-            player_id: PlayerId::parse(PLAYER_2).unwrap(),
-            session_public_key: session_public,
-            tailnet_address: "100.64.0.10".parse().unwrap(),
-            application_port: 41643,
-            node_key: serde_json::from_value(endpoint["session"]["peers"][0]["node_key"].clone())
-                .unwrap(),
-        }],
-    };
-    assert_eq!(
-        serde_json::to_value(manifest.hash()).unwrap(),
-        endpoint["session"]["roster_hash"]
-    );
-    manifest_public
-        .verify_digest(
-            &canonical_manifest_digest(manifest_public, &manifest),
-            manifest_signature,
-        )
-        .unwrap();
-
-    let (endpoint_replay_status, endpoint_replay) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
-        Some(endpoint_body),
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(endpoint_replay_status, StatusCode::CONFLICT);
-    assert_eq!(endpoint_replay["code"], "endpoint_sequence_replayed");
-
-    // Client restart/key rotation recovery: once the cached record ages past
-    // the 60 s projection retention it is evicted, so the restarted client can
-    // register its fresh key even with a lower (previously process-relative)
-    // sequence, and the strictly-increasing replay gate immediately re-arms.
-    clock.advance(60_001);
-    let restarted_signing = SigningKey::from_bytes(&[43; 32]);
-    let restarted_public =
-        SessionPublicKey::from_bytes(restarted_signing.verifying_key().to_bytes());
-    let restarted_proof_digest = canonical_keyreg_digest(
-        LobbyId::parse(lobby_id).unwrap(),
-        PlayerId::parse(PLAYER_2).unwrap(),
-        selected["network_generation"].as_u64().unwrap(),
-        selected["roster_revision"].as_u64().unwrap(),
-        "100.64.0.10".parse().unwrap(),
-        41643,
-        restarted_public,
-    );
-    let restarted_proof =
-        SessionSignature::from_bytes(restarted_signing.sign(&restarted_proof_digest).to_bytes());
-    let restarted_body = json!({
-        "network_generation": selected["network_generation"],
-        "roster_revision": selected["roster_revision"],
-        "sequence": 0,
-        "tailnet_address": "100.64.0.10",
-        "application_port": 41643,
-        "session_public_key": restarted_public,
-        "key_proof": restarted_proof,
-    });
-    let (restart_status, restart_response) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
-        Some(restarted_body.clone()),
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(restart_status, StatusCode::OK);
-    assert_eq!(
-        restart_response["session"]["peers"][0]["session_public_key"],
-        serde_json::to_value(restarted_public).unwrap()
-    );
-    let (stale_replay_status, stale_replay) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/session/endpoint"),
-        Some(restarted_body),
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(stale_replay_status, StatusCode::CONFLICT);
-    assert_eq!(stale_replay["code"], "endpoint_sequence_replayed");
-
-    let (replay_join_status, replay_join) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/join"),
-        Some(join_body),
-        &[
-            ("idempotency-key", "secure-join"),
-            ("authorization", invitation_authorization.as_str()),
-        ],
-    )
-    .await;
-    assert_eq!(replay_join_status, StatusCode::OK);
-    assert!(replay_join.get("participant_capability").is_none());
-    assert!(replay_join["join_credential"].get("auth_key").is_none());
-
-    let (_, retry_invitation) = json_request(
-        &app,
-        Method::POST,
-        &format!("/v1/lobbies/{lobby_id}/invitations"),
-        Some(json!({})),
-        &[("authorization", creator_authorization.as_str())],
-    )
-    .await;
-    let retry_token = retry_invitation["invitation"]["token"].as_str().unwrap();
-    let retry_authorization = format!("Spurfire-Capability {retry_token}");
-    let invalid_join = json!({
-        "player_id":PLAYER_3,
-        "display_name":"Retry Rider",
-        "client_wire_version":"1.0",
-        "authority_formula_version":""
-    });
-    assert_eq!(
-        json_request(
-            &app,
-            Method::POST,
-            &format!("/v1/lobbies/{lobby_id}/join"),
-            Some(invalid_join),
-            &[
-                ("idempotency-key", "retry-invalid"),
-                ("authorization", retry_authorization.as_str()),
-            ],
-        )
-        .await
-        .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let valid_join = json!({
-        "player_id":PLAYER_3,
-        "display_name":"Retry Rider",
-        "client_wire_version":"1.0",
-        "authority_formula_version":"election_v1"
-    });
-    assert_eq!(
-        json_request(
-            &app,
-            Method::POST,
-            &format!("/v1/lobbies/{lobby_id}/join"),
-            Some(valid_join),
-            &[
-                ("idempotency-key", "retry-valid"),
-                ("authorization", retry_authorization.as_str()),
-            ],
-        )
-        .await
-        .0,
-        StatusCode::CREATED
-    );
-
-    assert_eq!(
-        json_request(
-            &app,
-            Method::POST,
-            &format!("/v1/lobbies/{lobby_id}/leave"),
-            Some(json!({"player_id": PLAYER_2})),
-            &[("authorization", participant_authorization.as_str())],
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &app,
-            Method::GET,
-            &format!("/v1/lobbies/{lobby_id}"),
-            None,
-            &[("authorization", participant_authorization.as_str())],
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
-
-    let (wrong_scope_status, wrong_scope) = json_request(
-        &app,
-        Method::DELETE,
-        &format!("/v1/lobbies/{lobby_id}"),
-        None,
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    let (missing_status, missing) = json_request(
-        &app,
-        Method::DELETE,
-        "/v1/lobbies/00000000-0000-4000-8000-000000000099",
-        None,
-        &[("authorization", participant_authorization.as_str())],
-    )
-    .await;
-    assert_eq!(wrong_scope_status, StatusCode::NOT_FOUND);
-    assert_eq!(wrong_scope_status, missing_status);
-    assert_eq!(wrong_scope, missing);
-    assert_eq!(wrong_scope["code"], "lobby_not_found");
+    assert!(matches!(
+        first,
+        Err(spurfire_server::store::StoreError::RehearsalDisabled)
+    ));
+    assert!(matches!(
+        second,
+        Err(spurfire_server::store::StoreError::RehearsalDisabled)
+    ));
+    assert_eq!(provider.mutation_count(), 0);
 }

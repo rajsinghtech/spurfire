@@ -567,10 +567,6 @@ pub struct MutationGatedProvider {
 enum MutationAuthorization {
     DenyAll,
     DeploymentWide,
-    LocalRehearsal {
-        lobby_id: LobbyId,
-        network_generation: u64,
-    },
 }
 
 impl MutationGatedProvider {
@@ -597,28 +593,11 @@ impl MutationGatedProvider {
         }
     }
 
-    /// Constructs exact receipt-bound authority for the dedicated rehearsal binary.
-    #[must_use]
-    pub fn local_rehearsal(
-        inner: Arc<dyn NetworkProvider>,
-        lobby_id: LobbyId,
-        network_generation: u64,
-        _expires_at: UnixMillis,
-    ) -> Self {
-        Self {
-            inner,
-            authorization: MutationAuthorization::LocalRehearsal {
-                lobby_id,
-                network_generation,
-            },
-        }
-    }
-
     fn require_exact(
         &self,
         dry_run: bool,
-        lobby_id: LobbyId,
-        network_generation: u64,
+        _lobby_id: LobbyId,
+        _network_generation: u64,
         _new_work: bool,
     ) -> Result<(), ProviderError> {
         if dry_run {
@@ -626,13 +605,7 @@ impl MutationGatedProvider {
         }
         match self.authorization {
             MutationAuthorization::DeploymentWide => Ok(()),
-            MutationAuthorization::LocalRehearsal {
-                lobby_id: expected_lobby,
-                network_generation: expected_generation,
-            } if lobby_id == expected_lobby && network_generation == expected_generation => Ok(()),
-            MutationAuthorization::DenyAll | MutationAuthorization::LocalRehearsal { .. } => {
-                Err(ProviderError::RealMutationsDisabled)
-            }
+            MutationAuthorization::DenyAll => Err(ProviderError::RealMutationsDisabled),
         }
     }
 }
@@ -1073,10 +1046,15 @@ impl NetworkProvider for TailscaleProvider {
             provider_tailnet_id: expected_id.to_owned(),
             tailnet_dns_name: identity.tailnet_dns_name.clone(),
         };
-        durable
-            .get_exact(&exact)
-            .map(|_| ())
-            .map_err(map_vault_error)
+        match durable.get_exact(&exact) {
+            Ok(_) => Ok(()),
+            Err(VaultError::Missing) if durable.has_erasure_receipt(&exact).unwrap_or(false) => {
+                // A crash after exact CAS erasure but before the lobby commit
+                // must retain cleanup-only recovery authority.
+                Ok(())
+            }
+            Err(error) => Err(map_vault_error(error)),
+        }
     }
 
     async fn reconcile_upstream_identities(
@@ -1492,8 +1470,22 @@ impl NetworkProvider for TailscaleProvider {
                         .delete_cas(&durable_identity, version)
                         .await
                         .map_err(map_vault_error)?;
+                    let verified_version = durable
+                        .verify_erased(&durable_identity)
+                        .await
+                        .map_err(map_vault_error)?;
+                    if verified_version != version {
+                        return Err(ProviderError::IdentityMismatch);
+                    }
                 }
-                Err(VaultError::Missing) => {}
+                Err(VaultError::Missing) => {
+                    // Missing ciphertext alone is not proof that custody ever
+                    // existed. Recovery requires the durable exact CAS receipt.
+                    durable
+                        .verify_erased(&durable_identity)
+                        .await
+                        .map_err(map_vault_error)?;
+                }
                 Err(error) => return Err(map_vault_error(error)),
             }
         }
@@ -2572,8 +2564,12 @@ mod tests {
             identity: recovered.identity.unwrap(),
         };
         restarted.erase_child_secret(erase.clone()).await.unwrap();
-        // Models a crash after durable erase but before the non-secret cleanup
-        // state commit: the retry must treat the exact missing tuple as erased.
+        // Models startup after durable erase but before the non-secret cleanup
+        // state commit: custody validation must preserve cleanup-only recovery.
+        restarted
+            .validate_child_custody(lobby_id, 7, &erase.identity)
+            .unwrap();
+        // The retry must treat the exact missing tuple plus receipt as erased.
         restarted.erase_child_secret(erase).await.unwrap();
         token.assert_async().await;
         child_token.assert_async().await;

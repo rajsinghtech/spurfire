@@ -174,6 +174,17 @@ The service fails closed for both modes. When real mutations are deliberately co
 
 The durable record retains stable provider ID, canonical FQDN, and network generation as one non-secret identity tuple. Deletion refuses every mismatch and never selects by display name.
 
+## Local rehearsal activation status
+
+Real local-rehearsal activation is intentionally disabled. The supervisor exits
+nonzero without spawning helpers, and the library constructor rejects activation
+before installing or consuming a receipt. This fail-closed posture remains until
+a single durable receipt fence, exact-HEAD worker attestation, persisted absolute
+deadline, cleanup-only restart authority, and supervisor-verifiable release proof
+are implemented together. The ordinary `spurfire-server` binary remains deny-all
+for real provider mutations. No caller-selected helper, inherited `TS_*` secret,
+or child exit status is accepted as rehearsal authority or cleanup evidence.
+
 ## Trust boundaries and production limits
 
 - Organization OAuth credentials, child OAuth pairs, and bearer tokens stay inside `spurfire-control`/`spurfire-server`; they are absent from public responses, durable records, logs, and diagnostic formatting.

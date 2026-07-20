@@ -75,6 +75,7 @@ pub struct LocalRehearsalQualification {
     pub(crate) lobby_id: LobbyId,
     pub(crate) network_generation: u64,
     pub(crate) expires_at: UnixMillis,
+    pub(crate) absolute_deadline: UnixMillis,
     pub(crate) participant_cap: u8,
     pub(crate) policy_profile_digest: [u8; 32],
 }
@@ -88,6 +89,11 @@ impl LocalRehearsalQualification {
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
+    }
+
+    #[must_use]
+    pub const fn absolute_deadline(&self) -> UnixMillis {
+        self.absolute_deadline
     }
 }
 
@@ -145,6 +151,7 @@ fn verify_inner(
         || context.now >= claims.expires_at
         || lifetime == 0
         || lifetime > MAX_RECEIPT_LIFETIME.as_millis() as u64
+        || claims.absolute_deadline <= context.now
         || claims.absolute_deadline > claims.expires_at.saturating_add(30_000)
     {
         return Err(RehearsalReceiptError::InvalidLifetime);
@@ -183,6 +190,7 @@ fn verify_inner(
         lobby_id: claims.lobby_id,
         network_generation: claims.network_generation,
         expires_at: claims.expires_at,
+        absolute_deadline: claims.absolute_deadline,
         participant_cap: claims.participant_cap,
         policy_profile_digest: domain_hash(
             b"spurfire-local-rehearsal-policy-v1\0",
@@ -272,12 +280,13 @@ mod tests {
     #[test]
     fn rejects_expired_wrong_sha_wrong_mode_and_replay_binding() {
         let (receipt, keys, context) = fixture(1_000_000);
-        for mutate in 0..4 {
+        for mutate in 0..5 {
             let mut candidate = receipt.clone();
             match mutate {
                 0 => candidate.claims.expires_at = UnixMillis::new(999_999),
                 1 => candidate.claims.source_sha = "0".repeat(40),
                 2 => candidate.claims.provisioning_mode = ProvisioningMode::SharedTailnet,
+                3 => candidate.claims.absolute_deadline = context.now,
                 _ => candidate.claims.boot_challenge_sha256 = "4".repeat(64),
             }
             // Re-sign to isolate claim validation from signature validation.
