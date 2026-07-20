@@ -280,6 +280,44 @@ func _check_airborne_yaw_limiter(failures: Array[String]) -> void:
 	var old_stalled_step := deg_to_rad(degrees_per_second) * (1.0 / 60.0 + 0.003)
 	if old_stalled_step <= deg_to_rad(6.05):
 		failures.append("airborne yaw regression cadence no longer reproduces the old spike")
+	# Render frames below the physics rate must receive the allowance for every elapsed
+	# physics tick. The previous implementation granted only 6 degrees per render frame,
+	# reducing a nominal 360 degrees/second turn to 120 or 180 degrees/second.
+	for render_hz in [20, 30]:
+		var yaw := 0.0
+		var target := deg_to_rad(179.0)
+		var elapsed_ticks := int(60.0 / float(render_hz))
+		var frame_count := int(render_hz / 5)
+		var previous_tick := 0
+		var current_tick := elapsed_ticks
+		var remaining_budget := 0.0
+		for frame in frame_count:
+			remaining_budget = RIDER_POSE_SCRIPT.yaw_budget_after_tick(
+				previous_tick,
+				current_tick,
+				tick_budget,
+				remaining_budget
+			)
+			var change: float = RIDER_POSE_SCRIPT.limited_yaw_change(
+				yaw,
+				target,
+				1.0 / float(render_hz),
+				degrees_per_second,
+				remaining_budget
+			)
+			remaining_budget -= absf(change)
+			previous_tick = current_tick
+			current_tick += elapsed_ticks
+			yaw = wrapf(yaw + change, -PI, PI)
+		var expected := deg_to_rad(degrees_per_second * float(frame_count) / float(render_hz))
+		if absf(yaw - expected) > deg_to_rad(0.001):
+			failures.append(
+				"%d Hz airborne yaw was %.2f degrees, expected %.2f after elapsed physics ticks" % [
+					render_hz,
+					rad_to_deg(yaw),
+					rad_to_deg(expected),
+				]
+			)
 	var scenarios := [
 		{"label": "right_clamped_1", "start": 0.0, "target": 75.0, "sign": 1.0},
 		{"label": "left_clamped_1", "start": 0.0, "target": -75.0, "sign": -1.0},

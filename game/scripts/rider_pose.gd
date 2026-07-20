@@ -16,7 +16,7 @@ var _remount_elapsed := -1.0
 var _visual_velocity := Vector3.ZERO
 var _has_rider_raw := false
 var _yaw_tick := -1
-var _yaw_step_spent := 0.0
+var _yaw_budget_remaining := 0.0
 var _cape: MeshInstance3D
 var _hat: Node3D
 
@@ -103,22 +103,40 @@ func _process(delta: float) -> void:
 
 func _apply_limited_yaw(wanted_local_yaw: float, delta: float) -> void:
 	var tick := Engine.get_physics_frames()
-	if tick != _yaw_tick:
-		_yaw_tick = tick
-		_yaw_step_spent = 0.0
 	var tick_budget := (
 		deg_to_rad(maximum_yaw_degrees_per_second)
 		/ maxf(float(Engine.physics_ticks_per_second), 1.0)
 	)
+	_yaw_budget_remaining = yaw_budget_after_tick(
+		_yaw_tick,
+		tick,
+		tick_budget,
+		_yaw_budget_remaining
+	)
+	_yaw_tick = tick
 	var applied := limited_yaw_change(
 		rotation.y,
 		wanted_local_yaw,
 		delta,
 		maximum_yaw_degrees_per_second,
-		tick_budget - _yaw_step_spent
+		_yaw_budget_remaining
 	)
 	rotation.y = wrapf(rotation.y + applied, -PI, PI)
-	_yaw_step_spent += absf(applied)
+	_yaw_budget_remaining = maxf(_yaw_budget_remaining - absf(applied), 0.0)
+
+static func yaw_budget_after_tick(
+	previous_tick: int,
+	current_tick: int,
+	tick_budget: float,
+	current_budget: float
+) -> float:
+	if previous_tick < 0:
+		return maxf(tick_budget, 0.0)
+	if current_tick == previous_tick:
+		return maxf(current_budget, 0.0)
+	# A render frame may span multiple physics ticks below 60 FPS or after a stall.
+	# Grant each elapsed tick its own allowance, but never bank an unused old allowance.
+	return float(maxi(current_tick - previous_tick, 1)) * maxf(tick_budget, 0.0)
 
 static func limited_yaw_change(
 	current_yaw: float,
@@ -181,7 +199,7 @@ func reset_pose_interpolation() -> void:
 
 func _reset_yaw_limiter() -> void:
 	_yaw_tick = -1
-	_yaw_step_spent = 0.0
+	_yaw_budget_remaining = 0.0
 
 func _is_teleport(raw_rider: Transform3D) -> bool:
 	if not _has_rider_raw:
