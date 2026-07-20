@@ -14,6 +14,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
+#[cfg(unix)]
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use spurfire_control::ChildOAuthCredentials;
@@ -391,6 +392,7 @@ impl EncryptedChildVault {
     }
 }
 
+#[cfg(unix)]
 fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let lock_path = PathBuf::from(format!("{}.lock", path.display()));
     let mut options = std::fs::OpenOptions::new();
@@ -405,6 +407,7 @@ fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 async fn read_key_file(path: &Path) -> Result<[u8; 32], VaultError> {
     #[cfg(unix)]
     {
@@ -495,6 +498,7 @@ fn decode_plaintext(bytes: &[u8]) -> Result<(Zeroizing<String>, Zeroizing<String
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn vault_persists_only_authenticated_ciphertext_and_cas_deletes() {
         let root = std::env::temp_dir().join(format!("spurfire-vault-{}", std::process::id()));
@@ -555,5 +559,14 @@ mod tests {
             Err(VaultError::Missing)
         ));
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn unsupported_platform_refuses_to_open_vault() {
+        assert!(matches!(
+            EncryptedChildVault::open("unused-vault", "unused-key").await,
+            Err(VaultError::Invalid)
+        ));
     }
 }
