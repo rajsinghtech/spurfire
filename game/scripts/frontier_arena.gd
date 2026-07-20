@@ -59,6 +59,11 @@ func _build_environment() -> void:
 		sun.directional_shadow_max_distance = 120.0
 
 func _build_flat_basin() -> void:
+	# The inherited builder's smaller BroadGround occupies the same plane and
+	# would create a visible rectangular seam plus duplicate floor collisions.
+	var broad_ground := get_node_or_null("TestCourse/BroadGround")
+	if broad_ground:
+		broad_ground.free()
 	var ground := StaticBody3D.new()
 	ground.name = "FrontierGround"
 	ground.position = Vector3(0.0, -0.3, 0.0)
@@ -80,7 +85,7 @@ func _restyle_measurement_fixtures() -> void:
 	if course == null:
 		return
 	for child in course.get_children():
-		var color := SAND_DARK
+		var color: Variant = null
 		if String(child.name).contains("Gate"):
 			color = RED
 		elif String(child.name).contains("Rough"):
@@ -89,6 +94,10 @@ func _restyle_measurement_fixtures() -> void:
 			color = ROCK
 		elif String(child.name).contains("Bridge") or String(child.name).contains("Fence"):
 			color = WOOD
+		if color == null:
+			# Keep authored safety/navigation colors on speed markers, slalom
+			# posts, turn circles, reset pads, and future unclassified fixtures.
+			continue
 		for grandchild in child.get_children():
 			if grandchild is MeshInstance3D:
 				(grandchild as MeshInstance3D).material_override = _material(color)
@@ -131,6 +140,7 @@ func _build_water_tower() -> void:
 	cylinder.material = _material(RED)
 	tank.mesh = cylinder
 	tower.add_child(tank)
+	tank.create_trimesh_collision()
 	var roof := MeshInstance3D.new()
 	roof.position = Vector3(0.0, 13.5, -72.0)
 	var cone := CylinderMesh.new()
@@ -141,6 +151,7 @@ func _build_water_tower() -> void:
 	cone.material = _material(CREAM)
 	roof.mesh = cone
 	tower.add_child(roof)
+	roof.create_trimesh_collision()
 
 func _build_cactus_flats() -> void:
 	var flats := _landmark("CactusFlats")
@@ -176,16 +187,29 @@ func _asset(parent: Node3D, scene: PackedScene, position: Vector3, yaw: float, l
 	node.position = position
 	node.rotation.y = yaw
 	parent.add_child(node)
+	# Curated GLBs are render-only. Generate static triangle collision for every
+	# mesh so horses, hitscan queries, and the SpringArm agree with the artwork.
+	for descendant in node.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := descendant as MeshInstance3D
+		if mesh_instance and mesh_instance.mesh:
+			mesh_instance.create_trimesh_collision()
 
 func _box(parent: Node3D, label: String, size: Vector3, position: Vector3, color: Color) -> void:
+	var body := StaticBody3D.new()
+	body.name = label
+	body.position = position
 	var instance := MeshInstance3D.new()
-	instance.name = label
-	instance.position = position
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	mesh.material = _material(color)
 	instance.mesh = mesh
-	parent.add_child(instance)
+	body.add_child(instance)
+	var collider := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	collider.shape = shape
+	body.add_child(collider)
+	parent.add_child(body)
 
 func _material(color: Color) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()

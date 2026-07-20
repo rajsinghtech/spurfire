@@ -4,6 +4,7 @@ class_name SpurfireCaptureGate
 signal quit_requested
 
 @export var camera_rig: Node
+@export var horse: Node
 @export var gameplay: Node
 @export var combat_input: Node
 
@@ -63,6 +64,8 @@ func _on_capture_state_changed(value: bool) -> void:
 	_set_gameplay_enabled(captured, false)
 
 func _set_gameplay_enabled(enabled: bool, suppress_button: bool) -> void:
+	if horse and horse.has_method("set_presentation_input_enabled"):
+		horse.call("set_presentation_input_enabled", enabled, suppress_button)
 	if gameplay and gameplay.has_method("set_presentation_input_enabled"):
 		gameplay.call("set_presentation_input_enabled", enabled, suppress_button)
 	if combat_input and combat_input.has_method("set_presentation_input_enabled"):

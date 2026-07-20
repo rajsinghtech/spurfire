@@ -5,7 +5,6 @@ signal capture_state_changed(captured: bool)
 signal mouse_delta_sampled(delta: Vector2)
 
 @export var target: Node3D
-@export var heading_target: Node3D
 @export var telemetry_source: Node
 @export_range(4.5, 6.5, 0.1) var chase_distance := 5.5
 @export var pivot_height := 2.2
@@ -16,11 +15,7 @@ signal mouse_delta_sampled(delta: Vector2)
 @export var teleport_guard_degrees := 120.0
 @export var anchor_response := 5.0
 
-const RECENTER_MIN_SPEED_MPS := 6.0
-const RECENTER_DELAY_SECONDS := 0.8
-const RECENTER_RATE_RADIANS := deg_to_rad(45.0)
 const STANCE_MOUNTED := 1
-const STANCE_MOUNTED_AIRBORNE := 2
 const STANCE_ANCHORS := {
 	1: 2.2,
 	2: 2.2,
@@ -33,13 +28,11 @@ const STANCE_ANCHORS := {
 var _world_yaw := 0.0
 var _pitch := deg_to_rad(-12.0)
 var _speed_fraction := 0.0
-var _speed_mps := 0.0
 var _yaw_rate_degs := 0.0
 var _stance_id := STANCE_MOUNTED
 var _current_anchor := 2.2
 var _last_raw_target := Transform3D.IDENTITY
 var _has_raw_target := false
-var _mouse_idle_seconds := 0.0
 var _frame_mouse_delta := Vector2.ZERO
 var _last_reported_capture := false
 var _capture_active := false
@@ -85,13 +78,11 @@ func _input(event: InputEvent) -> void:
 			deg_to_rad(35.0)
 		)
 		_frame_mouse_delta += motion.relative
-		_mouse_idle_seconds = 0.0
 		mouse_delta_sampled.emit(motion.relative)
 
 func request_capture() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_capture_active = true
-	_mouse_idle_seconds = 0.0
 	_emit_capture_if_changed(true)
 
 func release_capture(reason := "release") -> void:
@@ -114,7 +105,6 @@ func _process(delta: float) -> void:
 	_emit_capture_if_changed()
 	if not target or not is_finite(delta) or delta <= 0.0:
 		return
-	_mouse_idle_seconds += delta
 	var raw_target := target.global_transform
 	if not _transform_is_finite(raw_target):
 		return
@@ -127,19 +117,13 @@ func _process(delta: float) -> void:
 	_last_raw_target = raw_target
 	_has_raw_target = true
 
-	var look := Input.get_vector(&"camera_left", &"camera_right", &"camera_up", &"camera_down")
-	if look.length_squared() > 0.0001:
-		_world_yaw = wrapf(_world_yaw - look.x * stick_speed * delta, -PI, PI)
-		_pitch = clampf(_pitch - look.y * stick_speed * delta, deg_to_rad(-35.0), deg_to_rad(35.0))
-		_mouse_idle_seconds = 0.0
-	elif should_recenter(_stance_id, _speed_mps, _mouse_idle_seconds):
-		var heading := heading_target if heading_target else target
-		_world_yaw = recentered_yaw(
-			_world_yaw,
-			heading.global_basis.get_euler().y,
-			delta,
-			RECENTER_RATE_RADIANS
-		)
+	# Camera orientation is exclusively player-controlled. Never rotate the
+	# view toward horse heading; doing so can move mounted aim unexpectedly.
+	if is_captured():
+		var look := Input.get_vector(&"camera_left", &"camera_right", &"camera_up", &"camera_down")
+		if look.length_squared() > 0.0001:
+			_world_yaw = wrapf(_world_yaw - look.x * stick_speed * delta, -PI, PI)
+			_pitch = clampf(_pitch - look.y * stick_speed * delta, deg_to_rad(-35.0), deg_to_rad(35.0))
 
 	var wanted_anchor := float(STANCE_ANCHORS.get(_stance_id, pivot_height))
 	_current_anchor = lerpf(_current_anchor, wanted_anchor, 1.0 - exp(-maxf(anchor_response, 0.01) * delta))
@@ -163,16 +147,6 @@ func _process(delta: float) -> void:
 			"pitch_degrees": snappedf(rad_to_deg(_pitch), 0.01),
 		})
 		_frame_mouse_delta = Vector2.ZERO
-
-static func should_recenter(stance_id: int, speed_mps: float, idle_seconds: float) -> bool:
-	return (
-		stance_id in [STANCE_MOUNTED, STANCE_MOUNTED_AIRBORNE]
-		and speed_mps > RECENTER_MIN_SPEED_MPS
-		and idle_seconds >= RECENTER_DELAY_SECONDS
-	)
-
-static func recentered_yaw(current: float, target_yaw: float, delta: float, rate: float) -> float:
-	return rotate_toward(current, target_yaw, maxf(delta, 0.0) * maxf(rate, 0.0))
 
 func sample_target_transform() -> Transform3D:
 	if target == null:
@@ -208,7 +182,6 @@ static func _transform_is_finite(value: Transform3D) -> bool:
 
 func _on_telemetry(data: Dictionary) -> void:
 	_speed_fraction = float(data.get("speed_fraction", 0.0))
-	_speed_mps = float(data.get("speed_mps", 0.0))
 	_yaw_rate_degs = float(data.get("yaw_rate_degs", 0.0))
 	_stance_id = int(data.get("stance_id", _stance_id))
 

@@ -184,6 +184,8 @@ pub struct HorseController {
     is_retrievable: bool,
     #[var(no_set)]
     runout_distance_m: f64,
+    #[var(no_set)]
+    presentation_input_enabled: bool,
 
     kernel: HorseKernel,
     runout_kernel: HorseRunoutKernel,
@@ -308,6 +310,18 @@ impl HorseController {
         true
     }
 
+    /// Gate all locally sampled horse commands behind the capture UI. The
+    /// second argument matches the presentation-input API used by scripts;
+    /// mouse-button suppression is irrelevant to keyboard horse controls.
+    #[func]
+    pub fn set_presentation_input_enabled(&mut self, enabled: bool, _suppress_button: bool) {
+        self.presentation_input_enabled = enabled;
+        if !enabled {
+            self.back_tap_elapsed = f64::INFINITY;
+            self.back_double_tap_active = false;
+        }
+    }
+
     /// Restore the configured spawn marker synchronously. Course reset is an
     /// explicit censor/reset path, never normal horse retrieval.
     #[func]
@@ -399,6 +413,7 @@ impl ICharacterBody3D for HorseController {
             control_mode: 0,
             is_retrievable: false,
             runout_distance_m: 0.0,
+            presentation_input_enabled: false,
             kernel: HorseKernel::new(tuning, KernelVec3::ZERO, 0.0),
             runout_kernel: HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
                 .expect("M2 tick rate is nonzero"),
@@ -648,6 +663,15 @@ impl HorseController {
     }
 
     fn sample_input(&mut self, delta: f64) -> InputFrame {
+        // Do not even query just-pressed actions while the capture gate is
+        // closed: a focus transition must not consume or apply stale horse
+        // commands on either the ordinary or externally clocked 60 Hz path.
+        if !self.presentation_input_enabled {
+            self.back_tap_elapsed = f64::INFINITY;
+            self.back_double_tap_active = false;
+            return InputFrame::default();
+        }
+
         let input = Input::singleton();
         let forward = remap_deadzone(
             f64::from(input.get_action_strength(MOVE_FORWARD)),

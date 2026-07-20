@@ -277,10 +277,9 @@ aim_camera = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
 effects = NodePath("../../CombatEffects")
 combat_hud = NodePath("../../CombatLayer/CombatHUD")
 
-[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "heading_target", "telemetry_source")]
+[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "telemetry_source")]
 script = ExtResource("2_camera")
 target = NodePath("../Rider")
-heading_target = NodePath("../Horse")
 telemetry_source = NodePath("../Rider")
 
 [node name="PitchPivot" type="Node3D" parent="CameraRig"]
@@ -516,7 +515,8 @@ text = "W/S ride  •  A/D reins  •  Mouse aims  •  E dive / remount  •  M
 [node name="CaptureLayer" type="CanvasLayer" parent="."]
 layer = 20
 
-[node name="CaptureGate" parent="CaptureLayer" node_paths=PackedStringArray("camera_rig", "gameplay", "combat_input") instance=ExtResource("21_capture_gate")]
+[node name="CaptureGate" parent="CaptureLayer" node_paths=PackedStringArray("camera_rig", "horse", "gameplay", "combat_input") instance=ExtResource("21_capture_gate")]
 camera_rig = NodePath("../../CameraRig")
+horse = NodePath("../../Horse")
 gameplay = NodePath("../../M2Gameplay")
 combat_input = NodePath("../../Rider/CombatInput")

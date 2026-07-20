@@ -56,10 +56,11 @@ func _ready() -> void:
 	for path in REQUIRED_NODES:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
-	_check_capture_contract(course, failures)
+	await _check_capture_contract(course, failures)
 	await _check_frontier_arena_contract(course, failures)
 	# The remaining deterministic simulation scenarios drive InputMap directly;
 	# explicitly open the presentation gate after its dedicated assertions.
+	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
 	course.get_node("M2Gameplay").call("set_presentation_input_enabled", true, false)
 	course.get_node("Rider/CombatInput").call("set_presentation_input_enabled", true, false)
 	Input.action_press(&"scoreboard")
@@ -119,13 +120,18 @@ func _check_input_map(failures: Array[String]) -> void:
 func _check_capture_contract(course: Node, failures: Array[String]) -> void:
 	var gate := course.get_node("CaptureLayer/CaptureGate")
 	var camera_rig := course.get_node("CameraRig")
+	var horse := course.get_node("Horse")
 	var gameplay := course.get_node("M2Gameplay")
 	var combat := course.get_node("Rider/CombatInput")
 	if bool(gate.get("captured")):
 		failures.append("capture gate did not begin released")
+	if bool(horse.get("presentation_input_enabled")):
+		failures.append("horse input did not begin neutralized behind the capture gate")
 	gate.call("request_capture")
 	if not bool(gate.get("captured")) or int(gate.get("capture_count")) != 1:
 		failures.append("capture gate did not capture in one click")
+	if not bool(horse.get("presentation_input_enabled")):
+		failures.append("capture gate did not enable horse input")
 	if not bool(gameplay.get("_capture_button_blocked")) or not bool(combat.get("_capture_button_blocked")):
 		failures.append("capture click was not suppressed from movement/combat")
 	var yaw_before := float(camera_rig.get("_world_yaw"))
@@ -138,22 +144,44 @@ func _check_capture_contract(course: Node, failures: Array[String]) -> void:
 	escape.physical_keycode = KEY_ESCAPE
 	escape.pressed = true
 	camera_rig.call("_input", escape)
-	if bool(gate.get("captured")) or bool(gameplay.get("_presentation_input_enabled")):
-		failures.append("Escape did not release capture and neutralize gameplay")
+	if (
+		bool(gate.get("captured"))
+		or bool(horse.get("presentation_input_enabled"))
+		or bool(gameplay.get("_presentation_input_enabled"))
+		or bool(combat.get("_presentation_input_enabled"))
+	):
+		failures.append("Escape did not release capture and neutralize all gameplay input")
 	# A released Escape is intentionally a no-op; quitting is gate-button-only.
 	camera_rig.call("_input", escape)
 	if bool(gate.get("captured")):
 		failures.append("released Escape unexpectedly changed capture state")
-	for render_hz in [60, 120, 144]:
-		var yaw := deg_to_rad(90.0)
-		for _frame in int(2.0 * render_hz):
-			yaw = CAMERA_RIG_SCRIPT.recentered_yaw(yaw, 0.0, 1.0 / float(render_hz), deg_to_rad(45.0))
-		if absf(yaw) > 0.001:
-			failures.append("%d Hz recenter did not return 90 degrees within 2 seconds" % render_hz)
-	if CAMERA_RIG_SCRIPT.should_recenter(1, 13.0, 0.79):
-		failures.append("camera recentered before the 0.8 second idle contract")
-	if CAMERA_RIG_SCRIPT.should_recenter(6, 13.0, 2.0):
-		failures.append("on-foot camera incorrectly recenters behind the horse")
+	gate.call("request_capture")
+	camera_rig.call("_notification", NOTIFICATION_APPLICATION_FOCUS_OUT)
+	if (
+		bool(gate.get("captured"))
+		or bool(horse.get("presentation_input_enabled"))
+		or bool(gameplay.get("_presentation_input_enabled"))
+		or bool(combat.get("_presentation_input_enabled"))
+	):
+		failures.append("focus loss did not release capture and neutralize all gameplay input")
+	var gait_events: Array[int] = []
+	var gait_callback := func(_old_gait: int, new_gait: int): gait_events.append(new_gait)
+	horse.gait_changed.connect(gait_callback)
+	for action in [&"move_forward", &"steer_right", &"gait_up", &"jump", &"reset_horse"]:
+		Input.action_press(action)
+	for _frame in 3:
+		await get_tree().physics_frame
+	for action in [&"move_forward", &"steer_right", &"gait_up", &"jump", &"reset_horse"]:
+		Input.action_release(action)
+	horse.gait_changed.disconnect(gait_callback)
+	var horizontal_speed := Vector2(horse.velocity.x, horse.velocity.z).length()
+	if not gait_events.is_empty() or horizontal_speed > 0.05 or horse.velocity.y > 0.05:
+		failures.append("released horse applied movement, gait, jump, or reset input")
+	camera_rig.set("_world_yaw", deg_to_rad(90.0))
+	camera_rig.call("_on_telemetry", {"speed_mps": 13.0, "stance_id": STANCE_MOUNTED})
+	camera_rig.call("_process", 2.0)
+	if not is_equal_approx(float(camera_rig.get("_world_yaw")), deg_to_rad(90.0)):
+		failures.append("camera forced recenter after player stopped aiming")
 
 func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> void:
 	var packed := load("res://scenes/frontier_arena.tscn") as PackedScene
@@ -164,11 +192,21 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 	add_child(arena)
 	await get_tree().process_frame
 	for path in REQUIRED_NODES:
-		if not arena.has_node(path):
+		if path != "TestCourse/BroadGround" and not arena.has_node(path):
 			failures.append("frontier arena lost inherited node: %s" % path)
+	if arena.has_node("TestCourse/BroadGround"):
+		failures.append("frontier arena retained overlapping BroadGround")
 	for path in ["FrontierGround", "Corral", "MainStreet", "WaterTower", "CactusFlats", "DryWash", "TerracottaMesas"]:
 		if not arena.has_node(path):
 			failures.append("frontier arena missing landmark: %s" % path)
+			continue
+		var landmark := arena.get_node(path)
+		if landmark.find_children("*", "CollisionShape3D", true, false).is_empty():
+			failures.append("frontier arena landmark has no collision: %s" % path)
+	for fixture in ["SpeedMarker_-40", "SlalomPost_0", "TurnCircle_0", "SpawnPad", "CourseResetPad"]:
+		var fixture_mesh := arena.get_node("TestCourse/" + fixture).get_child(0) as MeshInstance3D
+		if fixture_mesh.material_override != null:
+			failures.append("frontier restyle erased authored fixture color: %s" % fixture)
 	for fixture in ["FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31", "JumpFence_0Rail", "BridgeDeck"]:
 		var expected := graybox.get_node("TestCourse/" + fixture) as Node3D
 		var actual := arena.get_node("TestCourse/" + fixture) as Node3D
