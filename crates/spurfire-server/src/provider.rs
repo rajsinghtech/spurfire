@@ -2255,6 +2255,7 @@ mod tests {
         delete.assert_async().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn policy_mismatch_deletes_before_mint_and_retains_encrypted_custody() {
         let root = std::env::temp_dir().join(format!(
@@ -2469,6 +2470,16 @@ mod tests {
         no_key.assert_async().await;
     }
 
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn unsupported_platform_cannot_construct_provider_encrypted_custody() {
+        assert!(matches!(
+            EncryptedChildVault::open("unused-provider-vault", "unused-provider-key").await,
+            Err(VaultError::Invalid)
+        ));
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn encrypted_vault_recovers_prepare_after_restart_without_second_create() {
         let root =
