@@ -26,6 +26,8 @@ func _ready() -> void:
 	_base_rotation_x = rotation.x
 	flash.visible = false
 	_apply_identity()
+	if muzzle == null:
+		muzzle = %Muzzle
 	_install_verified_art()
 	if controller != null:
 		bind_controller(controller)
