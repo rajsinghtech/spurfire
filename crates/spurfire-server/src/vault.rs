@@ -4,9 +4,10 @@
 //! variable. Durable JSON contains only exact identity metadata, nonce, and
 //! authenticated ciphertext. Plaintext is zeroized after encryption/decryption.
 
+#[cfg(unix)]
+use std::io::Read;
 use std::{
     collections::BTreeMap,
-    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -440,6 +441,21 @@ fn read_private_file(path: &Path, allow_missing: bool) -> Result<Option<Vec<u8>>
         .read_to_end(&mut bytes)
         .map_err(|_| VaultError::Io)?;
     Ok(Some(bytes))
+}
+
+#[cfg(not(unix))]
+fn validate_vault_parent(_path: &Path) -> Result<(), VaultError> {
+    Err(VaultError::Invalid)
+}
+
+#[cfg(not(unix))]
+fn validate_private_regular_file(_path: &Path) -> Result<(), VaultError> {
+    Err(VaultError::Invalid)
+}
+
+#[cfg(not(unix))]
+fn read_private_file(_path: &Path, _allow_missing: bool) -> Result<Option<Vec<u8>>, VaultError> {
+    Err(VaultError::Invalid)
 }
 
 #[cfg(unix)]
