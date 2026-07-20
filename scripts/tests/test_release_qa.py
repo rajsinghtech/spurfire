@@ -25,6 +25,7 @@ AGGREGATE = load_script("aggregate-playtest.py")
 LIFECYCLE = load_script("check-alpha-lifecycle-evidence.py")
 EVIDENCE = load_script("check-alpha-evidence.py")
 CANDIDATE = load_script("make-alpha-candidate-metadata.py")
+REHEARSAL_CANDIDATE = load_script("make-rehearsal-candidate-metadata.py")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -128,6 +129,67 @@ def run_candidate_metadata(source: Path, output: Path, *extra: str) -> subproces
 
 def base_record(event: str, session: str = "session-local-1") -> dict:
     return {"schema_version": 1, "build_commit": SHA, "session_id": session, "event_type": event}
+
+
+class RehearsalCandidateTests(unittest.TestCase):
+    def fixture(self, root: Path) -> tuple[Path, Path]:
+        source = root / "source"
+        output = root / "output"
+        source.mkdir()
+        archive = source / REHEARSAL_CANDIDATE.ARCHIVE
+        archive.write_bytes(b"fixed rehearsal archive")
+        record = {
+            "schema_version": 2,
+            "candidate_mode": "rehearsal",
+            "platform": "macos-universal",
+            "control_origin": REHEARSAL_CANDIDATE.APPROVED_REHEARSAL_ORIGIN,
+            "source_sha": SHA,
+            "archive": archive.name,
+            "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "launch_smoke_passed": True,
+            "signature": "ad_hoc",
+            "signing_trust": "untrusted",
+            "release_eligible": False,
+            "publication": "forbidden",
+        }
+        (source / "macos-rehearsal-trust.json").write_text(json.dumps(record), encoding="utf-8")
+        return source, output
+
+    def execute(self, source: Path, output: Path, origin: str | None = None) -> int:
+        return REHEARSAL_CANDIDATE.main([
+            "--input-dir", str(source),
+            "--output-dir", str(output),
+            "--source-sha", SHA,
+            "--control-origin", origin or REHEARSAL_CANDIDATE.APPROVED_REHEARSAL_ORIGIN,
+        ])
+
+    def test_exact_record_is_permanently_nonpublishing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = self.fixture(Path(temporary))
+            self.assertEqual(self.execute(source, output), 0)
+            manifest = json.loads((output / "rehearsal-candidate-manifest.json").read_text())
+            self.assertTrue(manifest["candidate_only"])
+            self.assertFalse(manifest["release_eligible"])
+            self.assertEqual(manifest["publication"], "forbidden")
+
+    def test_swapped_bindings_and_publish_attempts_are_rejected(self):
+        mutations = {
+            "control_origin": "https://evil.example",
+            "source_sha": "f" * 40,
+            "archive_sha256": "0" * 64,
+            "signature": "developer_id",
+            "signing_trust": "trusted",
+            "release_eligible": True,
+            "publication": "protected_manual_only",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                source, output = self.fixture(Path(temporary))
+                path = source / "macos-rehearsal-trust.json"
+                record = json.loads(path.read_text())
+                record[field] = value
+                path.write_text(json.dumps(record), encoding="utf-8")
+                self.assertEqual(self.execute(source, output), 1)
 
 
 class ReleaseMetadataTests(unittest.TestCase):

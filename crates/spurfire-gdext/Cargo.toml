@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Godot 4.7 horse locomotion GDExtension for Spurfire"
 
+[features]
+default = ["production-control-origin"]
+production-control-origin = []
+rehearsal-control-origin = []
+
 [lib]
 name = "spurfire_godot"
 crate-type = ["cdylib", "rlib"]

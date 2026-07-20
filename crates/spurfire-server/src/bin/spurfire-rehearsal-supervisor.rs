@@ -1,10 +1,10 @@
-//! Fail-closed placeholder for the local rehearsal supervisor.
+//! Default-inert launcher boundary for external rehearsal supervision.
 //!
-//! The former implementation accepted caller-selected helper executables and
-//! treated their exit status as cleanup proof. Until a pinned worker, durable
-//! deadline/lease, and supervisor-verifiable cleanup receipt exist, activation
-//! is deliberately unavailable. In particular, this binary never spawns a
-//! child and therefore never delegates inherited descriptors or ambient secrets.
+//! The durable fenced state machine, authenticated broker protocol, deadline,
+//! and crash-safe cleanup proof live in `spurfire_server::supervision`. This
+//! checked-in launcher intentionally exposes no activation arguments and never
+//! acquires ambient credentials. Activation requires a separately protected,
+//! fixed-artifact launcher integration; Windows remains unsupported.
 
 use clap::Parser;
 
@@ -13,15 +13,13 @@ const DISABLED_EXIT_CODE: i32 = 78;
 #[derive(Debug, Parser)]
 #[command(
     name = "spurfire-rehearsal-supervisor",
-    about = "Fail-closed placeholder; real rehearsal activation is unavailable"
+    about = "Default-inert rehearsal supervision boundary"
 )]
 struct Args {}
 
 fn main() {
     let _ = Args::parse();
-    eprintln!(
-        "local rehearsal activation is disabled pending durable attestation and cleanup recovery"
-    );
+    eprintln!("local rehearsal activation is inert; no protected launcher authority was supplied");
     std::process::exit(DISABLED_EXIT_CODE);
 }
 

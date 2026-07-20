@@ -16,7 +16,7 @@ use zeroize::Zeroize;
 /// Receipt audience. Changing semantics requires a new audience/version.
 pub const LOCAL_REHEARSAL_AUDIENCE: &str = "spurfire-local-rehearsal/v1";
 /// The reviewed source revision authorized for this one rehearsal implementation.
-pub const REVIEWED_SOURCE_SHA: &str = "e530f96809fd05d199fabf7f369fdef7fca7b85a";
+pub const REVIEWED_SOURCE_SHA: &str = "e89237ef04cdeb46eb9381d9766bbefeb3b458ee";
 /// Maximum receipt validity.
 pub const MAX_RECEIPT_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Only this restrictive policy profile may be rehearsed.

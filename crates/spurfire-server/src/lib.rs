@@ -13,6 +13,7 @@ pub mod provider;
 pub mod rehearsal;
 pub mod service;
 pub mod store;
+pub mod supervision;
 pub mod vault;
 
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -34,5 +35,9 @@ pub use service::{build_local_rehearsal_router, build_router, router, AppState};
 pub use store::{
     CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError,
     StoredCapabilityVerifier, StoredCredential, StoredLobby, StoredNetworkIdentity,
+};
+pub use supervision::{
+    run_cleanup, AbsenceObservation, BrokerRequest, CredentialBroker, Fence, LedgerStore,
+    Operation, OperationOutcome, SupervisedIdentity, SupervisionError, SupervisorLedger,
 };
 pub use vault::{ChildVaultIdentity, EncryptedChildVault, VaultError};

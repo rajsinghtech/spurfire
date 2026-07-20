@@ -29,7 +29,11 @@ tokio.workspace = true
 uuid = { version = "1", features = ["v4"] }
 zeroize.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [dev-dependencies]
 http-body-util = "0.1"
+tempfile = "3"
 mockito = "1"
 tower = { version = "0.5", features = ["util"] }

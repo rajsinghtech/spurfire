@@ -32,7 +32,28 @@ use serde_json::{json, Value};
 use spurfire_protocol::{LobbyId, PlayerId};
 use zeroize::{Zeroize, Zeroizing};
 
-pub(crate) const CONTROL_ORIGIN: &str = "https://spurfire.rajsingh.info";
+#[cfg(all(
+    feature = "production-control-origin",
+    feature = "rehearsal-control-origin"
+))]
+compile_error!("production and rehearsal control origins are mutually exclusive");
+#[cfg(not(any(
+    feature = "production-control-origin",
+    feature = "rehearsal-control-origin"
+)))]
+compile_error!("exactly one reviewed control-origin feature must be selected");
+
+#[allow(dead_code)]
+pub(crate) const PRODUCTION_CONTROL_ORIGIN: &str = "https://spurfire.rajsingh.info";
+#[allow(dead_code)]
+pub(crate) const REHEARSAL_CONTROL_ORIGIN: &str = "https://rehearsal.spurfire.rajsingh.info";
+#[cfg(feature = "production-control-origin")]
+pub(crate) const CONTROL_ORIGIN: &str = PRODUCTION_CONTROL_ORIGIN;
+#[cfg(all(
+    feature = "rehearsal-control-origin",
+    not(feature = "production-control-origin")
+))]
+pub(crate) const CONTROL_ORIGIN: &str = REHEARSAL_CONTROL_ORIGIN;
 const MAX_BODY: usize = 65_536;
 const SAFE_ERROR: &str = "Lobby unavailable or invite code invalid. Check the code and try again.";
 const JOIN_PREFIX: &[u8] = b"SPURFIRE1:";
@@ -682,6 +703,23 @@ fn build_client() -> Result<reqwest::Client, NativeLobbyError> {
         .map_err(|_| NativeLobbyError::Client)
 }
 
+fn validated_control_origin() -> Result<Url, NativeLobbyError> {
+    let origin = Url::parse(CONTROL_ORIGIN).map_err(|_| NativeLobbyError::Route)?;
+    if origin.scheme() != "https"
+        || origin.port().is_some()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.host_str().is_none()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || origin.as_str().strip_suffix('/') != Some(CONTROL_ORIGIN)
+    {
+        return Err(NativeLobbyError::Route);
+    }
+    Ok(origin)
+}
+
 fn exact_url(path: &str) -> Result<Url, NativeLobbyError> {
     if !path.starts_with('/')
         || path.starts_with("//")
@@ -693,7 +731,7 @@ fn exact_url(path: &str) -> Result<Url, NativeLobbyError> {
     {
         return Err(NativeLobbyError::Route);
     }
-    let origin = Url::parse(CONTROL_ORIGIN).map_err(|_| NativeLobbyError::Route)?;
+    let origin = validated_control_origin()?;
     let url = origin.join(path).map_err(|_| NativeLobbyError::Route)?;
     if url.scheme() != "https"
         || url.host_str() != origin.host_str()
@@ -1309,6 +1347,11 @@ mod tests {
 
     #[test]
     fn exact_origin_rejects_every_alternate_shape() {
+        assert!(validated_control_origin().is_ok());
+        #[cfg(feature = "production-control-origin")]
+        assert_eq!(CONTROL_ORIGIN, PRODUCTION_CONTROL_ORIGIN);
+        #[cfg(feature = "rehearsal-control-origin")]
+        assert_eq!(CONTROL_ORIGIN, REHEARSAL_CONTROL_ORIGIN);
         assert!(exact_url("/v1/capabilities").is_ok());
         for path in [
             "http://spurfire.rajsingh.info/v1/capabilities",
