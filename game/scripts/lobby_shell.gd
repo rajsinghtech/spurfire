@@ -1,6 +1,6 @@
 extends Control
 
-const COURSE_SCENE := preload("res://scenes/graybox_course.tscn")
+const COURSE_SCENE := preload("res://scenes/frontier_arena.tscn")
 const RANDOM_NAMES := ["Dusty", "Sundown", "Juniper", "Longshot", "Mesa", "Coyote", "Red Rock"]
 
 enum Screen { TITLE, WAITING, TEARDOWN, MATCH }
@@ -184,6 +184,7 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	if _course == null:
 		_course = COURSE_SCENE.instantiate()
 		add_child(_course)
+		_bind_capture_gate()
 		if _course is Node3D:
 			(_course as Node3D).visible = false
 	var rider := _course.get_node_or_null("Rider") as CharacterBody3D
@@ -351,13 +352,30 @@ func _start_match() -> void:
 	if _course is Node3D:
 		(_course as Node3D).visible = true
 	_show(Screen.MATCH)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _start_practice() -> void:
 	_course = COURSE_SCENE.instantiate()
 	add_child(_course)
+	_bind_capture_gate()
 	_show(Screen.MATCH)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+func _bind_capture_gate() -> void:
+	if _course == null:
+		return
+	var gate := _course.get_node_or_null("CaptureLayer/CaptureGate")
+	if gate and gate.has_signal(&"quit_requested"):
+		var callback := Callable(self, "_on_gameplay_quit_requested")
+		if not gate.is_connected(&"quit_requested", callback):
+			gate.connect(&"quit_requested", callback)
+
+func _on_gameplay_quit_requested() -> void:
+	if _lobby_id.is_empty():
+		_clear_and_quit()
+	else:
+		_quit_after_leave = true
+		_begin_leave()
 
 func _on_leave_pressed() -> void:
 	_begin_leave()

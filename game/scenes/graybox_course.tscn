@@ -1,4 +1,4 @@
-[gd_scene load_steps=38 format=3]
+[gd_scene load_steps=40 format=3]
 
 [ext_resource type="Script" path="res://scripts/course_builder.gd" id="1_course"]
 [ext_resource type="Script" path="res://scripts/camera_rig.gd" id="2_camera"]
@@ -20,6 +20,8 @@
 [ext_resource type="Script" path="res://scripts/m2_gameplay.gd" id="18_m2_gameplay"]
 [ext_resource type="Script" path="res://scripts/rider_pose.gd" id="19_rider_pose"]
 [ext_resource type="Script" path="res://scripts/gameplay_toast.gd" id="20_gameplay_toast"]
+[ext_resource type="PackedScene" path="res://ui/capture_gate.tscn" id="21_capture_gate"]
+[ext_resource type="PackedScene" path="res://combat/dust_fx.tscn" id="22_dust_fx"]
 
 [sub_resource type="Environment" id="Environment_graybox"]
 background_mode = 1
@@ -152,6 +154,10 @@ controller = NodePath("../Rider/WeaponController")
 
 [node name="CombatEffects" parent="." instance=ExtResource("14_effects")]
 
+[node name="DustFx" parent="." node_paths=PackedStringArray("horse", "rider") instance=ExtResource("22_dust_fx")]
+horse = NodePath("../Horse")
+rider = NodePath("../Rider")
+
 [node name="HorseSpawn" type="Marker3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 25)
 groups = ["respawn_anchor"]
@@ -271,9 +277,10 @@ aim_camera = NodePath("../../CameraRig/PitchPivot/SpringArm3D/Camera3D")
 effects = NodePath("../../CombatEffects")
 combat_hud = NodePath("../../CombatLayer/CombatHUD")
 
-[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "telemetry_source")]
+[node name="CameraRig" type="Node3D" parent="." node_paths=PackedStringArray("target", "heading_target", "telemetry_source")]
 script = ExtResource("2_camera")
 target = NodePath("../Rider")
+heading_target = NodePath("../Horse")
 telemetry_source = NodePath("../Rider")
 
 [node name="PitchPivot" type="Node3D" parent="CameraRig"]
@@ -356,6 +363,7 @@ replication = NodePath("../NetworkReplication")
 
 [node name="Panel" type="PanelContainer" parent="NetworkLayer"]
 offset_left = 20.0
+mouse_filter = 2
 offset_top = 305.0
 offset_right = 310.0
 offset_bottom = 345.0
@@ -375,6 +383,7 @@ text = "NET  OFFLINE  [TAB]"
 
 [node name="RosterPanel" type="PanelContainer" parent="NetworkLayer"]
 anchor_left = 0.5
+mouse_filter = 2
 anchor_right = 0.5
 offset_left = -295.0
 offset_top = 50.0
@@ -453,6 +462,7 @@ rider = NodePath("../Rider")
 
 [node name="Panel" type="PanelContainer" parent="HUD"]
 offset_left = 20.0
+mouse_filter = 2
 offset_top = 20.0
 offset_right = 510.0
 offset_bottom = 235.0
@@ -497,7 +507,16 @@ script = ExtResource("4_graph")
 
 [node name="Help" type="Label" parent="HUD"]
 offset_left = 20.0
+mouse_filter = 2
 offset_top = 250.0
 offset_right = 600.0
 offset_bottom = 315.0
-text = "W/S ride  •  A/D steer/sidestep  •  E dismount / Saddle Dive / remount  •  Mouse1 fire\nMouse2 aim  •  R reload  •  4/5/6 rifles  •  T reset  •  Hold TAB peer routes"
+text = "W/S ride  •  A/D reins  •  Mouse aims  •  E dive / remount  •  Mouse1 fire\nR reload  •  4/5/6 rifles  •  T reset  •  F3 diagnostics  •  Esc releases"
+
+[node name="CaptureLayer" type="CanvasLayer" parent="."]
+layer = 20
+
+[node name="CaptureGate" parent="CaptureLayer" node_paths=PackedStringArray("camera_rig", "gameplay", "combat_input") instance=ExtResource("21_capture_gate")]
+camera_rig = NodePath("../../CameraRig")
+gameplay = NodePath("../../M2Gameplay")
+combat_input = NodePath("../../Rider/CombatInput")

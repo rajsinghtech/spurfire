@@ -18,8 +18,11 @@ const ART_SCENES := [
 
 var _flash_frames := 0
 var _tick := 0
+var _visual_kick_degrees := 0.0
+var _base_rotation_x := 0.0
 
 func _ready() -> void:
+	_base_rotation_x = rotation.x
 	flash.visible = false
 	_apply_identity()
 	_install_verified_art()
@@ -55,6 +58,10 @@ func request_reload() -> Variant:
 		return controller.call("request_reload")
 	return false
 
+func _process(delta: float) -> void:
+	_visual_kick_degrees = move_toward(_visual_kick_degrees, 0.0, 100.0 * delta)
+	rotation.x = _base_rotation_x - deg_to_rad(_visual_kick_degrees)
+
 func _physics_process(_delta: float) -> void:
 	if _flash_frames > 0:
 		_flash_frames -= 1
@@ -65,6 +72,7 @@ func _on_shot_fired(_shot_tick: Variant, fired_weapon_id: Variant) -> void:
 		return
 	flash.visible = true
 	_flash_frames = 2
+	_visual_kick_degrees = 6.0
 
 func _install_verified_art() -> void:
 	var previous := get_node_or_null("WeaponArt")

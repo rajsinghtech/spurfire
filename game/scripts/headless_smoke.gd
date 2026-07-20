@@ -5,7 +5,7 @@ const CAMERA_RIG_SCRIPT := preload("res://scripts/camera_rig.gd")
 const REQUIRED_ACTIONS := [
 	&"move_forward", &"move_back", &"steer_left", &"steer_right",
 	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse", &"scoreboard",
-	&"combat_fire", &"combat_reload", &"combat_interact"
+	&"combat_fire", &"combat_reload", &"combat_interact", &"toggle_diagnostics"
 ]
 const REQUIRED_NODES := [
 	"Horse", "Horse/CollisionShape3D", "Rider", "Rider/CollisionShape3D",
@@ -20,7 +20,8 @@ const REQUIRED_NODES := [
 	"FrontierPropsWest", "FrontierPropsEast", "FeedbackLayer/StylizedFeedback",
 	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "RemoteRider", "NetworkReplication",
 	"GameplayEventLayer/GameplayToast/Notification", "HUD/Panel/Margin/VBox/RemountHint",
-	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows"
+	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows",
+	"CaptureLayer/CaptureGate", "DustFx/HoofDust", "DustFx/LandingDust"
 ]
 const STANCE_MOUNTED := 1
 const STANCE_MOUNTED_AIRBORNE := 2
@@ -55,6 +56,12 @@ func _ready() -> void:
 	for path in REQUIRED_NODES:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
+	_check_capture_contract(course, failures)
+	await _check_frontier_arena_contract(course, failures)
+	# The remaining deterministic simulation scenarios drive InputMap directly;
+	# explicitly open the presentation gate after its dedicated assertions.
+	course.get_node("M2Gameplay").call("set_presentation_input_enabled", true, false)
+	course.get_node("Rider/CombatInput").call("set_presentation_input_enabled", true, false)
 	Input.action_press(&"scoreboard")
 	await get_tree().process_frame
 	await get_tree().process_frame
@@ -104,6 +111,71 @@ func _check_input_map(failures: Array[String]) -> void:
 	e_event.physical_keycode = KEY_E
 	if not InputMap.event_is_action(e_event, &"combat_interact"):
 		failures.append("physical E is not mapped to combat_interact")
+	var f3_event := InputEventKey.new()
+	f3_event.physical_keycode = KEY_F3
+	if not InputMap.event_is_action(f3_event, &"toggle_diagnostics"):
+		failures.append("physical F3 is not mapped to toggle_diagnostics")
+
+func _check_capture_contract(course: Node, failures: Array[String]) -> void:
+	var gate := course.get_node("CaptureLayer/CaptureGate")
+	var camera_rig := course.get_node("CameraRig")
+	var gameplay := course.get_node("M2Gameplay")
+	var combat := course.get_node("Rider/CombatInput")
+	if bool(gate.get("captured")):
+		failures.append("capture gate did not begin released")
+	gate.call("request_capture")
+	if not bool(gate.get("captured")) or int(gate.get("capture_count")) != 1:
+		failures.append("capture gate did not capture in one click")
+	if not bool(gameplay.get("_capture_button_blocked")) or not bool(combat.get("_capture_button_blocked")):
+		failures.append("capture click was not suppressed from movement/combat")
+	var yaw_before := float(camera_rig.get("_world_yaw"))
+	var motion := InputEventMouseMotion.new()
+	motion.relative = Vector2(80.0, -20.0)
+	camera_rig.call("_input", motion)
+	if is_equal_approx(float(camera_rig.get("_world_yaw")), yaw_before):
+		failures.append("captured mouse motion did not reach CameraRig._input")
+	var escape := InputEventKey.new()
+	escape.physical_keycode = KEY_ESCAPE
+	escape.pressed = true
+	camera_rig.call("_input", escape)
+	if bool(gate.get("captured")) or bool(gameplay.get("_presentation_input_enabled")):
+		failures.append("Escape did not release capture and neutralize gameplay")
+	# A released Escape is intentionally a no-op; quitting is gate-button-only.
+	camera_rig.call("_input", escape)
+	if bool(gate.get("captured")):
+		failures.append("released Escape unexpectedly changed capture state")
+	for render_hz in [60, 120, 144]:
+		var yaw := deg_to_rad(90.0)
+		for _frame in int(2.0 * render_hz):
+			yaw = CAMERA_RIG_SCRIPT.recentered_yaw(yaw, 0.0, 1.0 / float(render_hz), deg_to_rad(45.0))
+		if absf(yaw) > 0.001:
+			failures.append("%d Hz recenter did not return 90 degrees within 2 seconds" % render_hz)
+	if CAMERA_RIG_SCRIPT.should_recenter(1, 13.0, 0.79):
+		failures.append("camera recentered before the 0.8 second idle contract")
+	if CAMERA_RIG_SCRIPT.should_recenter(6, 13.0, 2.0):
+		failures.append("on-foot camera incorrectly recenters behind the horse")
+
+func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> void:
+	var packed := load("res://scenes/frontier_arena.tscn") as PackedScene
+	if packed == null:
+		failures.append("frontier_arena.tscn could not be loaded")
+		return
+	var arena := packed.instantiate()
+	add_child(arena)
+	await get_tree().process_frame
+	for path in REQUIRED_NODES:
+		if not arena.has_node(path):
+			failures.append("frontier arena lost inherited node: %s" % path)
+	for path in ["FrontierGround", "Corral", "MainStreet", "WaterTower", "CactusFlats", "DryWash", "TerracottaMesas"]:
+		if not arena.has_node(path):
+			failures.append("frontier arena missing landmark: %s" % path)
+	for fixture in ["FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31", "JumpFence_0Rail", "BridgeDeck"]:
+		var expected := graybox.get_node("TestCourse/" + fixture) as Node3D
+		var actual := arena.get_node("TestCourse/" + fixture) as Node3D
+		if expected.transform != actual.transform:
+			failures.append("frontier arena moved smoke fixture: %s" % fixture)
+	arena.queue_free()
+	await get_tree().process_frame
 
 func _check_render_interpolation(failures: Array[String]) -> void:
 	if int(Engine.physics_ticks_per_second) != 60:

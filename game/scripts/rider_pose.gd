@@ -15,6 +15,8 @@ var _remount_from := Transform3D.IDENTITY
 var _remount_elapsed := -1.0
 var _visual_velocity := Vector3.ZERO
 var _has_rider_raw := false
+var _cape: MeshInstance3D
+var _hat: Node3D
 
 func _ready() -> void:
 	if rider == null:
@@ -25,6 +27,7 @@ func _ready() -> void:
 		_has_rider_raw = true
 	if rider and rider.has_signal(&"stance_changed"):
 		rider.stance_changed.connect(_on_stance_changed)
+	_build_frontier_silhouette()
 
 func _process(delta: float) -> void:
 	if rider == null or not is_finite(delta) or delta <= 0.0:
@@ -46,6 +49,7 @@ func _process(delta: float) -> void:
 		_remount_elapsed += delta
 		var alpha := clampf(_remount_elapsed / maxf(remount_blend_seconds, 0.001), 0.0, 1.0)
 		global_transform = _remount_from.interpolate_with(rider_sample, alpha)
+		rotation.x += sin(alpha * PI) * deg_to_rad(-22.0)
 		if alpha >= 1.0:
 			top_level = false
 			transform = Transform3D.IDENTITY
@@ -75,6 +79,12 @@ func _process(delta: float) -> void:
 			target_pitch = 0.0
 	rotation.x = lerp_angle(rotation.x, target_pitch, blend)
 	rotation.z = lerp_angle(rotation.z, 0.0, blend)
+	if _cape:
+		_cape.rotation.x = lerp_angle(_cape.rotation.x, deg_to_rad(18.0 + minf(horizontal, 14.0) * 2.2), blend)
+		_cape.rotation.z = sin(Time.get_ticks_msec() * 0.012) * minf(horizontal / 14.0, 1.0) * 0.08
+	if _hat:
+		var hat_tilt := deg_to_rad(14.0) if _stance_id in [4, 5] else 0.0
+		_hat.rotation.z = lerp_angle(_hat.rotation.z, hat_tilt, blend)
 
 	if _stance_id == 3 and horizontal > 0.01:
 		var wanted_global_yaw := atan2(-_visual_velocity.x, -_visual_velocity.z)
@@ -92,6 +102,42 @@ func _process(delta: float) -> void:
 			deg_to_rad(maximum_yaw_degrees_per_second) * delta
 		)
 	_last_global = global_transform
+
+func _build_frontier_silhouette() -> void:
+	var cream := StandardMaterial3D.new()
+	cream.albedo_color = Color("f5e9d0")
+	cream.roughness = 0.9
+	_hat = Node3D.new()
+	_hat.name = "FrontierHat"
+	_hat.position = Vector3(0.0, 2.13, 0.0)
+	var crown := MeshInstance3D.new()
+	var crown_mesh := CylinderMesh.new()
+	crown_mesh.top_radius = 0.19
+	crown_mesh.bottom_radius = 0.23
+	crown_mesh.height = 0.28
+	crown_mesh.radial_segments = 12
+	crown_mesh.material = cream
+	crown.mesh = crown_mesh
+	_hat.add_child(crown)
+	var brim := MeshInstance3D.new()
+	var brim_mesh := BoxMesh.new()
+	brim_mesh.size = Vector3(0.72, 0.05, 0.62)
+	brim_mesh.material = cream
+	brim.mesh = brim_mesh
+	brim.position.y = -0.14
+	_hat.add_child(brim)
+	add_child(_hat)
+	_cape = MeshInstance3D.new()
+	_cape.name = "SpeedCape"
+	_cape.position = Vector3(0.0, 1.34, 0.28)
+	var cape_mesh := BoxMesh.new()
+	cape_mesh.size = Vector3(0.72, 0.72, 0.045)
+	var cape_material := StandardMaterial3D.new()
+	cape_material.albedo_color = Color("c44536")
+	cape_material.roughness = 0.82
+	cape_mesh.material = cape_material
+	_cape.mesh = cape_mesh
+	add_child(_cape)
 
 func reset_pose_interpolation() -> void:
 	_remount_elapsed = -1.0

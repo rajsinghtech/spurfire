@@ -102,7 +102,7 @@ Verify:
 5. 1/2/3 switch horse archetypes; 4/5/6 switch rifles.
 6. The lower-left network panel says `NET OFFLINE` when no lobby join credential has been supplied. This is expected for local play.
 7. At grounded speed ≥8 m/s, press E to Saddle Dive; below 8 m/s, E performs an ordinary dismount. Verify the horse runs out and remains retrievable, airborne reload is blocked, recovery gates movement/fire, and remount does not teleport the horse.
-8. Escape releases the mouse; press Escape again to quit.
+8. Escape releases the mouse and opens the capture gate; click once to recapture. Escape never quits. Use the gate's `QUIT` button so network matches follow normal leave/cleanup.
 
 M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. Record real 15-minute sessions until the observational gates can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. Until evidence meets those bands, status stays **implementation complete / playtest pending**.
 

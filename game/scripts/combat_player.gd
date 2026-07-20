@@ -5,6 +5,8 @@ signal reload_input_result(accepted: bool, reason: String)
 signal network_shot_command(tick: int, command_json: String)
 
 var networked_match := false
+var _presentation_input_enabled := false
+var _capture_button_blocked := false
 
 @export var rider: CharacterBody3D
 @export var horse: CharacterBody3D
@@ -26,6 +28,10 @@ func _ready() -> void:
 ## Called exactly once by M2Gameplay after movement context is installed for the
 ## shared absolute tick and before rider/horse collision resolution.
 func process_combat_tick(tick: int) -> void:
+	if _capture_button_blocked and not Input.is_action_pressed(&"combat_fire"):
+		_capture_button_blocked = false
+	if not _presentation_input_enabled or _capture_button_blocked:
+		return
 	if Input.is_action_pressed(&"combat_fire"):
 		_fire_once(tick)
 	if Input.is_action_just_pressed(&"combat_reload") and rifle:
@@ -49,6 +55,10 @@ func process_combat_tick(tick: int) -> void:
 
 func set_networked_match(enabled: bool) -> void:
 	networked_match = enabled
+
+func set_presentation_input_enabled(enabled: bool, suppress_button := false) -> void:
+	_presentation_input_enabled = enabled
+	_capture_button_blocked = enabled and suppress_button
 
 func apply_network_shot_result(payload: Dictionary) -> void:
 	if controller and controller.has_method("apply_authority_result_json"):
