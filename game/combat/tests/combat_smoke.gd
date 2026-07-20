@@ -147,9 +147,10 @@ func _ready() -> void:
 		failures.append("rifle sidegrade identities are incorrect")
 	for key in ["rifle", "longspur", "rattler"]:
 		var rig: Node3D = loaded[key]
+		var authoritative_muzzle := rig.get_node("Muzzle") as Marker3D
 		var art_muzzle := rig.get_node("WeaponArt/Muzzle") as Marker3D
-		if rig.get("muzzle") != art_muzzle:
-			failures.append("%s effects are not bound to WeaponArt/Muzzle" % key)
+		if rig.get("muzzle") != authoritative_muzzle:
+			failures.append("%s changed the authoritative shot origin" % key)
 		if rig.get_node("%MuzzleFlash").get_parent() != art_muzzle:
 			failures.append("%s muzzle flash is detached from the installed art" % key)
 
@@ -170,8 +171,8 @@ func _ready() -> void:
 	combat_player._fire_once(84)
 	if tracer_effects.tracer_colors.is_empty() or tracer_effects.tracer_colors[-1] != (rifle.get("tracer_color") as Color):
 		failures.append("combat tracer did not use the equipped rifle color")
-	if not controller.last_shot_origin.is_equal_approx((rifle.get_node("WeaponArt/Muzzle") as Marker3D).global_position):
-		failures.append("fire command did not originate at the installed art muzzle")
+	if not controller.last_shot_origin.is_equal_approx((rifle.get_node("Muzzle") as Marker3D).global_position):
+		failures.append("fire command changed the authoritative fallback muzzle origin")
 
 	_check_native_api_if_available(failures)
 	await get_tree().process_frame

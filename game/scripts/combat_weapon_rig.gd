@@ -20,6 +20,7 @@ var _flash_frames := 0
 var _tick := 0
 var _visual_kick_degrees := 0.0
 var _base_rotation_x := 0.0
+var _visual_muzzle: Marker3D
 
 func _ready() -> void:
 	_base_rotation_x = rotation.x
@@ -88,8 +89,8 @@ func _install_verified_art() -> void:
 	var art := ART_SCENES[clampi(weapon_id, 0, 2)].instantiate() as Node3D
 	art.name = "WeaponArt"
 	add_child(art)
-	muzzle = art.get_node("Muzzle") as Marker3D
-	flash.reparent(muzzle, false)
+	_visual_muzzle = art.get_node("Muzzle") as Marker3D
+	flash.reparent(_visual_muzzle, false)
 	flash.position = Vector3.ZERO
 
 func _apply_identity() -> void:
@@ -115,12 +116,13 @@ func _apply_identity() -> void:
 	add_child(band)
 
 func _spawn_gunsmoke() -> void:
-	var previous := muzzle.get_node_or_null("Gunsmoke")
+	var smoke_muzzle := _visual_muzzle if _visual_muzzle != null else muzzle
+	var previous := smoke_muzzle.get_node_or_null("Gunsmoke")
 	if previous:
 		previous.queue_free()
 	var puff := Node3D.new()
 	puff.name = "Gunsmoke"
-	muzzle.add_child(puff)
+	smoke_muzzle.add_child(puff)
 	var material := StandardMaterial3D.new()
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
