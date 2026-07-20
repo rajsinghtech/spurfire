@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use async_trait::async_trait;
@@ -19,11 +22,14 @@ use spurfire_protocol::{
     SessionSignature, TailnetDnsName, UnixMillis, DRY_RUN_AUTH_KEY,
 };
 use spurfire_server::{
-    build_router, AppState, ChildPolicyStatus, CleanupLobbyRequest, CleanupOutcome, Config,
-    DryRunProvider, InMemoryStore, JsonFileStore, LobbyStore, ManualClock, MintCredentialRequest,
-    MintedCredential, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest, PreparedNetwork,
-    ProviderCapabilities, ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity,
-    SecretString, TailnetPresenceRequest,
+    build_local_rehearsal_router, build_router, verify_local_rehearsal_receipt, AppState,
+    ChildPolicyStatus, CleanupLobbyRequest, CleanupOutcome, Config, DryRunProvider, InMemoryStore,
+    JsonFileStore, LobbyStore, LocalRehearsalClaims, LocalRehearsalReceipt, ManualClock,
+    MintCredentialRequest, MintedCredential, NetworkProvider, ObserveNetworkRequest,
+    PrepareLobbyRequest, PreparedNetwork, ProviderCapabilities, ProviderDeviceObservation,
+    ProviderError, ProviderNetworkIdentity, RehearsalVerificationContext, SecretString,
+    TailnetPresenceRequest, LOCAL_REHEARSAL_AUDIENCE, REHEARSAL_POLICY_PROFILE,
+    REVIEWED_SOURCE_SHA,
 };
 use tower::ServiceExt;
 
@@ -1775,19 +1781,61 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let config = Config {
         real_mutations_enabled: true,
         real_admission_enabled: true,
-        test_only_alpha_runtime_qualified: true,
         provisioning_mode: ProvisioningMode::TailnetPerLobby,
         shared_tailnet: "shared-test.ts.net".to_owned(),
         ..Config::default()
     };
-    let state = AppState::new(config, store, provider).with_clock(clock.clone());
-    assert!(state.reconcile_startup().await);
-    let grant = state
-        .issue_real_create_grant(UnixMillis::new(9_600_000))
+    let signing = SigningKey::from_bytes(&[19; 32]);
+    let executable_sha256 = [1; 32];
+    let provenance_sha256 = [2; 32];
+    let boot_challenge_sha256 = [3; 32];
+    let hex = |bytes: &[u8; 32]| bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let assigned_lobby = LobbyId::parse("00000000-0000-4000-8000-000000000019").unwrap();
+    let claims = LocalRehearsalClaims {
+        audience: LOCAL_REHEARSAL_AUDIENCE.into(),
+        receipt_id: "0123456789abcdef0123456789abcdef".into(),
+        source_sha: REVIEWED_SOURCE_SHA.into(),
+        executable_sha256: hex(&executable_sha256),
+        provenance_sha256: hex(&provenance_sha256),
+        boot_challenge_sha256: hex(&boot_challenge_sha256),
+        owner_key_id: "test-owner".into(),
+        issued_at: UnixMillis::new(9_000_000),
+        expires_at: UnixMillis::new(9_300_000),
+        listener: config.bind_addr.to_string(),
+        expected_peer_uid: 501,
+        lobby_id: assigned_lobby,
+        network_generation: 1,
+        provisioning_mode: ProvisioningMode::TailnetPerLobby,
+        policy_profile: REHEARSAL_POLICY_PROFILE.into(),
+        participant_cap: 2,
+        absolute_deadline: UnixMillis::new(9_330_000),
+        hosted: false,
+        purpose: "local_rehearsal".into(),
+    };
+    let signature = signing
+        .sign(&serde_json::to_vec(&claims).unwrap())
+        .to_bytes()
+        .to_vec();
+    let mut receipt = serde_json::to_vec(&LocalRehearsalReceipt { claims, signature }).unwrap();
+    let qualification = verify_local_rehearsal_receipt(
+        &mut receipt,
+        &BTreeMap::from([("test-owner".into(), signing.verifying_key())]),
+        &RehearsalVerificationContext {
+            now: UnixMillis::new(9_000_000),
+            executable_sha256,
+            provenance_sha256,
+            boot_challenge_sha256,
+            listener: config.bind_addr,
+            peer_uid: 501,
+        },
+    )
+    .unwrap();
+    let state = AppState::new_local_rehearsal(config, store, provider, qualification)
         .await
-        .unwrap();
-    let app = build_router(state);
-    let grant_authorization = format!("Spurfire-Capability {}", grant.expose_token());
+        .unwrap()
+        .with_clock(clock.clone());
+    assert!(state.reconcile_startup().await);
+    let app = build_local_rehearsal_router(state);
     let create_body = json!({
         "display_name":"Secure High Noon",
         "max_players":2
@@ -1795,12 +1843,11 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let (created_status, created) = json_request(
         &app,
         Method::POST,
-        "/v1/lobbies",
+        "/local-rehearsal/v1/lobbies",
         Some(create_body.clone()),
         &[
             ("idempotency-key", "secure-create"),
             ("x-spurfire-player-id", PLAYER_1),
-            ("authorization", grant_authorization.as_str()),
         ],
     )
     .await;
@@ -1811,12 +1858,11 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
     let (replay_status, replay) = json_request(
         &app,
         Method::POST,
-        "/v1/lobbies",
+        "/local-rehearsal/v1/lobbies",
         Some(create_body),
         &[
             ("idempotency-key", "secure-create"),
             ("x-spurfire-player-id", PLAYER_1),
-            ("authorization", grant_authorization.as_str()),
         ],
     )
     .await;
@@ -1832,7 +1878,7 @@ async fn secure_alpha_capabilities_are_one_use_scoped_and_non_enumerating() {
         &[("authorization", creator_authorization.as_str())],
     )
     .await;
-    assert_eq!(invitation_status, StatusCode::CREATED);
+    assert_eq!(invitation_status, StatusCode::CREATED, "{invitation:?}");
     let invitation_token = invitation["invitation"]["token"].as_str().unwrap();
     let invitation_authorization = format!("Spurfire-Capability {invitation_token}");
     let join_body = json!({

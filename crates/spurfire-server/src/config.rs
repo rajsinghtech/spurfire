@@ -39,12 +39,6 @@ pub struct Config {
     /// loaded from the environment and must remain false in the server binary.
     #[doc(hidden)]
     pub test_only_allow_legacy_real_mutations: bool,
-    /// Test-harness escape hatch for exercising the future real Alpha contract.
-    /// Production readiness remains closed until the native secret handoff,
-    /// authenticated coherent P2P runtime, restrictive policy, persistent abuse
-    /// controls, and live qualification are implemented.
-    #[doc(hidden)]
-    pub test_only_alpha_runtime_qualified: bool,
     /// Encrypted dynamic child-vault file (required when real mutations are enabled).
     pub child_vault_path: PathBuf,
     /// File containing exactly 32 raw bytes or 64 hex characters; never an env value.
@@ -70,7 +64,6 @@ impl Default for Config {
             allow_legacy_client_assertions: false,
             trust_forwarded_for: false,
             test_only_allow_legacy_real_mutations: false,
-            test_only_alpha_runtime_qualified: false,
             child_vault_path: PathBuf::from(".spurfire/child-vault.json"),
             child_vault_key_path: PathBuf::from(".spurfire/child-vault.key"),
             shared_tailnet: DEFAULT_SHARED_TAILNET.to_owned(),
@@ -96,7 +89,6 @@ impl fmt::Debug for Config {
             )
             .field("trust_forwarded_for", &self.trust_forwarded_for)
             .field("test_only_allow_legacy_real_mutations", &false)
-            .field("test_only_alpha_runtime_qualified", &false)
             .field("child_vault_path", &self.child_vault_path)
             .field("child_vault_key_path", &"<configured-key-file>")
             .field("shared_tailnet", &"<configured>")

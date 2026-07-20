@@ -58,6 +58,7 @@ use crate::{
         ObserveNetworkRequest, PrepareLobbyRequest, ProviderError, ProviderNetworkIdentity,
         TailnetPresenceRequest,
     },
+    rehearsal::LocalRehearsalQualification,
     store::{
         apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
         StoredCapabilityVerifier, StoredCredential, StoredIssuanceReservation, StoredJoinAttempt,
@@ -241,6 +242,7 @@ pub struct AppState {
     provider_limit: Arc<Semaphore>,
     abuse: Arc<Mutex<AbuseState>>,
     startup_reconciled: Arc<AtomicBool>,
+    local_rehearsal: Option<Arc<LocalRehearsalQualification>>,
 }
 
 impl AppState {
@@ -265,7 +267,43 @@ impl AppState {
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
+            local_rehearsal: None,
         }
+    }
+
+    /// Creates state for the ordinary server binary. Real provider mutations
+    /// remain denied regardless of environment/config booleans.
+    #[must_use]
+    pub fn new_deny_all(
+        config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+    ) -> Self {
+        let mut state = Self::new(config, store, Arc::clone(&provider));
+        state.provider = Arc::new(MutationGatedProvider::deny_all(provider));
+        state
+    }
+
+    /// Installs one verified receipt and constructs exact rehearsal authority.
+    /// Only the dedicated local-rehearsal binary calls this path.
+    pub async fn new_local_rehearsal(
+        config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+        qualification: LocalRehearsalQualification,
+    ) -> Result<Self, crate::store::StoreError> {
+        store
+            .install_local_rehearsal_receipt(&qualification)
+            .await?;
+        let gated = Arc::new(MutationGatedProvider::local_rehearsal(
+            provider,
+            qualification.lobby_id,
+            qualification.network_generation,
+            qualification.expires_at,
+        ));
+        let mut state = Self::new(config, store, gated);
+        state.local_rehearsal = Some(Arc::new(qualification));
+        Ok(state)
     }
 
     /// Replaces the wall clock, normally for deterministic tests.
@@ -635,8 +673,7 @@ impl fmt::Debug for AppState {
     }
 }
 
-/// Builds the complete HTTP router.
-pub fn build_router(state: AppState) -> Router {
+fn route_set() -> Router<AppState> {
     Router::new()
         .route("/", get(landing))
         .route("/inspect", get(inspect_shell))
@@ -681,7 +718,11 @@ pub fn build_router(state: AppState) -> Router {
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(64 * 1_024))
         .layer(from_fn(capture_verified_peer_ip))
-        .with_state(state)
+}
+
+/// Builds the complete HTTP router.
+pub fn build_router(state: AppState) -> Router {
+    route_set().with_state(state)
 }
 
 async fn capture_verified_peer_ip(mut request: Request<axum::body::Body>, next: Next) -> Response {
@@ -695,6 +736,17 @@ async fn capture_verified_peer_ip(mut request: Request<axum::body::Body>, next: 
         }
     }
     next.run(request).await
+}
+
+/// Builds the dedicated local operator router. The ordinary router never
+/// exposes this receipt-bound create endpoint.
+pub fn build_local_rehearsal_router(state: AppState) -> Router {
+    route_set()
+        .route(
+            "/local-rehearsal/v1/lobbies",
+            post(create_local_rehearsal_lobby),
+        )
+        .with_state(state)
 }
 
 /// Alias that reads naturally in embedders.
@@ -808,6 +860,23 @@ async fn create_lobby(
     headers: HeaderMap,
     payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    create_lobby_impl(state, headers, payload, false).await
+}
+
+async fn create_local_rehearsal_lobby(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    create_lobby_impl(state, headers, payload, true).await
+}
+
+async fn create_lobby_impl(
+    state: AppState,
+    headers: HeaderMap,
+    payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
+    local_operator: bool,
+) -> Result<Response, ApiError> {
     enforce_mutation_budget(&state, &headers).await?;
     enforce_route_budget(&state, &headers, true).await?;
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
@@ -844,7 +913,7 @@ async fn create_lobby(
     } else if legacy_real_test_mode {
         request.provisioning_mode
     } else {
-        if !real_creation_authorized(&state) {
+        if !real_creation_authorized(&state) || local_operator != state.local_rehearsal.is_some() {
             return Err(ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "real_admission_closed",
@@ -875,10 +944,22 @@ async fn create_lobby(
             .await
             .map_err(|error| store_api_error(&error, false))?;
         Some(generated.verifier)
+    } else if local_operator {
+        Some(
+            state
+                .local_rehearsal
+                .as_ref()
+                .ok_or_else(|| lobby_not_found(false))?
+                .receipt_verifier,
+        )
     } else {
         Some(capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?)
     };
-    let lobby_id = new_lobby_id();
+    let lobby_id = state
+        .local_rehearsal
+        .as_ref()
+        .filter(|_| local_operator)
+        .map_or_else(new_lobby_id, |qualification| qualification.lobby_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let absolute_ttl_ms = if effective_dry_run {
         state.config.dry_run_ttl_ms()
@@ -2643,9 +2724,14 @@ fn real_creation_authorized(state: &AppState) -> bool {
     state.config.real_mutations_enabled
         && state.config.real_admission_enabled
         && !state.config.allow_legacy_client_assertions
+        && !state.config.trust_forwarded_for
+        && state.config.bind_addr.ip().is_loopback()
         && state.config.provisioning_mode == ProvisioningMode::TailnetPerLobby
         && state.startup_reconciled.load(Ordering::Acquire)
-        && state.config.test_only_alpha_runtime_qualified
+        && state
+            .local_rehearsal
+            .as_ref()
+            .is_some_and(|qualification| state.clock.now() < qualification.expires_at)
         && state
             .provider
             .cached_capabilities()
@@ -4167,7 +4253,8 @@ fn store_api_error(error: &crate::store::StoreError, dry_run: bool) -> ApiError 
             "real provider mutations are disabled by the independent safety switch",
         )
         .dry_run(dry_run),
-        crate::store::StoreError::InvalidCreateGrant => lobby_not_found(false),
+        crate::store::StoreError::InvalidCreateGrant
+        | crate::store::StoreError::InvalidRehearsalReceipt => lobby_not_found(false),
         crate::store::StoreError::RealLobbyCapacityReached => ApiError::new(
             StatusCode::CONFLICT,
             "real_lobby_capacity_reached",

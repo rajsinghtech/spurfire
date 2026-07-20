@@ -12,13 +12,16 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use spurfire_protocol::{
     AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby,
-    LobbyCapabilityScope, LobbyId, LobbyState, NetworkLifecycle, PlayerId, TailnetDnsName,
-    UnixMillis,
+    LobbyCapabilityScope, LobbyId, LobbyState, NetworkLifecycle, PlayerId, ProvisioningMode,
+    TailnetDnsName, UnixMillis,
 };
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
 
-use crate::crypto::{constant_time_eq, sha256};
+use crate::{
+    crypto::{constant_time_eq, sha256},
+    rehearsal::LocalRehearsalQualification,
+};
 
 /// Idempotency records and destroyed tombstones are retained for 24 hours.
 pub const IDEMPOTENCY_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -515,6 +518,33 @@ struct StoredCreateGrant {
     consumed_at: Option<UnixMillis>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredLocalRehearsalReceipt {
+    verifier: [u8; 32],
+    receipt_id_digest: [u8; 32],
+    lobby_id: LobbyId,
+    network_generation: u64,
+    expires_at: UnixMillis,
+    participant_cap: u8,
+    policy_profile_digest: [u8; 32],
+    consumed_at: Option<UnixMillis>,
+}
+
+impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
+    fn from(value: &LocalRehearsalQualification) -> Self {
+        Self {
+            verifier: value.receipt_verifier,
+            receipt_id_digest: value.receipt_id_digest,
+            lobby_id: value.lobby_id,
+            network_generation: value.network_generation,
+            expires_at: value.expires_at,
+            participant_cap: value.participant_cap,
+            policy_profile_digest: value.policy_profile_digest,
+            consumed_at: None,
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct StoreData {
     #[serde(default)]
@@ -527,6 +557,8 @@ struct StoreData {
     real_creation_quarantined: bool,
     #[serde(default)]
     real_create_grants: Vec<StoredCreateGrant>,
+    #[serde(default)]
+    local_rehearsal_receipt: Option<StoredLocalRehearsalReceipt>,
 }
 
 /// Store failures that indicate an internal consistency or persistence error.
@@ -553,6 +585,9 @@ pub enum StoreError {
     /// The one-use real-create grant was absent, invalid, expired, or consumed.
     #[error("real create grant invalid")]
     InvalidCreateGrant,
+    /// The typed local-rehearsal receipt was incompatible or already installed.
+    #[error("local rehearsal receipt invalid")]
+    InvalidRehearsalReceipt,
     /// Durable state could not be read or replaced.
     #[error("durable lobby state I/O failed")]
     Io,
@@ -564,6 +599,12 @@ pub enum StoreError {
 /// Persistence boundary used by the HTTP service.
 #[async_trait]
 pub trait LobbyStore: Send + Sync {
+    /// Durably installs one verified, hash-only local rehearsal receipt.
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError>;
+
     /// Durably records a hash-only operator-issued real-create grant.
     async fn issue_real_create_grant(
         &self,
@@ -651,6 +692,14 @@ impl fmt::Debug for InMemoryStore {
 
 #[async_trait]
 impl LobbyStore for InMemoryStore {
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        install_rehearsal_in_data(&mut data, qualification)
+    }
+
     async fn issue_real_create_grant(
         &self,
         verifier: [u8; 32],
@@ -800,6 +849,18 @@ impl fmt::Debug for JsonFileStore {
 
 #[async_trait]
 impl LobbyStore for JsonFileStore {
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        let mut next = data.clone();
+        install_rehearsal_in_data(&mut next, qualification)?;
+        self.commit(&next).await?;
+        *data = next;
+        Ok(())
+    }
+
     async fn issue_real_create_grant(
         &self,
         verifier: [u8; 32],
@@ -906,6 +967,21 @@ impl PartialEq for StoreData {
     }
 }
 
+fn install_rehearsal_in_data(
+    data: &mut StoreData,
+    qualification: &LocalRehearsalQualification,
+) -> Result<(), StoreError> {
+    if data.local_rehearsal_receipt.is_some()
+        || data.real_lobby_lease.is_some()
+        || data.real_creation_quarantined
+        || data.lobbies.values().any(|lobby| !lobby.dry_run)
+    {
+        return Err(StoreError::InvalidRehearsalReceipt);
+    }
+    data.local_rehearsal_receipt = Some(qualification.into());
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_in_data(
     data: &mut StoreData,
@@ -946,16 +1022,30 @@ fn create_in_data(
             return Err(StoreError::RealLobbyCapacityReached);
         }
         let candidate = real_create_grant.ok_or(StoreError::InvalidCreateGrant)?;
-        let grant = data
-            .real_create_grants
-            .iter_mut()
-            .find(|grant| {
-                grant.consumed_at.is_none()
-                    && now < grant.expires_at
-                    && constant_time_eq(&grant.verifier, &candidate)
-            })
-            .ok_or(StoreError::InvalidCreateGrant)?;
-        grant.consumed_at = Some(now);
+        if let Some(receipt) = data.local_rehearsal_receipt.as_mut() {
+            if receipt.consumed_at.is_some()
+                || now >= receipt.expires_at
+                || receipt.lobby_id != lobby.lobby.lobby_id
+                || receipt.network_generation != lobby.network_generation
+                || lobby.lobby.provisioning_mode != ProvisioningMode::TailnetPerLobby
+                || lobby.lobby.max_players > receipt.participant_cap
+                || !constant_time_eq(&receipt.verifier, &candidate)
+            {
+                return Err(StoreError::InvalidRehearsalReceipt);
+            }
+            receipt.consumed_at = Some(now);
+        } else {
+            let grant = data
+                .real_create_grants
+                .iter_mut()
+                .find(|grant| {
+                    grant.consumed_at.is_none()
+                        && now < grant.expires_at
+                        && constant_time_eq(&grant.verifier, &candidate)
+                })
+                .ok_or(StoreError::InvalidCreateGrant)?;
+            grant.consumed_at = Some(now);
+        }
         data.real_lobby_lease = Some(RealLobbyLease {
             holder_lobby_id: lobby.lobby.lobby_id,
             network_generation: lobby.network_generation,
@@ -1520,6 +1610,68 @@ mod tests {
         let mut retained = store.get(first_id).await.unwrap();
         retained.network_lifecycle = NetworkLifecycle::CreateUnknown;
         store.replace(retained).await.unwrap();
+        assert!(store.real_lobby_lease_held().await);
+    }
+
+    #[tokio::test]
+    async fn rehearsal_receipt_is_exact_singleton_and_atomically_consumed() {
+        let store = InMemoryStore::new();
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000019").unwrap();
+        let qualification = LocalRehearsalQualification {
+            receipt_verifier: [8; 32],
+            receipt_id_digest: [9; 32],
+            lobby_id,
+            network_generation: 1,
+            expires_at: UnixMillis::new(1_000),
+            participant_cap: 8,
+            policy_profile_digest: [10; 32],
+        };
+        store
+            .install_local_rehearsal_receipt(&qualification)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .create(
+                    "wrong-id".into(),
+                    b"wrong".to_vec(),
+                    player_id(),
+                    UnixMillis::new(10),
+                    real_record("00000000-0000-4000-8000-000000000018"),
+                    Some([8; 32]),
+                    true,
+                )
+                .await
+                .unwrap_err(),
+            StoreError::InvalidRehearsalReceipt
+        );
+
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let first = real_record("00000000-0000-4000-8000-000000000019");
+        let second = first.clone();
+        let (a, b) = tokio::join!(
+            first_store.create(
+                "concurrent-a".into(),
+                b"same".to_vec(),
+                player_id(),
+                UnixMillis::new(20),
+                first,
+                Some([8; 32]),
+                true,
+            ),
+            second_store.create(
+                "concurrent-b".into(),
+                b"same".to_vec(),
+                player_id(),
+                UnixMillis::new(20),
+                second,
+                Some([8; 32]),
+                true,
+            )
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert_eq!(store.len().await, 1);
         assert!(store.real_lobby_lease_held().await);
     }
 

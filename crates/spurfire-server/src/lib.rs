@@ -10,6 +10,7 @@ pub mod config;
 mod crypto;
 pub mod error;
 pub mod provider;
+pub mod rehearsal;
 pub mod service;
 pub mod store;
 pub mod vault;
@@ -24,7 +25,12 @@ pub use provider::{
     ProviderDeviceObservation, ProviderError, ProviderNetworkIdentity, SecretString,
     TailnetPresenceRequest, TailscaleProvider,
 };
-pub use service::{build_router, router, AppState};
+pub use rehearsal::{
+    verify_local_rehearsal_receipt, LocalRehearsalClaims, LocalRehearsalQualification,
+    LocalRehearsalReceipt, RehearsalReceiptError, RehearsalVerificationContext,
+    LOCAL_REHEARSAL_AUDIENCE, REHEARSAL_POLICY_PROFILE, REVIEWED_SOURCE_SHA,
+};
+pub use service::{build_local_rehearsal_router, build_router, router, AppState};
 pub use store::{
     CreateStoreOutcome, InMemoryStore, JsonFileStore, LobbyStore, StoreError,
     StoredCapabilityVerifier, StoredCredential, StoredLobby, StoredNetworkIdentity,

@@ -25,12 +25,6 @@ struct Args {
     /// Override SPURFIRE_STATE_PATH for durable non-secret state.
     #[arg(long)]
     state_path: Option<PathBuf>,
-    /// Offline operator action: issue one hash-only, one-use real-create grant.
-    #[arg(long)]
-    issue_real_create_grant: bool,
-    /// Lifetime for an offline-issued grant (60..=900 seconds).
-    #[arg(long, default_value_t = 600)]
-    grant_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -60,28 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Arc::new(JsonFileStore::open(config.state_path.clone()).await?)
     };
-    if args.issue_real_create_grant {
-        if args.grant_ttl_secs < 60 || args.grant_ttl_secs > 900 || !config.real_mutations_enabled {
-            return Err(
-                "grant issuance requires real mutations configured and a 60..=900 second TTL"
-                    .into(),
-            );
-        }
-        let state = AppState::new(
-            config.clone(),
-            Arc::clone(&store),
-            Arc::new(DryRunProvider::new()),
-        );
-        let expires_at = spurfire_protocol::UnixMillis::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis() as u64,
-        )
-        .saturating_add(args.grant_ttl_secs * 1_000);
-        let grant = state.issue_real_create_grant(expires_at).await?;
-        println!("{}", serde_json::to_string(&grant)?);
-        return Ok(());
-    }
     let provider: Arc<dyn NetworkProvider> = if config.force_dry_run {
         Arc::new(DryRunProvider::new())
     } else if config.real_mutations_enabled {
@@ -98,23 +70,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Arc::new(TailscaleProvider::from_env(config.shared_tailnet.clone()).await?)
     };
-    let capabilities = provider.refresh_capabilities().await;
-    let state = AppState::new(config.clone(), store, provider);
-    let reconciled = state.reconcile_startup().await;
+    let _capabilities = provider.refresh_capabilities().await;
+    // The ordinary binary has no constructor path for rehearsal authority.
+    // Environment/config booleans cannot open a real provider mutation path.
+    let state = AppState::new_deny_all(config.clone(), store, provider);
+    let _reconciled = state.reconcile_startup().await;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let reaper = tokio::spawn(expiry_reaper(state.clone()));
 
     eprintln!(
-        "spurfire-server listening on {} (mode={:?}, dry_run={}, real_mutations_enabled={}, selected_mode_ready={})",
+        "spurfire-server listening on {} (mode={:?}, dry_run={}, effective_real_mutations=false, selected_mode_ready={})",
         config.bind_addr,
         config.provisioning_mode,
         config.force_dry_run,
-        config.real_mutations_enabled,
         config.force_dry_run
-            || (config.real_mutations_enabled
-                && config.real_admission_enabled
-                && reconciled
-                && capabilities.mode_available(config.provisioning_mode))
     );
     let result = axum::serve(
         listener,

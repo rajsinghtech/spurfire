@@ -21,6 +21,7 @@ getrandom = "0.2"
 fs2 = "0.4.3"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 spurfire-control = { path = "../spurfire-control" }
 spurfire-protocol = { path = "../spurfire-protocol" }
 thiserror.workspace = true

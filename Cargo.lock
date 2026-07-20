@@ -3550,6 +3550,7 @@ dependencies = [
  "mockito",
  "serde",
  "serde_json",
+ "sha2",
  "spurfire-control",
  "spurfire-protocol",
  "thiserror 2.0.18",

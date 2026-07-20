@@ -560,24 +560,79 @@ pub trait NetworkProvider: Send + Sync {
 /// simulated requests continue to work with the real gate disabled.
 pub struct MutationGatedProvider {
     inner: Arc<dyn NetworkProvider>,
-    real_mutations_enabled: bool,
+    authorization: MutationAuthorization,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MutationAuthorization {
+    DenyAll,
+    DeploymentWide,
+    LocalRehearsal {
+        lobby_id: LobbyId,
+        network_generation: u64,
+    },
 }
 
 impl MutationGatedProvider {
-    /// Wraps a provider with the immutable process-wide mutation decision.
+    /// Legacy deployment-wide wrapper retained for tests and non-binary embedders.
+    /// The ordinary `spurfire-server` binary uses [`Self::deny_all`].
     #[must_use]
     pub fn new(inner: Arc<dyn NetworkProvider>, real_mutations_enabled: bool) -> Self {
         Self {
             inner,
-            real_mutations_enabled,
+            authorization: if real_mutations_enabled {
+                MutationAuthorization::DeploymentWide
+            } else {
+                MutationAuthorization::DenyAll
+            },
         }
     }
 
-    fn require_allowed(&self, dry_run: bool) -> Result<(), ProviderError> {
-        if dry_run || self.real_mutations_enabled {
-            Ok(())
-        } else {
-            Err(ProviderError::RealMutationsDisabled)
+    /// Constructs the immutable gate used by the ordinary server binary.
+    #[must_use]
+    pub fn deny_all(inner: Arc<dyn NetworkProvider>) -> Self {
+        Self {
+            inner,
+            authorization: MutationAuthorization::DenyAll,
+        }
+    }
+
+    /// Constructs exact receipt-bound authority for the dedicated rehearsal binary.
+    #[must_use]
+    pub fn local_rehearsal(
+        inner: Arc<dyn NetworkProvider>,
+        lobby_id: LobbyId,
+        network_generation: u64,
+        _expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            inner,
+            authorization: MutationAuthorization::LocalRehearsal {
+                lobby_id,
+                network_generation,
+            },
+        }
+    }
+
+    fn require_exact(
+        &self,
+        dry_run: bool,
+        lobby_id: LobbyId,
+        network_generation: u64,
+        _new_work: bool,
+    ) -> Result<(), ProviderError> {
+        if dry_run {
+            return Ok(());
+        }
+        match self.authorization {
+            MutationAuthorization::DeploymentWide => Ok(()),
+            MutationAuthorization::LocalRehearsal {
+                lobby_id: expected_lobby,
+                network_generation: expected_generation,
+            } if lobby_id == expected_lobby && network_generation == expected_generation => Ok(()),
+            MutationAuthorization::DenyAll | MutationAuthorization::LocalRehearsal { .. } => {
+                Err(ProviderError::RealMutationsDisabled)
+            }
         }
     }
 }
@@ -586,7 +641,7 @@ impl fmt::Debug for MutationGatedProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MutationGatedProvider")
-            .field("real_mutations_enabled", &self.real_mutations_enabled)
+            .field("authorization", &self.authorization)
             .field("inner", &"<network-provider>")
             .finish()
     }
@@ -609,10 +664,8 @@ impl NetworkProvider for MutationGatedProvider {
         network_lifecycle: NetworkLifecycle,
         dry_run: bool,
     ) -> Option<ProviderError> {
-        self.require_allowed(dry_run).err().or_else(|| {
-            self.inner
-                .lobby_access_error(lobby_id, mode, network_lifecycle, dry_run)
-        })
+        self.inner
+            .lobby_access_error(lobby_id, mode, network_lifecycle, dry_run)
     }
 
     fn validate_child_custody(
@@ -636,7 +689,12 @@ impl NetworkProvider for MutationGatedProvider {
         &self,
         request: PrepareLobbyRequest,
     ) -> Result<PreparedNetwork, ProviderError> {
-        self.require_allowed(request.dry_run)?;
+        self.require_exact(
+            request.dry_run,
+            request.lobby_id,
+            request.network_generation,
+            true,
+        )?;
         self.inner.prepare_lobby(request).await
     }
 
@@ -644,7 +702,12 @@ impl NetworkProvider for MutationGatedProvider {
         &self,
         request: MintCredentialRequest,
     ) -> Result<MintedCredential, ProviderError> {
-        self.require_allowed(request.dry_run)?;
+        self.require_exact(
+            request.dry_run,
+            request.lobby_id,
+            request.network_generation,
+            true,
+        )?;
         self.inner.mint_credential(request).await
     }
 
@@ -652,7 +715,12 @@ impl NetworkProvider for MutationGatedProvider {
         &self,
         request: CleanupLobbyRequest,
     ) -> Result<CleanupOutcome, ProviderError> {
-        self.require_allowed(request.dry_run)?;
+        self.require_exact(
+            request.dry_run,
+            request.lobby_id,
+            request.network_generation,
+            false,
+        )?;
         self.inner.cleanup_lobby(request).await
     }
 
@@ -667,7 +735,7 @@ impl NetworkProvider for MutationGatedProvider {
         &self,
         request: TailnetPresenceRequest,
     ) -> Result<(), ProviderError> {
-        self.require_allowed(false)?;
+        self.require_exact(false, request.lobby_id, request.network_generation, false)?;
         self.inner.erase_child_secret(request).await
     }
 
