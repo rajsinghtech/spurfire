@@ -41,6 +41,20 @@ childVault:
   key: vault.key
   mountPath: /var/run/secrets/spurfire/vault.key
 
+# Separate, receipt-gated execution plane. This mode is mutually exclusive with
+# the ordinary dry-run container and has no environment activation switch.
+protectedAlpha:
+  enabled: false
+  authorizedLobbyId: ""
+  publicOrigin: ""
+  internalSocket: /run/spurfire/alpha.sock
+  receiptSecret: ""
+  receiptKey: receipt.json
+  credentialSecret: ""
+  credentialKey: organization-oauth.json
+  vaultKeySecret: ""
+  vaultKey: vault.key
+
 # Cached one-lobby network-summary timing contract. Collection is performed by
 # background workers; an inspection GET must never trigger provider I/O.
 networkSummary:

@@ -20,7 +20,7 @@ use tokio::{io::AsyncWriteExt, sync::RwLock};
 
 use crate::{
     crypto::{constant_time_eq, sha256},
-    rehearsal::LocalRehearsalQualification,
+    rehearsal::{LocalRehearsalQualification, ProtectedAlphaQualification},
 };
 
 /// Idempotency records and destroyed tombstones are retained for 24 hours.
@@ -544,6 +544,57 @@ fn default_rehearsal_deadline() -> UnixMillis {
     UnixMillis::new(u64::MAX)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredProtectedAlphaReceipt {
+    verifier: [u8; 32],
+    receipt_id_digest: [u8; 32],
+    lobby_id: LobbyId,
+    network_generation: u64,
+    store_instance_id_sha256: [u8; 32],
+    canonical_state_path_sha256: [u8; 32],
+    supervisor_run_id_digest: [u8; 32],
+    initial_epoch: u64,
+    expires_at: UnixMillis,
+    final_io_deadline: UnixMillis,
+    absolute_deadline: UnixMillis,
+    participant_cap: u8,
+    worker_sha256: [u8; 32],
+    broker_sha256: [u8; 32],
+    provenance_sha256: [u8; 32],
+    artifact_set_sha256: [u8; 32],
+    policy_profile_digest: [u8; 32],
+    public_origin_digest: [u8; 32],
+    internal_listener_digest: [u8; 32],
+    consumed_at: Option<UnixMillis>,
+}
+
+impl From<&ProtectedAlphaQualification> for StoredProtectedAlphaReceipt {
+    fn from(value: &ProtectedAlphaQualification) -> Self {
+        Self {
+            verifier: value.receipt_verifier,
+            receipt_id_digest: value.receipt_id_digest,
+            lobby_id: value.lobby_id,
+            network_generation: value.network_generation,
+            store_instance_id_sha256: value.store_instance_id_sha256,
+            canonical_state_path_sha256: value.canonical_state_path_sha256,
+            supervisor_run_id_digest: value.supervisor_run_id_digest,
+            initial_epoch: value.initial_epoch,
+            expires_at: value.expires_at,
+            final_io_deadline: value.final_io_deadline,
+            absolute_deadline: value.absolute_deadline,
+            participant_cap: value.participant_cap,
+            worker_sha256: value.worker_sha256,
+            broker_sha256: value.broker_sha256,
+            provenance_sha256: value.provenance_sha256,
+            artifact_set_sha256: value.artifact_set_sha256,
+            policy_profile_digest: value.policy_profile_digest,
+            public_origin_digest: value.public_origin_digest,
+            internal_listener_digest: value.internal_listener_digest,
+            consumed_at: None,
+        }
+    }
+}
+
 impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
     fn from(value: &LocalRehearsalQualification) -> Self {
         Self {
@@ -560,8 +611,31 @@ impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// Non-secret challenge supplied by an already-open store before an Alpha
+/// receipt is signed. Moving or copying a durable state image changes the path
+/// digest and therefore cannot replay admission authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreBinding {
+    pub instance_id_sha256: [u8; 32],
+    pub canonical_state_path_sha256: [u8; 32],
+}
+
+/// Non-secret restart authority with no create or mint verifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedAlphaRecovery {
+    pub lobby_id: LobbyId,
+    pub network_generation: u64,
+    pub supervisor_run_id_digest: [u8; 32],
+    pub initial_epoch: u64,
+    pub absolute_deadline: UnixMillis,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct StoreData {
+    #[serde(default)]
+    store_instance_id: [u8; 32],
+    #[serde(default)]
+    canonical_state_path_sha256: [u8; 32],
     #[serde(default)]
     lobbies: BTreeMap<LobbyId, StoredLobby>,
     #[serde(default)]
@@ -574,6 +648,26 @@ struct StoreData {
     real_create_grants: Vec<StoredCreateGrant>,
     #[serde(default)]
     local_rehearsal_receipt: Option<StoredLocalRehearsalReceipt>,
+    #[serde(default)]
+    protected_alpha_receipt: Option<StoredProtectedAlphaReceipt>,
+}
+
+impl Default for StoreData {
+    fn default() -> Self {
+        let mut instance = [0_u8; 32];
+        getrandom::getrandom(&mut instance).expect("operating system randomness is required");
+        Self {
+            store_instance_id: instance,
+            canonical_state_path_sha256: [0; 32],
+            lobbies: BTreeMap::new(),
+            create_replays: BTreeMap::new(),
+            real_lobby_lease: None,
+            real_creation_quarantined: false,
+            real_create_grants: Vec::new(),
+            local_rehearsal_receipt: None,
+            protected_alpha_receipt: None,
+        }
+    }
 }
 
 /// Store failures that indicate an internal consistency or persistence error.
@@ -617,10 +711,24 @@ pub enum StoreError {
 /// Persistence boundary used by the HTTP service.
 #[async_trait]
 pub trait LobbyStore: Send + Sync {
+    /// Returns the persistent random instance and canonical path binding used
+    /// as a pre-signing challenge. This contains no bearer authority.
+    async fn store_binding(&self) -> StoreBinding;
+
+    /// Loads cleanup-only authority after consumption. It carries no admission verifier.
+    async fn protected_alpha_recovery(&self) -> Option<ProtectedAlphaRecovery>;
+
     /// Durably installs one verified, hash-only local rehearsal receipt.
     async fn install_local_rehearsal_receipt(
         &self,
         qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError>;
+
+    /// Installs one store-bound Alpha receipt. Consumption remains part of the
+    /// same atomic create transaction that reserves the exact lobby and lease.
+    async fn install_protected_alpha_receipt(
+        &self,
+        qualification: &ProtectedAlphaQualification,
     ) -> Result<(), StoreError>;
 
     /// Durably records a hash-only operator-issued real-create grant.
@@ -671,9 +779,25 @@ pub trait LobbyStore: Send + Sync {
 }
 
 /// Process-local store backed by an `Arc<RwLock<...>>`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryStore {
     inner: Arc<RwLock<StoreData>>,
+}
+
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        let mut data = StoreData::default();
+        data.canonical_state_path_sha256 = sha256(
+            &[
+                b"spurfire-in-memory-store-v1\0".as_slice(),
+                data.store_instance_id.as_slice(),
+            ]
+            .concat(),
+        );
+        Self {
+            inner: Arc::new(RwLock::new(data)),
+        }
+    }
 }
 
 impl InMemoryStore {
@@ -710,12 +834,39 @@ impl fmt::Debug for InMemoryStore {
 
 #[async_trait]
 impl LobbyStore for InMemoryStore {
+    async fn store_binding(&self) -> StoreBinding {
+        let data = self.inner.read().await;
+        StoreBinding {
+            instance_id_sha256: sha256(
+                &[
+                    b"spurfire-store-instance-v1\0".as_slice(),
+                    data.store_instance_id.as_slice(),
+                ]
+                .concat(),
+            ),
+            canonical_state_path_sha256: data.canonical_state_path_sha256,
+        }
+    }
+
+    async fn protected_alpha_recovery(&self) -> Option<ProtectedAlphaRecovery> {
+        let data = self.inner.read().await;
+        alpha_recovery(&data)
+    }
+
     async fn install_local_rehearsal_receipt(
         &self,
         qualification: &LocalRehearsalQualification,
     ) -> Result<(), StoreError> {
         let mut data = self.inner.write().await;
         install_rehearsal_in_data(&mut data, qualification)
+    }
+
+    async fn install_protected_alpha_receipt(
+        &self,
+        qualification: &ProtectedAlphaQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        install_alpha_in_data(&mut data, qualification)
     }
 
     async fn issue_real_create_grant(
@@ -824,8 +975,19 @@ impl JsonFileStore {
             }
             Err(_) => return Err(StoreError::Io),
         };
+        let canonical_path_digest = canonical_state_path_digest(&path)?;
+        if data.canonical_state_path_sha256 == [0; 32] {
+            data.canonical_state_path_sha256 = canonical_path_digest;
+        } else if data.canonical_state_path_sha256 != canonical_path_digest {
+            // A copied or moved store can retain cleanup evidence but cannot be
+            // opened as admission authority at a different canonical path.
+            return Err(StoreError::Decode);
+        }
+        if data.store_instance_id == [0; 32] {
+            getrandom::getrandom(&mut data.store_instance_id).map_err(|_| StoreError::Io)?;
+        }
         let normalized = normalize_loaded_store(&mut data);
-        if existed && normalized {
+        if existed && (normalized || data.canonical_state_path_sha256 == canonical_path_digest) {
             persist_data(&path, &data).await?;
         }
         Ok(Self {
@@ -867,6 +1029,25 @@ impl fmt::Debug for JsonFileStore {
 
 #[async_trait]
 impl LobbyStore for JsonFileStore {
+    async fn store_binding(&self) -> StoreBinding {
+        let data = self.inner.read().await;
+        StoreBinding {
+            instance_id_sha256: sha256(
+                &[
+                    b"spurfire-store-instance-v1\0".as_slice(),
+                    data.store_instance_id.as_slice(),
+                ]
+                .concat(),
+            ),
+            canonical_state_path_sha256: data.canonical_state_path_sha256,
+        }
+    }
+
+    async fn protected_alpha_recovery(&self) -> Option<ProtectedAlphaRecovery> {
+        let data = self.inner.read().await;
+        alpha_recovery(&data)
+    }
+
     async fn install_local_rehearsal_receipt(
         &self,
         qualification: &LocalRehearsalQualification,
@@ -874,6 +1055,18 @@ impl LobbyStore for JsonFileStore {
         let mut data = self.inner.write().await;
         let mut next = data.clone();
         install_rehearsal_in_data(&mut next, qualification)?;
+        self.commit(&next).await?;
+        *data = next;
+        Ok(())
+    }
+
+    async fn install_protected_alpha_receipt(
+        &self,
+        qualification: &ProtectedAlphaQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        let mut next = data.clone();
+        install_alpha_in_data(&mut next, qualification)?;
         self.commit(&next).await?;
         *data = next;
         Ok(())
@@ -985,6 +1178,69 @@ impl PartialEq for StoreData {
     }
 }
 
+fn canonical_state_path_digest(path: &Path) -> Result<[u8; 32], StoreError> {
+    let file_name = path.file_name().ok_or(StoreError::Io)?;
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|_| StoreError::Io)?;
+    let canonical = canonical_parent.join(file_name);
+    Ok(sha256(
+        &[
+            b"spurfire-canonical-state-path-v1\0",
+            canonical.as_os_str().as_encoded_bytes(),
+        ]
+        .concat(),
+    ))
+}
+
+fn alpha_recovery(data: &StoreData) -> Option<ProtectedAlphaRecovery> {
+    let receipt = data.protected_alpha_receipt.as_ref()?;
+    let lease = data.real_lobby_lease.as_ref()?;
+    receipt.consumed_at?;
+    if receipt.lobby_id != lease.holder_lobby_id
+        || receipt.network_generation != lease.network_generation
+    {
+        return None;
+    }
+    Some(ProtectedAlphaRecovery {
+        lobby_id: receipt.lobby_id,
+        network_generation: receipt.network_generation,
+        supervisor_run_id_digest: receipt.supervisor_run_id_digest,
+        initial_epoch: receipt.initial_epoch,
+        absolute_deadline: receipt.absolute_deadline,
+    })
+}
+
+fn install_alpha_in_data(
+    data: &mut StoreData,
+    qualification: &ProtectedAlphaQualification,
+) -> Result<(), StoreError> {
+    let binding = StoreBinding {
+        instance_id_sha256: sha256(
+            &[
+                b"spurfire-store-instance-v1\0".as_slice(),
+                data.store_instance_id.as_slice(),
+            ]
+            .concat(),
+        ),
+        canonical_state_path_sha256: data.canonical_state_path_sha256,
+    };
+    if data.protected_alpha_receipt.is_some()
+        || data.local_rehearsal_receipt.is_some()
+        || data.real_lobby_lease.is_some()
+        || data.real_creation_quarantined
+        || data.lobbies.values().any(|lobby| !lobby.dry_run)
+        || binding.instance_id_sha256 != qualification.store_instance_id_sha256
+        || binding.canonical_state_path_sha256 != qualification.canonical_state_path_sha256
+    {
+        return Err(StoreError::InvalidRehearsalReceipt);
+    }
+    data.protected_alpha_receipt = Some(qualification.into());
+    Ok(())
+}
+
 fn install_rehearsal_in_data(
     data: &mut StoreData,
     qualification: &LocalRehearsalQualification,
@@ -1040,7 +1296,31 @@ fn create_in_data(
             return Err(StoreError::RealLobbyCapacityReached);
         }
         let candidate = real_create_grant.ok_or(StoreError::InvalidCreateGrant)?;
-        if let Some(receipt) = data.local_rehearsal_receipt.as_mut() {
+        let bound_instance = sha256(
+            &[
+                b"spurfire-store-instance-v1\0".as_slice(),
+                data.store_instance_id.as_slice(),
+            ]
+            .concat(),
+        );
+        let bound_path = data.canonical_state_path_sha256;
+        if let Some(receipt) = data.protected_alpha_receipt.as_mut() {
+            if receipt.consumed_at.is_some()
+                || now >= receipt.expires_at
+                || now >= receipt.final_io_deadline
+                || now >= receipt.absolute_deadline
+                || receipt.lobby_id != lobby.lobby.lobby_id
+                || receipt.network_generation != lobby.network_generation
+                || receipt.store_instance_id_sha256 != bound_instance
+                || receipt.canonical_state_path_sha256 != bound_path
+                || lobby.lobby.provisioning_mode != ProvisioningMode::TailnetPerLobby
+                || lobby.lobby.max_players > receipt.participant_cap
+                || !constant_time_eq(&receipt.verifier, &candidate)
+            {
+                return Err(StoreError::InvalidRehearsalReceipt);
+            }
+            receipt.consumed_at = Some(now);
+        } else if let Some(receipt) = data.local_rehearsal_receipt.as_mut() {
             if receipt.consumed_at.is_some()
                 || now >= receipt.expires_at
                 || receipt.lobby_id != lobby.lobby.lobby_id
@@ -1691,6 +1971,99 @@ mod tests {
         assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
         assert_eq!(store.len().await, 1);
         assert!(store.real_lobby_lease_held().await);
+    }
+
+    fn alpha_qualification(
+        binding: StoreBinding,
+        lobby_id: LobbyId,
+    ) -> ProtectedAlphaQualification {
+        ProtectedAlphaQualification {
+            receipt_verifier: [21; 32],
+            receipt_id_digest: [22; 32],
+            lobby_id,
+            network_generation: 1,
+            store_instance_id_sha256: binding.instance_id_sha256,
+            canonical_state_path_sha256: binding.canonical_state_path_sha256,
+            supervisor_run_id_digest: [23; 32],
+            initial_epoch: 1,
+            expires_at: UnixMillis::new(1_000),
+            final_io_deadline: UnixMillis::new(900),
+            absolute_deadline: UnixMillis::new(950),
+            participant_cap: 8,
+            worker_sha256: [24; 32],
+            broker_sha256: [25; 32],
+            provenance_sha256: [26; 32],
+            artifact_set_sha256: [27; 32],
+            policy_profile_digest: [28; 32],
+            public_origin_digest: [29; 32],
+            internal_listener_digest: [30; 32],
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_alpha_consumption_is_global_atomic_and_reopens_cleanup_only() {
+        let store = InMemoryStore::new();
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-0000000000aa").unwrap();
+        let qualification = alpha_qualification(store.store_binding().await, lobby_id);
+        store
+            .install_protected_alpha_receipt(&qualification)
+            .await
+            .unwrap();
+        let record = real_record("00000000-0000-4000-8000-0000000000aa");
+        let (a, b) = tokio::join!(
+            store.create(
+                "alpha-a".into(),
+                b"a".to_vec(),
+                player_id(),
+                UnixMillis::new(10),
+                record.clone(),
+                Some([21; 32]),
+                true
+            ),
+            store.create(
+                "alpha-b".into(),
+                b"b".to_vec(),
+                player_id(),
+                UnixMillis::new(10),
+                record,
+                Some([21; 32]),
+                true
+            ),
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let recovery = store.protected_alpha_recovery().await.unwrap();
+        assert_eq!(
+            (recovery.lobby_id, recovery.network_generation),
+            (lobby_id, 1)
+        );
+        assert_eq!(recovery.supervisor_run_id_digest, [23; 32]);
+        assert_eq!(
+            store
+                .install_protected_alpha_receipt(&qualification)
+                .await
+                .unwrap_err(),
+            StoreError::InvalidRehearsalReceipt
+        );
+    }
+
+    #[tokio::test]
+    async fn moved_or_copied_durable_store_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original.json");
+        let moved = root.path().join("moved.json");
+        let store = JsonFileStore::open(&original).await.unwrap();
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-0000000000ab").unwrap();
+        let qualification = alpha_qualification(store.store_binding().await, lobby_id);
+        store
+            .install_protected_alpha_receipt(&qualification)
+            .await
+            .unwrap();
+        drop(store);
+        tokio::fs::copy(&original, &moved).await.unwrap();
+        assert!(matches!(
+            JsonFileStore::open(&moved).await,
+            Err(StoreError::Decode)
+        ));
     }
 
     #[tokio::test]

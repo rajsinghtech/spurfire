@@ -64,10 +64,19 @@ app.kubernetes.io/part-of: spurfire
 {{/* Fail early on unsafe or contradictory mode combinations. */}}
 {{- define "spurfire-control.validateValues" -}}
 {{- if .Values.config.realMutationsEnabled -}}
-{{- fail "config.realMutationsEnabled=true remains activation-closed pending private live cleanup/reconciliation proof and a separate activation review" -}}
+{{- fail "ordinary config.realMutationsEnabled must remain false; protected Alpha uses signed receipt authority" -}}
 {{- end -}}
 {{- if .Values.config.realAdmissionEnabled -}}
-{{- fail "config.realAdmissionEnabled=true is activation-closed" -}}
+{{- fail "ordinary config.realAdmissionEnabled must remain false; protected Alpha uses signed receipt authority" -}}
+{{- end -}}
+{{- if .Values.protectedAlpha.enabled -}}
+{{- if .Values.config.dryRun -}}{{- fail "protectedAlpha.enabled and config.dryRun are mutually exclusive" -}}{{- end -}}
+{{- if ne .Values.config.provisioningMode "tailnet_per_lobby" -}}{{- fail "protectedAlpha requires tailnet_per_lobby" -}}{{- end -}}
+{{- if not .Values.persistence.enabled -}}{{- fail "protectedAlpha requires retained persistence" -}}{{- end -}}
+{{- if empty .Values.image.digest -}}{{- fail "protectedAlpha requires an immutable image digest" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.authorizedLobbyId) (empty .Values.protectedAlpha.publicOrigin) -}}{{- fail "protectedAlpha requires exact lobby and public origin bindings" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.receiptSecret) (empty .Values.protectedAlpha.credentialSecret) (empty .Values.protectedAlpha.vaultKeySecret) -}}{{- fail "protectedAlpha requires separate receipt, credential, and vault-key Secrets" -}}{{- end -}}
+{{- if or (not (empty .Values.tailscale.existingSecret)) (not (empty .Values.childVault.existingSecret)) -}}{{- fail "protectedAlpha credentials must use broker-only mounts, not ordinary server values" -}}{{- end -}}
 {{- end -}}
 {{- if .Values.config.allowLegacyClientAssertions -}}
 {{- fail "legacy asserted-player authorization is forbidden in the chart" -}}
@@ -87,14 +96,17 @@ app.kubernetes.io/part-of: spurfire
 {{- if and (not .Values.config.dryRun) (eq .Values.config.provisioningMode "dry_run") -}}
 {{- fail "config.provisioningMode=\"dry_run\" requires config.dryRun=true" -}}
 {{- end -}}
-{{- if and (not .Values.config.dryRun) (empty .Values.tailscale.existingSecret) -}}
+{{- if and (not .Values.config.dryRun) (not .Values.protectedAlpha.enabled) (empty .Values.tailscale.existingSecret) -}}
 {{- fail "non-dry-run staging requires tailscale.existingSecret" -}}
 {{- end -}}
 {{- if and (not .Values.config.dryRun) (not .Values.persistence.enabled) -}}
 {{- fail "non-dry-run staging requires persistence.enabled=true" -}}
 {{- end -}}
-{{- if and .Values.httpRoute.enabled (not .Values.config.dryRun) -}}
-{{- fail "httpRoute.enabled=true is restricted to credential-free dry-run; real and operator routes require a private authenticated listener" -}}
+{{- if and .Values.httpRoute.enabled (not .Values.config.dryRun) (not .Values.protectedAlpha.enabled) -}}
+{{- fail "httpRoute.enabled=true outside protected Alpha is restricted to credential-free dry-run" -}}
+{{- end -}}
+{{- if and .Values.protectedAlpha.enabled .Values.httpRoute.enabled (ne .Values.httpRoute.path.value (printf "/v1/lobbies/%s" .Values.protectedAlpha.authorizedLobbyId)) -}}
+{{- fail "protectedAlpha HTTPRoute must use the exact authorized lobby path" -}}
 {{- end -}}
 {{- if and .Values.httpRoute.enabled (empty .Values.httpRoute.parentRefs) -}}
 {{- fail "httpRoute.enabled=true requires at least one parentRef" -}}

@@ -47,6 +47,45 @@ spec:
       priorityClassName: {{ . | quote }}
       {{- end }}
       containers:
+        {{- if .Values.protectedAlpha.enabled }}
+        # Credential-free HTTP worker. It receives neither TS_* environment nor
+        # credential/vault mounts; only authenticated IPC crosses the socket.
+        - name: alpha-worker
+          image: {{ include "spurfire-control.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/spurfire-alpha-worker"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/spurfire }
+            - { name: broker-ipc, mountPath: /run/spurfire }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        # Private supervisor/broker custody container. It has no TCP port and no
+        # Service/HTTPRoute. Credential and vault-key mounts do not exist in the worker.
+        - name: alpha-broker
+          image: {{ include "spurfire-control.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/spurfire-alpha-launcher"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/spurfire }
+            - { name: broker-ipc, mountPath: /run/spurfire }
+            - { name: alpha-receipt, mountPath: /run/alpha-receipt, readOnly: true }
+            - { name: alpha-credential, mountPath: /run/alpha-custody, readOnly: true }
+            - { name: alpha-vault-key, mountPath: /run/alpha-vault-key, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- else }}
         - name: spurfire-server
           image: {{ include "spurfire-control.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -116,6 +155,7 @@ spec:
               subPath: {{ .Values.childVault.key | quote }}
               readOnly: true
             {{ end }}
+        {{- end }}
       volumes:
         - name: state
           {{- if .Values.persistence.enabled }}
@@ -127,6 +167,22 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        {{- if .Values.protectedAlpha.enabled }}
+        - name: broker-ipc
+          emptyDir: { sizeLimit: 1Mi }
+        - name: alpha-receipt
+          secret:
+            secretName: {{ .Values.protectedAlpha.receiptSecret | quote }}
+            defaultMode: 0400
+        - name: alpha-credential
+          secret:
+            secretName: {{ .Values.protectedAlpha.credentialSecret | quote }}
+            defaultMode: 0400
+        - name: alpha-vault-key
+          secret:
+            secretName: {{ .Values.protectedAlpha.vaultKeySecret | quote }}
+            defaultMode: 0400
+        {{- end }}
         {{ if .Values.childVault.existingSecret }}
         - name: child-vault-key
           secret:

@@ -495,6 +495,78 @@ pub struct Device {
     pub last_seen: Option<String>,
 }
 
+/// One authoritative inventory page. `request_cursor` is the cursor used to
+/// obtain this response and `next_cursor=None` is the only terminal signal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InventoryPage<T> {
+    pub request_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub items: Vec<T>,
+}
+
+/// Inventory that can only be constructed after every cursor reaches a unique
+/// terminal page within fixed bounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompleteInventory<T> {
+    items: Vec<T>,
+}
+
+impl<T> CompleteInventory<T> {
+    #[must_use]
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+    #[must_use]
+    pub fn into_items(self) -> Vec<T> {
+        self.items
+    }
+}
+
+/// Validate a provider pagination transcript. Errors, timeouts and partial
+/// transcripts never produce this type and therefore cannot establish absence.
+pub fn collect_complete_inventory<T>(
+    pages: Vec<InventoryPage<T>>,
+    max_pages: usize,
+    max_items: usize,
+) -> Result<CompleteInventory<T>, ControlError> {
+    use std::collections::BTreeSet;
+    if pages.is_empty() || pages.len() > max_pages {
+        return Err(ControlError::IncompletePagination);
+    }
+    let mut expected = None;
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    let page_count = pages.len();
+    for (index, page) in pages.into_iter().enumerate() {
+        if page.request_cursor != expected {
+            return Err(ControlError::IncompletePagination);
+        }
+        if let Some(cursor) = page.request_cursor.as_ref() {
+            if cursor.is_empty()
+                || cursor.len() > 512
+                || cursor
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+                || !seen.insert(cursor.clone())
+            {
+                return Err(ControlError::IncompletePagination);
+            }
+        }
+        if items.len().saturating_add(page.items.len()) > max_items {
+            return Err(ControlError::IncompletePagination);
+        }
+        items.extend(page.items);
+        expected = page.next_cursor;
+        if expected.is_none() && index + 1 != page_count {
+            return Err(ControlError::IncompletePagination);
+        }
+    }
+    if expected.is_some() {
+        return Err(ControlError::IncompletePagination);
+    }
+    Ok(CompleteInventory { items })
+}
+
 /// Secret-safe control-plane failure.
 #[derive(Error)]
 pub enum ControlError {
@@ -512,6 +584,8 @@ pub enum ControlError {
     InvalidPolicy,
     #[error("child-tailnet policy readback did not match required semantics")]
     PolicyMismatch,
+    #[error("provider pagination was partial, malformed, repeated, or over limit")]
+    IncompletePagination,
     #[error("Tailscale transport failed; details redacted")]
     Reqwest(#[source] reqwest::Error),
     #[error("Tailscale JSON response was invalid; details redacted")]
@@ -549,6 +623,7 @@ impl fmt::Debug for ControlError {
             Self::InvalidProviderPath => formatter.write_str("InvalidProviderPath"),
             Self::InvalidPolicy => formatter.write_str("InvalidPolicy"),
             Self::PolicyMismatch => formatter.write_str("PolicyMismatch"),
+            Self::IncompletePagination => formatter.write_str("IncompletePagination"),
             Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
         }
@@ -1684,6 +1759,64 @@ mod tests {
             assert!(!output.contains(ID));
             assert!(!output.contains(SECRET));
             assert!(output.contains(REDACTED));
+        }
+    }
+
+    #[test]
+    fn complete_inventory_requires_terminal_unique_bounded_cursor_chain() {
+        let complete = collect_complete_inventory(
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("page-2".into()),
+                    items: vec!["other"],
+                },
+                InventoryPage {
+                    request_cursor: Some("page-2".into()),
+                    next_cursor: None,
+                    items: vec!["stable-id-present"],
+                },
+            ],
+            4,
+            8,
+        )
+        .unwrap();
+        assert_eq!(complete.items(), &["other", "stable-id-present"]);
+        for pages in [
+            vec![InventoryPage {
+                request_cursor: None,
+                next_cursor: Some("again".into()),
+                items: vec![1],
+            }],
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("again".into()),
+                    items: vec![1],
+                },
+                InventoryPage {
+                    request_cursor: Some("wrong".into()),
+                    next_cursor: None,
+                    items: vec![2],
+                },
+            ],
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("bad cursor".into()),
+                    items: vec![1],
+                },
+                InventoryPage {
+                    request_cursor: Some("bad cursor".into()),
+                    next_cursor: None,
+                    items: vec![2],
+                },
+            ],
+        ] {
+            assert!(matches!(
+                collect_complete_inventory(pages, 4, 8),
+                Err(ControlError::IncompletePagination)
+            ));
         }
     }
 

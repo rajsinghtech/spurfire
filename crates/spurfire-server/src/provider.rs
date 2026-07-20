@@ -553,6 +553,115 @@ pub trait NetworkProvider: Send + Sync {
     }
 }
 
+/// Credential-free transport implemented by authenticated broker IPC. Every
+/// method uses existing typed provider DTOs; OAuth and vault material are not
+/// representable on this boundary.
+#[async_trait]
+pub trait BrokerProviderTransport: Send + Sync {
+    fn cached_capabilities(&self) -> ProviderCapabilities;
+    async fn prepare(&self, request: PrepareLobbyRequest)
+        -> Result<PreparedNetwork, ProviderError>;
+    async fn mint(&self, request: MintCredentialRequest)
+        -> Result<MintedCredential, ProviderError>;
+    async fn cleanup(&self, request: CleanupLobbyRequest) -> Result<CleanupOutcome, ProviderError>;
+    async fn observe(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError>;
+    async fn present(&self, request: TailnetPresenceRequest) -> Result<bool, ProviderError>;
+    async fn erase(&self, request: TailnetPresenceRequest) -> Result<(), ProviderError>;
+}
+
+/// Worker-side `NetworkProvider` client. It is permanently bound to one lobby
+/// generation and contains no constructor accepting credentials, environment
+/// names, vault paths, tailnet selectors, or provider clients.
+pub struct BrokerProvider {
+    transport: Arc<dyn BrokerProviderTransport>,
+    lobby_id: LobbyId,
+    generation: u64,
+}
+
+impl BrokerProvider {
+    #[must_use]
+    pub fn new(
+        transport: Arc<dyn BrokerProviderTransport>,
+        lobby_id: LobbyId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            transport,
+            lobby_id,
+            generation,
+        }
+    }
+    fn exact(&self, lobby_id: LobbyId, generation: u64) -> Result<(), ProviderError> {
+        if lobby_id == self.lobby_id && generation == self.generation && generation != 0 {
+            Ok(())
+        } else {
+            Err(ProviderError::IdentityMismatch)
+        }
+    }
+}
+
+impl fmt::Debug for BrokerProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrokerProvider")
+            .field("lobby_id", &self.lobby_id)
+            .field("generation", &self.generation)
+            .field("transport", &"<authenticated-ipc>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl NetworkProvider for BrokerProvider {
+    fn cached_capabilities(&self) -> ProviderCapabilities {
+        self.transport.cached_capabilities()
+    }
+    async fn prepare_lobby(
+        &self,
+        request: PrepareLobbyRequest,
+    ) -> Result<PreparedNetwork, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.prepare(request).await
+    }
+    async fn mint_credential(
+        &self,
+        request: MintCredentialRequest,
+    ) -> Result<MintedCredential, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.mint(request).await
+    }
+    async fn cleanup_lobby(
+        &self,
+        request: CleanupLobbyRequest,
+    ) -> Result<CleanupOutcome, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.cleanup(request).await
+    }
+    async fn observe_network(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.observe(request).await
+    }
+    async fn tailnet_present(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.present(request).await
+    }
+    async fn erase_child_secret(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.erase(request).await
+    }
+}
+
 /// Central provider facade enforcing the deployment-wide mutation gate.
 ///
 /// Every provider mutation crosses this boundary. Read-only capability and
@@ -567,6 +676,7 @@ pub struct MutationGatedProvider {
 enum MutationAuthorization {
     DenyAll,
     DeploymentWide,
+    ProtectedAlpha { lobby_id: LobbyId, generation: u64 },
 }
 
 impl MutationGatedProvider {
@@ -593,11 +703,27 @@ impl MutationGatedProvider {
         }
     }
 
+    /// Exact one-lobby gate used only after protected receipt verification.
+    #[must_use]
+    pub fn protected_alpha(
+        inner: Arc<dyn NetworkProvider>,
+        lobby_id: LobbyId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            inner,
+            authorization: MutationAuthorization::ProtectedAlpha {
+                lobby_id,
+                generation,
+            },
+        }
+    }
+
     fn require_exact(
         &self,
         dry_run: bool,
-        _lobby_id: LobbyId,
-        _network_generation: u64,
+        lobby_id: LobbyId,
+        network_generation: u64,
         _new_work: bool,
     ) -> Result<(), ProviderError> {
         if dry_run {
@@ -605,7 +731,13 @@ impl MutationGatedProvider {
         }
         match self.authorization {
             MutationAuthorization::DeploymentWide => Ok(()),
-            MutationAuthorization::DenyAll => Err(ProviderError::RealMutationsDisabled),
+            MutationAuthorization::ProtectedAlpha {
+                lobby_id: exact,
+                generation,
+            } if lobby_id == exact && network_generation == generation => Ok(()),
+            MutationAuthorization::ProtectedAlpha { .. } | MutationAuthorization::DenyAll => {
+                Err(ProviderError::RealMutationsDisabled)
+            }
         }
     }
 }
@@ -1765,9 +1897,10 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
         | ControlError::InvalidProviderPath
         | ControlError::InvalidPolicy
         | ControlError::PolicyMismatch => ProviderError::IdentityMismatch,
-        ControlError::Env(_) | ControlError::Reqwest(_) | ControlError::Json(_) => {
-            ProviderError::Unavailable { operation }
-        }
+        ControlError::Env(_)
+        | ControlError::Reqwest(_)
+        | ControlError::Json(_)
+        | ControlError::IncompletePagination => ProviderError::Unavailable { operation },
     }
 }
 
@@ -1776,6 +1909,90 @@ mod tests {
     use mockito::{Matcher, Mock, Server};
 
     use super::*;
+
+    struct FakeBrokerTransport {
+        prepares: AtomicU64,
+    }
+
+    #[async_trait]
+    impl BrokerProviderTransport for FakeBrokerTransport {
+        fn cached_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::available()
+        }
+        async fn prepare(
+            &self,
+            _request: PrepareLobbyRequest,
+        ) -> Result<PreparedNetwork, ProviderError> {
+            self.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(dry_prepared_network())
+        }
+        async fn mint(
+            &self,
+            _request: MintCredentialRequest,
+        ) -> Result<MintedCredential, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_mint",
+            })
+        }
+        async fn cleanup(
+            &self,
+            _request: CleanupLobbyRequest,
+        ) -> Result<CleanupOutcome, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_cleanup",
+            })
+        }
+        async fn observe(
+            &self,
+            _request: ObserveNetworkRequest,
+        ) -> Result<ProviderDeviceObservation, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_observe",
+            })
+        }
+        async fn present(&self, _request: TailnetPresenceRequest) -> Result<bool, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_present",
+            })
+        }
+        async fn erase(&self, _request: TailnetPresenceRequest) -> Result<(), ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_erase",
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_provider_is_credential_free_and_exact_fence_bound() {
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-0000000000bc").unwrap();
+        let transport = Arc::new(FakeBrokerTransport {
+            prepares: AtomicU64::new(0),
+        });
+        let provider = BrokerProvider::new(transport.clone(), lobby_id, 9);
+        assert!(provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 8,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .is_err());
+        assert_eq!(transport.prepares.load(Ordering::SeqCst), 0);
+        assert!(provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 9,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .is_ok());
+        assert_eq!(transport.prepares.load(Ordering::SeqCst), 1);
+        let debug = format!("{provider:?}");
+        assert!(!debug.contains("TS_CLIENT"));
+        assert!(!debug.contains("secret"));
+    }
 
     fn policy_readback(lobby_id: LobbyId) -> String {
         let tag = dedicated_rider_tag(lobby_id);

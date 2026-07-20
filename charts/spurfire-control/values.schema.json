@@ -13,7 +13,8 @@
     "service",
     "httpRoute",
     "resources",
-    "childVault"
+    "childVault",
+    "protectedAlpha"
   ],
   "properties": {
     "nameOverride": {
@@ -489,6 +490,69 @@
           "const": "/var/run/secrets/spurfire/vault.key"
         }
       }
+    },
+    "protectedAlpha": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "authorizedLobbyId",
+        "publicOrigin",
+        "internalSocket",
+        "receiptSecret",
+        "receiptKey",
+        "credentialSecret",
+        "credentialKey",
+        "vaultKeySecret",
+        "vaultKey"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "authorizedLobbyId": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "publicOrigin": {
+          "type": "string",
+          "pattern": "^$|^https://[^/]+$"
+        },
+        "internalSocket": {
+          "type": "string",
+          "pattern": "^/run/spurfire/[A-Za-z0-9._-]+$"
+        },
+        "receiptSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "receiptKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "credentialSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "credentialKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "vaultKeySecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "vaultKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        }
+      }
     }
   },
   "allOf": [
@@ -541,13 +605,6 @@
               }
             }
           },
-          "tailscale": {
-            "properties": {
-              "existingSecret": {
-                "minLength": 1
-              }
-            }
-          },
           "persistence": {
             "properties": {
               "enabled": {
@@ -571,34 +628,61 @@
         }
       },
       "then": {
-        "properties": {
-          "config": {
-            "properties": {
-              "dryRun": {
-                "const": true
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "properties": {
+                  "config": {
+                    "properties": {
+                      "dryRun": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
               },
-              "realMutationsEnabled": {
-                "const": false
-              },
-              "realAdmissionEnabled": {
-                "const": false
-              },
-              "allowLegacyClientAssertions": {
-                "const": false
+              {
+                "properties": {
+                  "protectedAlpha": {
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
               }
-            }
+            ]
           },
-          "httpRoute": {
+          {
             "properties": {
-              "parentRefs": {
-                "minItems": 1
+              "config": {
+                "properties": {
+                  "realMutationsEnabled": {
+                    "const": false
+                  },
+                  "realAdmissionEnabled": {
+                    "const": false
+                  },
+                  "allowLegacyClientAssertions": {
+                    "const": false
+                  }
+                }
               },
-              "hostnames": {
-                "minItems": 1
+              "httpRoute": {
+                "properties": {
+                  "parentRefs": {
+                    "minItems": 1
+                  },
+                  "hostnames": {
+                    "minItems": 1
+                  }
+                }
               }
             }
           }
-        }
+        ]
       }
     }
   ],
