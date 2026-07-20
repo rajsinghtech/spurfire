@@ -2266,9 +2266,11 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.unwrap();
         let key_path = root.join("key");
         tokio::fs::write(&key_path, [17_u8; 32]).await.unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .await
+                .unwrap();
             tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
                 .await
                 .unwrap();
@@ -2488,9 +2490,11 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.unwrap();
         let key_path = root.join("key");
         tokio::fs::write(&key_path, [9_u8; 32]).await.unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .await
+                .unwrap();
             tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
                 .await
                 .unwrap();

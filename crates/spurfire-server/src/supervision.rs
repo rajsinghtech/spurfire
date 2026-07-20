@@ -10,7 +10,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,9 @@ impl SupervisorLedger {
             return Err(SupervisionError::InvalidLedger);
         }
         let mut previous = [0; 32];
+        let mut derived_identity = None;
+        let mut derived_cleanup_only = false;
+        let mut derived_quarantined = false;
         for (index, entry) in self.transitions.iter().enumerate() {
             let sequence = u64::try_from(index + 1).map_err(|_| SupervisionError::InvalidLedger)?;
             let bytes = serde_json::to_vec(&(sequence, previous, &entry.transition))
@@ -232,13 +235,38 @@ impl SupervisorLedger {
             if entry.sequence != sequence
                 || entry.previous_sha256 != previous
                 || entry.entry_sha256 != hash(b"spurfire-supervisor-entry-v1\0", &bytes)
+                || (index == 0 && !matches!(entry.transition, Transition::Reserved))
+                || (index != 0 && matches!(entry.transition, Transition::Reserved))
+                || (derived_quarantined
+                    && !matches!(entry.transition, Transition::Quarantined { .. }))
             {
                 return Err(SupervisionError::InvalidLedger);
             }
+            match &entry.transition {
+                Transition::IdentityBound { identity } => {
+                    validate_identity(identity)?;
+                    if derived_identity
+                        .as_ref()
+                        .is_some_and(|current| current != identity)
+                    {
+                        return Err(SupervisionError::InvalidLedger);
+                    }
+                    derived_identity = Some(identity.clone());
+                }
+                Transition::CleanupOnly => derived_cleanup_only = true,
+                Transition::Quarantined { .. } => {
+                    derived_cleanup_only = true;
+                    derived_quarantined = true;
+                }
+                _ => {}
+            }
             previous = entry.entry_sha256;
         }
-        if let Some(identity) = &self.identity {
-            validate_identity(identity)?;
+        if self.identity != derived_identity
+            || self.cleanup_only != derived_cleanup_only
+            || self.quarantined != derived_quarantined
+        {
+            return Err(SupervisionError::InvalidLedger);
         }
         Ok(())
     }
@@ -323,6 +351,14 @@ fn validate_identity(identity: &SupervisedIdentity) -> Result<(), SupervisionErr
 pub struct LedgerStore {
     directory: PathBuf,
     ledger_path: PathBuf,
+    head_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerHead {
+    sequence: u64,
+    entry_sha256: [u8; 32],
 }
 
 impl LedgerStore {
@@ -342,16 +378,20 @@ impl LedgerStore {
             return Err(SupervisionError::InvalidLedger);
         }
         let ledger_path = directory.join("supervisor-ledger.json");
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true).mode(0o600);
-        let file = options
-            .open(&ledger_path)
-            .map_err(|_| SupervisionError::Persistence)?;
-        file.sync_all().map_err(|_| SupervisionError::Persistence)?;
+        let head_path = directory.join("supervisor-ledger.head");
+        for path in [&ledger_path, &head_path] {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            let file = options
+                .open(path)
+                .map_err(|_| SupervisionError::Persistence)?;
+            file.sync_all().map_err(|_| SupervisionError::Persistence)?;
+        }
         sync_directory(directory)?;
         Ok(Self {
             directory: directory.to_path_buf(),
             ledger_path,
+            head_path,
         })
     }
 
@@ -367,21 +407,30 @@ impl LedgerStore {
         let dir_meta =
             fs::symlink_metadata(directory).map_err(|_| SupervisionError::Persistence)?;
         let ledger_path = directory.join("supervisor-ledger.json");
+        let head_path = directory.join("supervisor-ledger.head");
         let file_meta =
             fs::symlink_metadata(&ledger_path).map_err(|_| SupervisionError::Persistence)?;
+        let head_meta =
+            fs::symlink_metadata(&head_path).map_err(|_| SupervisionError::Persistence)?;
         let uid = rustix::process::getuid().as_raw();
         if dir_meta.file_type().is_symlink()
             || file_meta.file_type().is_symlink()
+            || head_meta.file_type().is_symlink()
+            || !file_meta.is_file()
+            || !head_meta.is_file()
             || dir_meta.permissions().mode() & 0o077 != 0
             || file_meta.permissions().mode() & 0o177 != 0
+            || head_meta.permissions().mode() & 0o177 != 0
             || dir_meta.uid() != uid
             || file_meta.uid() != uid
+            || head_meta.uid() != uid
         {
             return Err(SupervisionError::InvalidLedger);
         }
         Ok(Self {
             directory: directory.to_path_buf(),
             ledger_path,
+            head_path,
         })
     }
 
@@ -391,46 +440,95 @@ impl LedgerStore {
     }
 
     pub fn load(&self) -> Result<SupervisorLedger, SupervisionError> {
-        let file = File::open(&self.ledger_path).map_err(|_| SupervisionError::Persistence)?;
-        let mut bytes = Vec::new();
-        file.take(1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SupervisionError::Persistence)?;
-        let ledger: SupervisorLedger =
-            serde_json::from_slice(&bytes).map_err(|_| SupervisionError::InvalidLedger)?;
+        let mut ledger: SupervisorLedger = read_json_limited(&self.ledger_path)?;
         ledger.validate()?;
+        let head: LedgerHead = read_json_limited(&self.head_path)?;
+        let actual = ledger
+            .transitions
+            .last()
+            .ok_or(SupervisionError::InvalidLedger)?;
+        if head.sequence != actual.sequence || head.entry_sha256 != actual.entry_sha256 {
+            ledger.push(Transition::Quarantined {
+                reason: "ledger_rollback_or_incomplete_commit".to_owned(),
+            })?;
+            self.persist(&ledger)?;
+        }
         Ok(ledger)
     }
 
     pub fn persist(&self, ledger: &SupervisorLedger) -> Result<(), SupervisionError> {
         ledger.validate()?;
-        let bytes = serde_json::to_vec(ledger).map_err(|_| SupervisionError::InvalidLedger)?;
-        let mut random = [0_u8; 16];
-        getrandom::getrandom(&mut random).map_err(|_| SupervisionError::Persistence)?;
-        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let temporary = self.directory.join(format!(".ledger-{suffix}.new"));
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+        let entry = ledger
+            .transitions
+            .last()
+            .ok_or(SupervisionError::InvalidLedger)?;
+        let head = LedgerHead {
+            sequence: entry.sequence,
+            entry_sha256: entry.entry_sha256,
+        };
+        if let Ok(bytes) = fs::read(&self.head_path) {
+            if !bytes.is_empty() {
+                let current: LedgerHead =
+                    serde_json::from_slice(&bytes).map_err(|_| SupervisionError::InvalidLedger)?;
+                let idempotent = head == current;
+                let linked_append = entry.sequence == current.sequence.saturating_add(1)
+                    && entry.previous_sha256 == current.entry_sha256;
+                let fail_closed_recovery =
+                    matches!(entry.transition, Transition::Quarantined { .. });
+                if !idempotent && !linked_append && !fail_closed_recovery {
+                    return Err(SupervisionError::InvalidLedger);
+                }
             }
-            let mut file = options
-                .open(&temporary)
-                .map_err(|_| SupervisionError::Persistence)?;
-            file.write_all(&bytes)
-                .map_err(|_| SupervisionError::Persistence)?;
-            file.sync_all().map_err(|_| SupervisionError::Persistence)?;
-            fs::rename(&temporary, &self.ledger_path).map_err(|_| SupervisionError::Persistence)?;
-            sync_directory(&self.directory)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
         }
-        result
+        atomic_replace_json(&self.directory, &self.ledger_path, "ledger", ledger)?;
+        // The independently replaced high-water mark makes restoring only an
+        // earlier valid ledger snapshot detectable. Any crash between these two
+        // commits also fails closed into durable quarantine during load.
+        atomic_replace_json(&self.directory, &self.head_path, "head", &head)
     }
+}
+
+fn read_json_limited<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, SupervisionError> {
+    let file = File::open(path).map_err(|_| SupervisionError::Persistence)?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SupervisionError::Persistence)?;
+    serde_json::from_slice(&bytes).map_err(|_| SupervisionError::InvalidLedger)
+}
+
+fn atomic_replace_json<T: Serialize>(
+    directory: &Path,
+    destination: &Path,
+    label: &str,
+    value: &T,
+) -> Result<(), SupervisionError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| SupervisionError::InvalidLedger)?;
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random).map_err(|_| SupervisionError::Persistence)?;
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = directory.join(format!(".{label}-{suffix}.new"));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|_| SupervisionError::Persistence)?;
+        file.write_all(&bytes)
+            .map_err(|_| SupervisionError::Persistence)?;
+        file.sync_all().map_err(|_| SupervisionError::Persistence)?;
+        fs::rename(&temporary, destination).map_err(|_| SupervisionError::Persistence)?;
+        sync_directory(directory)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -602,40 +700,77 @@ pub struct AbsenceObservation {
 pub struct BrokerFenceGuard {
     fence: Fence,
     policy_profile_digest: [u8; 32],
+    challenge_sha256: [u8; 32],
+    identity: Option<SupervisedIdentity>,
+    absolute_deadline: UnixMillis,
+    final_io_deadline: UnixMillis,
     cleanup_only: bool,
+    quarantined: bool,
+    last_sequence: u64,
 }
 
 impl BrokerFenceGuard {
-    pub fn from_ledger(ledger: &SupervisorLedger) -> Self {
+    /// Builds broker-local replay state from the validated durable ledger and
+    /// the private launcher challenge. The challenge is never accepted from IPC.
+    pub fn from_ledger(ledger: &SupervisorLedger, challenge_sha256: [u8; 32]) -> Self {
         Self {
             fence: ledger.fence.clone(),
             policy_profile_digest: ledger.policy_profile_digest,
+            challenge_sha256,
+            identity: ledger.identity.clone(),
+            absolute_deadline: ledger.absolute_deadline,
+            final_io_deadline: ledger.final_io_deadline,
             cleanup_only: ledger.cleanup_only,
+            quarantined: ledger.quarantined,
+            last_sequence: 0,
         }
     }
 
     pub fn authorize(
-        &self,
+        &mut self,
         request: &BrokerRequest,
         expected_policy_profile_digest: &[u8; 32],
+        now: UnixMillis,
     ) -> Result<(), SupervisionError> {
+        if self.quarantined {
+            return Err(SupervisionError::IncompleteProof);
+        }
         if request.fence != self.fence {
             return Err(SupervisionError::StaleFence);
+        }
+        if request.sequence != self.last_sequence.saturating_add(1)
+            || request.challenge_sha256 != self.challenge_sha256
+            || self.challenge_sha256 == [0; 32]
+        {
+            return Err(SupervisionError::PeerAuthentication);
+        }
+        if request.identity.as_ref() != self.identity.as_ref() || self.identity.is_none() {
+            return Err(SupervisionError::IncompleteProof);
         }
         if expected_policy_profile_digest != &self.policy_profile_digest {
             return Err(SupervisionError::IncompleteProof);
         }
-        if self.cleanup_only
-            && !matches!(
+        let cleanup_operation = matches!(
+            request.operation,
+            Operation::Delete
+                | Operation::ObserveAbsence
+                | Operation::VaultErase
+                | Operation::LeaseRelease
+        );
+        if (!cleanup_operation && now >= self.absolute_deadline)
+            || (matches!(
                 request.operation,
-                Operation::Delete
-                    | Operation::ObserveAbsence
-                    | Operation::VaultErase
-                    | Operation::LeaseRelease
-            )
+                Operation::Create | Operation::ApplyPolicy | Operation::FinalProviderIo
+            ) && now >= self.final_io_deadline)
+            || (self.cleanup_only && !cleanup_operation)
         {
-            return Err(SupervisionError::IncompleteProof);
+            return Err(if now >= self.final_io_deadline && !cleanup_operation {
+                SupervisionError::Deadline
+            } else {
+                SupervisionError::IncompleteProof
+            });
         }
+        self.last_sequence = request.sequence;
         Ok(())
     }
 }
@@ -655,14 +790,51 @@ pub trait CredentialBroker {
     fn release_lease(&mut self, fence: &Fence) -> Result<(), SupervisionError>;
 }
 
-/// Cleanup-only execution. The caller supplies monotonic elapsed time measured
-/// after the first successful response; wall clock is never used for spacing.
+trait MonotonicClock {
+    type Mark;
+
+    fn mark(&self) -> Self::Mark;
+    fn wait_until(&self, mark: &Self::Mark, minimum: Duration);
+    fn elapsed(&self, mark: &Self::Mark) -> Duration;
+}
+
+struct SystemMonotonicClock;
+
+impl MonotonicClock for SystemMonotonicClock {
+    type Mark = Instant;
+
+    fn mark(&self) -> Self::Mark {
+        Instant::now()
+    }
+
+    fn wait_until(&self, mark: &Self::Mark, minimum: Duration) {
+        if let Some(remaining) = minimum.checked_sub(mark.elapsed()) {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    fn elapsed(&self, mark: &Self::Mark) -> Duration {
+        mark.elapsed()
+    }
+}
+
+/// Cleanup-only execution. The supervisor owns the monotonic interval between
+/// the two completed provider observations; callers cannot assert elapsed time.
 pub fn run_cleanup<B: CredentialBroker>(
     store: &LedgerStore,
     ledger: &mut SupervisorLedger,
     broker: &mut B,
     now: UnixMillis,
-    monotonic_separation: Duration,
+) -> Result<(), SupervisionError> {
+    run_cleanup_with_clock(store, ledger, broker, now, &SystemMonotonicClock)
+}
+
+fn run_cleanup_with_clock<B: CredentialBroker, C: MonotonicClock>(
+    store: &LedgerStore,
+    ledger: &mut SupervisorLedger,
+    broker: &mut B,
+    now: UnixMillis,
+    clock: &C,
 ) -> Result<(), SupervisionError> {
     let fence = ledger.fence.clone();
     ledger.permits(Operation::Delete, now)?;
@@ -697,9 +869,16 @@ pub fn run_cleanup<B: CredentialBroker>(
         .identity
         .clone()
         .ok_or(SupervisionError::IncompleteProof)?;
+    let mut first_observation_completed = None;
     for ordinal in 1..=2 {
-        if ordinal == 2 && monotonic_separation < MIN_ABSENCE_SEPARATION {
-            return quarantine(store, ledger, "absence_interval_too_short");
+        if ordinal == 2 {
+            let mark = first_observation_completed
+                .as_ref()
+                .ok_or(SupervisionError::IncompleteProof)?;
+            clock.wait_until(mark, MIN_ABSENCE_SEPARATION);
+            if clock.elapsed(mark) < MIN_ABSENCE_SEPARATION {
+                return quarantine(store, ledger, "absence_interval_too_short");
+            }
         }
         durable_transition(
             store,
@@ -747,6 +926,9 @@ pub fn run_cleanup<B: CredentialBroker>(
                 uncached: true,
             },
         )?;
+        if ordinal == 1 {
+            first_observation_completed = Some(clock.mark());
+        }
     }
 
     durable_transition(
@@ -943,7 +1125,7 @@ mod tests {
         assert!(ledger
             .permits(Operation::Delete, UnixMillis::new(1))
             .is_ok());
-        let guard = BrokerFenceGuard::from_ledger(&ledger);
+        let mut guard = BrokerFenceGuard::from_ledger(&ledger, [7; 32]);
         let request = BrokerRequest {
             sequence: 1,
             challenge_sha256: [7; 32],
@@ -951,13 +1133,68 @@ mod tests {
             operation: Operation::Create,
             identity: ledger.identity.clone(),
         };
-        assert!(guard.authorize(&request, &[4; 32]).is_err());
+        assert!(guard
+            .authorize(&request, &[4; 32], UnixMillis::new(1))
+            .is_err());
         let cleanup = BrokerRequest {
             operation: Operation::Delete,
             ..request
         };
-        assert!(guard.authorize(&cleanup, &[5; 32]).is_err());
-        assert!(guard.authorize(&cleanup, &[4; 32]).is_ok());
+        assert!(guard
+            .authorize(&cleanup, &[5; 32], UnixMillis::new(1))
+            .is_err());
+        assert!(guard
+            .authorize(&cleanup, &[4; 32], UnixMillis::new(1))
+            .is_ok());
+    }
+
+    #[test]
+    fn broker_guard_binds_sequence_challenge_identity_deadline_and_quarantine() {
+        let ledger = fixture();
+        let mut guard = BrokerFenceGuard::from_ledger(&ledger, [7; 32]);
+        let request = BrokerRequest {
+            sequence: 1,
+            challenge_sha256: [7; 32],
+            fence: ledger.fence.clone(),
+            operation: Operation::Create,
+            identity: ledger.identity.clone(),
+        };
+        assert!(guard
+            .authorize(&request, &[4; 32], UnixMillis::new(1))
+            .is_ok());
+        assert!(guard
+            .authorize(&request, &[4; 32], UnixMillis::new(1))
+            .is_err());
+
+        let mut wrong_challenge = request.clone();
+        wrong_challenge.sequence = 2;
+        wrong_challenge.challenge_sha256 = [8; 32];
+        assert!(guard
+            .authorize(&wrong_challenge, &[4; 32], UnixMillis::new(1))
+            .is_err());
+        let mut missing_identity = request.clone();
+        missing_identity.sequence = 2;
+        missing_identity.identity = None;
+        assert!(guard
+            .authorize(&missing_identity, &[4; 32], UnixMillis::new(1))
+            .is_err());
+        let mut expired = request.clone();
+        expired.sequence = 2;
+        assert!(matches!(
+            guard.authorize(&expired, &[4; 32], UnixMillis::new(10_000)),
+            Err(SupervisionError::Deadline)
+        ));
+
+        let mut quarantined = ledger;
+        quarantined
+            .push(Transition::Quarantined {
+                reason: "test".into(),
+            })
+            .unwrap();
+        let mut guard = BrokerFenceGuard::from_ledger(&quarantined, [7; 32]);
+        assert!(guard
+            .authorize(&request, &[4; 32], UnixMillis::new(1))
+            .is_err());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -973,6 +1210,25 @@ mod tests {
         );
         fs::write(&store.ledger_path, b"{").unwrap();
         assert!(matches!(store.load(), Err(SupervisionError::InvalidLedger)));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn restoring_prior_valid_ledger_snapshot_durably_quarantines() {
+        let mut ledger = fixture();
+        let (_parent, store) = store(&ledger);
+        let prior = fs::read(&store.ledger_path).unwrap();
+        ledger.push(Transition::CleanupOnly).unwrap();
+        store.persist(&ledger).unwrap();
+
+        fs::write(&store.ledger_path, prior).unwrap();
+        let recovered = store.load().unwrap();
+        assert!(recovered.cleanup_only);
+        assert!(recovered.quarantined);
+        assert!(recovered
+            .permits(Operation::Create, UnixMillis::new(1))
+            .is_err());
+        assert!(store.load().unwrap().quarantined);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1039,6 +1295,39 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeClock {
+        elapsed: std::cell::Cell<Duration>,
+        advances_when_waited: bool,
+    }
+
+    impl FakeClock {
+        fn advancing() -> Self {
+            Self {
+                elapsed: std::cell::Cell::new(Duration::ZERO),
+                advances_when_waited: true,
+            }
+        }
+    }
+
+    impl MonotonicClock for FakeClock {
+        type Mark = Duration;
+
+        fn mark(&self) -> Self::Mark {
+            self.elapsed.get()
+        }
+
+        fn wait_until(&self, mark: &Self::Mark, minimum: Duration) {
+            if self.advances_when_waited {
+                self.elapsed.set(*mark + minimum);
+            }
+        }
+
+        fn elapsed(&self, mark: &Self::Mark) -> Duration {
+            self.elapsed.get().saturating_sub(*mark)
+        }
+    }
+
     fn observation() -> AbsenceObservation {
         AbsenceObservation {
             provider_stable_id: "TtStable99".into(),
@@ -1060,12 +1349,12 @@ mod tests {
             release_calls: 0,
             calls: vec![],
         };
-        run_cleanup(
+        run_cleanup_with_clock(
             &store,
             &mut ledger,
             &mut broker,
             UnixMillis::new(1),
-            Duration::from_secs(5),
+            &FakeClock::advancing(),
         )
         .unwrap();
         assert_eq!(
@@ -1105,10 +1394,10 @@ mod tests {
                 second.fully_paginated = false;
             }
             let vault_result = if fault == 3 { Ok(99) } else { Ok(4) };
-            let separation = if fault == 4 {
-                Duration::from_millis(4999)
+            let clock = if fault == 4 {
+                FakeClock::default()
             } else {
-                Duration::from_secs(5)
+                FakeClock::advancing()
             };
             let mut broker = FakeBroker {
                 delete,
@@ -1117,12 +1406,12 @@ mod tests {
                 release_calls: 0,
                 calls: vec![],
             };
-            assert!(run_cleanup(
+            assert!(run_cleanup_with_clock(
                 &store,
                 &mut ledger,
                 &mut broker,
                 UnixMillis::new(1),
-                separation
+                &clock
             )
             .is_err());
             assert_eq!(broker.release_calls, 0);

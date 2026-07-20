@@ -6,6 +6,7 @@
 
 use std::{
     collections::BTreeMap,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -125,18 +126,11 @@ impl EncryptedChildVault {
         key_path: impl AsRef<Path>,
     ) -> Result<Self, VaultError> {
         let path = path.into();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| VaultError::Io)?;
-        }
+        validate_vault_parent(&path)?;
         let writer_lock = open_writer_lock(&path).map_err(|_| VaultError::Io)?;
         let key = read_key_file(key_path.as_ref()).await?;
-        let image = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
+        let image = match read_private_file(&path, true)? {
+            Some(bytes) => {
                 let image: VaultImage =
                     serde_json::from_slice(&bytes).map_err(|_| VaultError::Invalid)?;
                 if image.schema_version != VAULT_SCHEMA {
@@ -144,12 +138,11 @@ impl EncryptedChildVault {
                 }
                 image
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => VaultImage {
+            None => VaultImage {
                 schema_version: VAULT_SCHEMA,
                 records: BTreeMap::new(),
                 erasures: BTreeMap::new(),
             },
-            Err(_) => return Err(VaultError::Io),
         };
         Ok(Self {
             path: Arc::new(path),
@@ -331,9 +324,8 @@ impl EncryptedChildVault {
     }
 
     async fn read_image_from_disk(&self) -> Result<VaultImage, VaultError> {
-        let bytes = tokio::fs::read(self.path.as_ref())
-            .await
-            .map_err(|_| VaultError::Io)?;
+        validate_vault_parent(self.path.as_ref())?;
+        let bytes = read_private_file(self.path.as_ref(), false)?.ok_or(VaultError::Missing)?;
         let image: VaultImage = serde_json::from_slice(&bytes).map_err(|_| VaultError::Invalid)?;
         if image.schema_version != VAULT_SCHEMA {
             return Err(VaultError::Invalid);
@@ -342,21 +334,23 @@ impl EncryptedChildVault {
     }
 
     async fn persist(&self, image: &VaultImage) -> Result<(), VaultError> {
-        if let Some(parent) = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| VaultError::Io)?;
+        validate_vault_parent(self.path.as_ref())?;
+        if self.path.exists() {
+            validate_private_regular_file(self.path.as_ref())?;
         }
         let bytes = serde_json::to_vec(image).map_err(|_| VaultError::Invalid)?;
-        let temporary = self.path.with_extension("tmp");
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random).map_err(|_| VaultError::Io)?;
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let temporary = self.path.with_extension(format!("{suffix}.new"));
         let mut options = tokio::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        options.create_new(true).write(true);
         #[cfg(unix)]
-        options.mode(0o600);
+        {
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
         let mut file = options.open(&temporary).await.map_err(|_| VaultError::Io)?;
         file.write_all(&bytes).await.map_err(|_| VaultError::Io)?;
         file.sync_all().await.map_err(|_| VaultError::Io)?;
@@ -371,9 +365,11 @@ impl EncryptedChildVault {
             // with directory durability is implemented.
             return Err(VaultError::Io);
         }
-        tokio::fs::rename(&temporary, self.path.as_ref())
-            .await
-            .map_err(|_| VaultError::Io)?;
+        if let Err(error) = tokio::fs::rename(&temporary, self.path.as_ref()).await {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            let _ = error;
+            return Err(VaultError::Io);
+        }
         #[cfg(unix)]
         {
             let parent = self
@@ -393,36 +389,121 @@ impl EncryptedChildVault {
 }
 
 #[cfg(unix)]
+fn validate_vault_parent(path: &Path) -> Result<(), VaultError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::symlink_metadata(parent).map_err(|_| VaultError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(VaultError::Invalid);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_regular_file(path: &Path) -> Result<(), VaultError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| VaultError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o177 != 0
+    {
+        return Err(VaultError::Invalid);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_private_file(path: &Path, allow_missing: bool) -> Result<Option<Vec<u8>>, VaultError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(_) => return Err(VaultError::Io),
+    };
+    validate_private_regular_file(path)?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|_| VaultError::Io)?;
+    Ok(Some(bytes))
+}
+
+#[cfg(unix)]
 fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let lock_path = PathBuf::from(format!("{}.lock", path.display()));
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    options
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     let file = options.open(lock_path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o177 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unsafe vault lock",
+        ));
+    }
     file.try_lock_exclusive()?;
     Ok(file)
 }
 
 #[cfg(unix)]
 async fn read_key_file(path: &Path) -> Result<[u8; 32], VaultError> {
-    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_meta = std::fs::symlink_metadata(parent).map_err(|_| VaultError::Io)?;
+    let uid = rustix::process::getuid().as_raw();
+    if parent_meta.file_type().is_symlink()
+        || !parent_meta.is_dir()
+        || (parent_meta.uid() != 0 && parent_meta.uid() != uid)
+        || parent_meta.permissions().mode() & 0o022 != 0
     {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|_| VaultError::Io)?;
-        let mode = metadata.permissions().mode();
-        // Kubernetes fsGroup-mounted Secrets need group-read. World access and
-        // group write/execute remain forbidden.
-        if mode & 0o007 != 0 || mode & 0o030 != 0 {
-            return Err(VaultError::Invalid);
-        }
+        return Err(VaultError::Invalid);
     }
-    let mut bytes = tokio::fs::read(path).await.map_err(|_| VaultError::Io)?;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).map_err(|_| VaultError::Io)?;
+    let metadata = file.metadata().map_err(|_| VaultError::Io)?;
+    let mode = metadata.permissions().mode();
+    // Root-owned workload mounts and fsGroup group-read are accepted. Symlinks,
+    // non-regular files, untrusted owners, world access, and group write/execute fail.
+    if !metadata.is_file()
+        || (metadata.uid() != 0 && metadata.uid() != uid)
+        || mode & 0o007 != 0
+        || mode & 0o030 != 0
+    {
+        return Err(VaultError::Invalid);
+    }
+    let mut bytes = Vec::new();
+    file.take(4096)
+        .read_to_end(&mut bytes)
+        .map_err(|_| VaultError::Io)?;
     let result = if bytes.len() == 32 {
         let mut key = [0_u8; 32];
         key.copy_from_slice(&bytes);
@@ -501,18 +582,19 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn vault_persists_only_authenticated_ciphertext_and_cas_deletes() {
+        use std::os::unix::fs::PermissionsExt;
+
         let root = std::env::temp_dir().join(format!("spurfire-vault-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .await
+            .unwrap();
         let key_path = root.join("key");
         tokio::fs::write(&key_path, [7_u8; 32]).await.unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-                .await
-                .unwrap();
-        }
+        tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
         let path = root.join("vault.json");
         let vault = EncryptedChildVault::open(&path, &key_path).await.unwrap();
         let identity = ChildVaultIdentity {
@@ -559,6 +641,56 @@ mod tests {
             Err(VaultError::Missing)
         ));
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vault_rejects_untrusted_parent_and_symlinked_custody_paths() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("key");
+        std::fs::write(&key, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            EncryptedChildVault::open(root.path().join("vault.json"), &key).await,
+            Err(VaultError::Invalid)
+        ));
+
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key_target = root.path().join("key-target");
+        std::fs::write(&key_target, [8_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let linked_key = root.path().join("linked-key");
+        symlink(&key_target, &linked_key).unwrap();
+        assert!(
+            EncryptedChildVault::open(root.path().join("vault-a.json"), &linked_key)
+                .await
+                .is_err()
+        );
+
+        let vault_target = root.path().join("vault-target");
+        std::fs::write(&vault_target, b"{}").unwrap();
+        std::fs::set_permissions(&vault_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let linked_vault = root.path().join("vault-linked.json");
+        symlink(&vault_target, &linked_vault).unwrap();
+        assert!(EncryptedChildVault::open(&linked_vault, &key)
+            .await
+            .is_err());
+
+        let lock_target = root.path().join("lock-target");
+        std::fs::write(&lock_target, b"").unwrap();
+        std::fs::set_permissions(&lock_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let lock_path = PathBuf::from(format!(
+            "{}.lock",
+            root.path().join("vault-b.json").display()
+        ));
+        symlink(&lock_target, lock_path).unwrap();
+        assert!(
+            EncryptedChildVault::open(root.path().join("vault-b.json"), &key)
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(not(unix))]

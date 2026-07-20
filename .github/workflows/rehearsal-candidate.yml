@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact lowercase 40-hex commit to build
+        description: Exact lowercase 40-hex current default-branch commit to build
         required: true
         type: string
 
@@ -35,13 +35,17 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
       - name: Assert exact checkout and fixed workflow contract
@@ -51,6 +55,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"
+          grep -Fxq 'pub(crate) const REHEARSAL_CONTROL_ORIGIN: &str = "https://rehearsal.spurfire.rajsingh.info";' \
+            crates/spurfire-gdext/src/lobby_client.rs
           grep -Fq 'REHEARSAL_CONTROL_ORIGIN: https://rehearsal.spurfire.rajsingh.info' \
             .github/workflows/rehearsal-candidate.yml
 
@@ -86,6 +93,8 @@ jobs:
             test "$target" = aarch64-apple-darwin && arch=arm64
             cargo build --locked --release -p spurfire-gdext --target "$target" \
               --no-default-features --features rehearsal-control-origin
+            strings "$CARGO_TARGET_DIR/$target/release/libspurfire_godot.dylib" > "$RUNNER_TEMP/$target.strings"
+            grep -Fq "$REHEARSAL_CONTROL_ORIGIN" "$RUNNER_TEMP/$target.strings"
             for profile in debug release; do
               cp "$CARGO_TARGET_DIR/$target/release/libspurfire_godot.dylib" \
                 "game/bin/macos/libspurfire_godot.$profile.$arch.dylib"
