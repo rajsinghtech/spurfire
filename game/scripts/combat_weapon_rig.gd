@@ -73,6 +73,7 @@ func _on_shot_fired(_shot_tick: Variant, fired_weapon_id: Variant) -> void:
 	flash.visible = true
 	_flash_frames = 2
 	_visual_kick_degrees = 6.0
+	_spawn_gunsmoke()
 
 func _install_verified_art() -> void:
 	var previous := get_node_or_null("WeaponArt")
@@ -97,3 +98,41 @@ func _apply_identity() -> void:
 			material = material.duplicate() as StandardMaterial3D
 			material.albedo_color = identity_color if path == "Receiver" else stock_color
 			part.set_surface_override_material(0, material)
+	var band := MeshInstance3D.new()
+	band.name = "AccentReceiverBand"
+	band.position = Vector3(0.0, 0.05, -0.18)
+	var band_mesh := BoxMesh.new()
+	band_mesh.size = Vector3(0.205, 0.075, 0.16)
+	var band_material := StandardMaterial3D.new()
+	band_material.albedo_color = identity_color
+	band_material.roughness = 0.72
+	band_mesh.material = band_material
+	band.mesh = band_mesh
+	add_child(band)
+
+func _spawn_gunsmoke() -> void:
+	var previous := muzzle.get_node_or_null("Gunsmoke")
+	if previous:
+		previous.queue_free()
+	var puff := Node3D.new()
+	puff.name = "Gunsmoke"
+	muzzle.add_child(puff)
+	var material := StandardMaterial3D.new()
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = Color(0.82, 0.75, 0.65, 0.42)
+	for index in 3:
+		var quad := MeshInstance3D.new()
+		var mesh := QuadMesh.new()
+		mesh.size = Vector2(0.18 + float(index) * 0.08, 0.18 + float(index) * 0.08)
+		mesh.material = material
+		quad.mesh = mesh
+		quad.position = Vector3(float(index - 1) * 0.08, float(index) * 0.05, -float(index) * 0.05)
+		quad.rotation.y = float(index) * 1.05
+		puff.add_child(quad)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(puff, "position", Vector3(0.18, 0.3, 0.08), 0.5)
+	tween.tween_property(puff, "scale", Vector3.ONE * 1.8, 0.5)
+	tween.tween_property(material, "albedo_color:a", 0.0, 0.5)
+	tween.chain().tween_callback(puff.queue_free)

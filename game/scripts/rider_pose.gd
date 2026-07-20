@@ -156,7 +156,32 @@ func _build_frontier_silhouette() -> void:
 	brim.mesh = brim_mesh
 	brim.position.y = -0.14
 	_hat.add_child(brim)
+	var band := MeshInstance3D.new()
+	band.name = "HatBand"
+	var band_mesh := CylinderMesh.new()
+	band_mesh.top_radius = 0.235
+	band_mesh.bottom_radius = 0.235
+	band_mesh.height = 0.065
+	band_mesh.radial_segments = 12
+	var band_material := StandardMaterial3D.new()
+	band_material.albedo_color = Color("f07a3f")
+	band_material.roughness = 0.86
+	band_mesh.material = band_material
+	band.mesh = band_mesh
+	band.position.y = -0.08
+	_hat.add_child(band)
 	add_child(_hat)
+	var satchel := MeshInstance3D.new()
+	satchel.name = "TrailSatchel"
+	satchel.position = Vector3(-0.42, 1.0, 0.1)
+	var satchel_mesh := BoxMesh.new()
+	satchel_mesh.size = Vector3(0.3, 0.38, 0.18)
+	var satchel_material := StandardMaterial3D.new()
+	satchel_material.albedo_color = Color("5e3d24")
+	satchel_material.roughness = 0.9
+	satchel_mesh.material = satchel_material
+	satchel.mesh = satchel_mesh
+	add_child(satchel)
 	_cape = MeshInstance3D.new()
 	_cape.name = "SpeedCape"
 	_cape.position = Vector3(0.0, 1.34, 0.28)

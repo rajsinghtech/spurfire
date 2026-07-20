@@ -3,11 +3,12 @@ extends CanvasLayer
 @export var horse: Node
 @export var rider: Node3D
 var _log: FileAccess
+const PALETTE := preload("res://scripts/ui_palette.gd")
 const GAITS := ["IDLE", "WALK", "TROT", "GALLOP"]
-const CREAM := Color("f5e9d0")
-const DARK := Color("2b1d12")
-const TEAL := Color("3fb6c9")
-const RED := Color("c44536")
+const CREAM := PALETTE.CREAM
+const DARK := PALETTE.INK
+const GOLD := PALETTE.LOGO_GOLD
+const RED := PALETTE.BRAND_RED
 
 var _tack_panel: PanelContainer
 var _gait_label: Label
@@ -100,17 +101,7 @@ func _build_player_hud() -> void:
 	_tack_panel.position = Vector2(24, -116)
 	_tack_panel.size = Vector2(285, 92)
 	_tack_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(DARK, 0.9)
-	style.corner_radius_top_left = 9
-	style.corner_radius_top_right = 9
-	style.corner_radius_bottom_left = 9
-	style.corner_radius_bottom_right = 9
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	style.content_margin_top = 12
-	style.content_margin_bottom = 12
-	_tack_panel.add_theme_stylebox_override("panel", style)
+	_tack_panel.add_theme_stylebox_override("panel", PALETTE.panel_style(0.9))
 	var stack := VBoxContainer.new()
 	_tack_panel.add_child(stack)
 	_gait_label = Label.new()
@@ -122,7 +113,16 @@ func _build_player_hud() -> void:
 	_speed_bar = ProgressBar.new()
 	_speed_bar.custom_minimum_size = Vector2(170, 18)
 	_speed_bar.show_percentage = false
-	_speed_bar.add_theme_color_override("font_color", TEAL)
+	var speed_background := StyleBoxFlat.new()
+	speed_background.bg_color = Color(DARK, 0.72)
+	speed_background.corner_radius_top_left = 6
+	speed_background.corner_radius_top_right = 6
+	speed_background.corner_radius_bottom_left = 6
+	speed_background.corner_radius_bottom_right = 6
+	var speed_fill := speed_background.duplicate() as StyleBoxFlat
+	speed_fill.bg_color = GOLD
+	_speed_bar.add_theme_stylebox_override("background", speed_background)
+	_speed_bar.add_theme_stylebox_override("fill", speed_fill)
 	speed_row.add_child(_speed_bar)
 	_speed_label = Label.new()
 	_speed_label.add_theme_color_override("font_color", CREAM)

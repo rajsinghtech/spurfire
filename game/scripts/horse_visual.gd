@@ -23,6 +23,7 @@ var _chest_base_y := 0.0
 var _coat_material: StandardMaterial3D
 var _accent_material: StandardMaterial3D
 var _cream_material: StandardMaterial3D
+var _dark_material: StandardMaterial3D
 var _was_airborne := false
 var _landing_remaining := 0.0
 
@@ -43,6 +44,7 @@ func _ready() -> void:
 	_coat_material = _material(COAT_COLORS[_archetype])
 	_accent_material = _material(ACCENT_COLORS[_archetype])
 	_cream_material = _material(Color("f5e9d0"))
+	_dark_material = _material(Color("5e3d24"))
 	for node_name in ["BodyProxy", "ChestProxy", "NeckProxy", "HeadProxy", "LeftEar", "RightEar", "FrontLeftLeg", "FrontRightLeg", "RearLeftLeg", "RearRightLeg", "TailProxy", "ForwardMarker"]:
 		var mesh := horse.get_node_or_null(node_name) as MeshInstance3D
 		if mesh:
@@ -93,10 +95,17 @@ func _on_telemetry(data: Dictionary) -> void:
 		_apply_archetype_visuals()
 
 func _ensure_signature_meshes() -> void:
-	_add_box("SaddleBlanket", Vector3(1.18, 0.12, 1.35), Vector3(0, 1.52, 0.15), _accent_material)
-	_add_box("ManeTuft", Vector3(0.18, 0.68, 0.48), Vector3(0, 2.18, -1.05), _coat_material)
-	_add_box("ForeheadPlate", Vector3(0.68, 0.12, 0.52), Vector3(0, 2.43, -1.96), _accent_material)
-	_add_box("PintoPatch", Vector3(0.58, 0.48, 0.12), Vector3(0.42, 1.2, -1.21), _cream_material)
+	_add_box(horse, "SaddleBlanket", Vector3(1.18, 0.12, 1.35), Vector3(0, 1.52, 0.15), _accent_material)
+	_add_box(horse, "ManeTuft", Vector3(0.18, 0.68, 0.48), Vector3(0, 2.18, -1.05), _dark_material)
+	_add_box(horse, "ForeheadPlate", Vector3(0.68, 0.12, 0.52), Vector3(0, 2.43, -1.96), _dark_material)
+	_add_box(horse, "PintoPatch", Vector3(0.58, 0.48, 0.12), Vector3(0.42, 1.2, -1.21), _cream_material)
+	_add_box(horse, "PintoPatchRight", Vector3(0.58, 0.48, 0.12), Vector3(-0.42, 1.2, -1.21), _cream_material)
+	_add_box(head, "FaceBlaze", Vector3(0.18, 0.38, 0.04), Vector3(0, 0.05, -0.49), _cream_material)
+	for index in 3:
+		_add_box(neck, "ManeRidge%d" % index, Vector3(0.15, 0.26, 0.22), Vector3(0, 0.2 - float(index) * 0.3, 0.2), _dark_material)
+	for entry in [[front_left, "FrontLeftHoof"], [front_right, "FrontRightHoof"], [rear_left, "RearLeftHoof"], [rear_right, "RearRightHoof"]]:
+		_add_box(entry[0], entry[1], Vector3(0.30, 0.18, 0.34), Vector3(0, -0.58, -0.04), _dark_material)
+		_add_box(entry[0], "%sFeather" % entry[1], Vector3(0.28, 0.24, 0.30), Vector3(0, -0.43, 0), _cream_material)
 
 func _apply_archetype_visuals() -> void:
 	_coat_material.albedo_color = COAT_COLORS[_archetype]
@@ -109,15 +118,22 @@ func _apply_archetype_visuals() -> void:
 	var mane := horse.get_node_or_null("ManeTuft") as MeshInstance3D
 	var plate := horse.get_node_or_null("ForeheadPlate") as MeshInstance3D
 	var patch := horse.get_node_or_null("PintoPatch") as MeshInstance3D
+	var patch_right := horse.get_node_or_null("PintoPatchRight") as MeshInstance3D
 	if mane:
 		mane.visible = _archetype == 2
 	if plate:
 		plate.visible = _archetype == 1
 	if patch:
 		patch.visible = _archetype == 2
+	if patch_right:
+		patch_right.visible = _archetype == 2
+	for entry in [[front_left, "FrontLeftHoofFeather"], [front_right, "FrontRightHoofFeather"], [rear_left, "RearLeftHoofFeather"], [rear_right, "RearRightHoofFeather"]]:
+		var feather := (entry[0] as Node).get_node_or_null(entry[1]) as MeshInstance3D
+		if feather:
+			feather.visible = _archetype == 1
 
-func _add_box(label: String, size: Vector3, position: Vector3, material: Material) -> void:
-	if horse.has_node(label):
+func _add_box(parent: Node3D, label: String, size: Vector3, position: Vector3, material: Material) -> void:
+	if parent.has_node(label):
 		return
 	var instance := MeshInstance3D.new()
 	instance.name = label
@@ -126,7 +142,7 @@ func _add_box(label: String, size: Vector3, position: Vector3, material: Materia
 	mesh.size = size
 	mesh.material = material
 	instance.mesh = mesh
-	horse.add_child.call_deferred(instance)
+	parent.add_child.call_deferred(instance)
 
 func _material(color: Color) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()

@@ -22,7 +22,7 @@ const REQUIRED_NODES := [
 	"ArchetypeLayer/ArchetypeSelector", "HUD", "PeerSession", "RemoteRider", "NetworkReplication",
 	"GameplayEventLayer/GameplayToast/Notification", "HUD/Panel/Margin/VBox/RemountHint",
 	"NetworkLayer/Panel/Margin/Label", "NetworkLayer/RosterPanel/Margin/VBox/Rows",
-	"CaptureLayer/CaptureGate", "DustFx/HoofDust", "DustFx/LandingDust"
+	"CaptureLayer/CaptureGate", "DustFx/HoofDust", "DustFx/LandingDust", "DustFx/SkidDust"
 ]
 const STANCE_MOUNTED := 1
 const STANCE_MOUNTED_AIRBORNE := 2
@@ -198,13 +198,44 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 			failures.append("frontier arena lost inherited node: %s" % path)
 	if arena.has_node("TestCourse/BroadGround"):
 		failures.append("frontier arena retained overlapping BroadGround")
-	for path in ["FrontierGround", "Corral", "MainStreet", "WaterTower", "CactusFlats", "DryWash", "TerracottaMesas"]:
+	var solid_landmarks := [
+		"FrontierGround", "SunArch", "BountyBell", "Corral", "Corral/Windmill",
+		"MainStreet", "WaterTower", "CactusFlats", "DryWash", "TerracottaMesas/Near",
+		"TerracottaMesas/Mid", "HeroMesa", "RimBerms"
+	]
+	for path in solid_landmarks:
 		if not arena.has_node(path):
-			failures.append("frontier arena missing landmark: %s" % path)
+			failures.append("frontier arena missing solid landmark: %s" % path)
 			continue
 		var landmark := arena.get_node(path)
 		if landmark.find_children("*", "CollisionShape3D", true, false).is_empty():
 			failures.append("frontier arena landmark has no collision: %s" % path)
+	for path in ["TerracottaMesas/Far", "TrailRibbons", "GroundDetail", "CirclingBirds"]:
+		if not arena.has_node(path):
+			failures.append("frontier arena missing visual landmark: %s" % path)
+	if not arena.has_node("WaterTower/TankBand") or not arena.has_node("WaterTower/Finial"):
+		failures.append("water tower lost its hero silhouette pass")
+	var multimeshes := arena.find_children("*", "MultiMeshInstance3D", true, false)
+	if multimeshes.size() != 2:
+		failures.append("frontier ground detail must use exactly two MultiMeshInstance3D nodes")
+	var mesh_count := arena.find_children("*", "MeshInstance3D", true, false).size()
+	if mesh_count > 650:
+		failures.append("frontier arena exceeded 650 MeshInstance3D budget: %d" % mesh_count)
+	var particle_amount := 0
+	for particle in arena.find_children("*", "GPUParticles3D", true, false):
+		particle_amount += (particle as GPUParticles3D).amount
+	if particle_amount > 80:
+		failures.append("frontier arena exceeded particle amount budget: %d" % particle_amount)
+	var environment := (arena.get_node("WorldEnvironment") as WorldEnvironment).environment
+	var sky_material := environment.sky.sky_material as ProceduralSkyMaterial
+	if sky_material.sky_top_color != Color("3a7ca8") or sky_material.sky_horizon_color != Color("f7b267"):
+		failures.append("frontier sunset palette drifted")
+	var sun := arena.get_node("Sun") as DirectionalLight3D
+	if not sun.rotation_degrees.is_equal_approx(Vector3(-20.0, 128.0, 0.0)) or not is_equal_approx(sun.light_energy, 1.15):
+		failures.append("frontier golden-hour key drifted")
+	var capture_scene := load("res://scenes/visual_capture.tscn") as PackedScene
+	if capture_scene == null:
+		failures.append("deterministic visual_capture.tscn could not be loaded")
 	for fixture in ["SpeedMarker_-40", "SlalomPost_0", "TurnCircle_0", "SpawnPad", "CourseResetPad"]:
 		var fixture_mesh := arena.get_node("TestCourse/" + fixture).get_child(0) as MeshInstance3D
 		if fixture_mesh.material_override != null:
