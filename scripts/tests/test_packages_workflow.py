@@ -94,9 +94,9 @@ class PackagesWorkflowTests(unittest.TestCase):
             "test \"$(jq -er '.run_attempt' \"$record\")\" = \"$GITHUB_RUN_ATTEMPT\"",
         ):
             self.assertIn(binding, job)
-        self.assertIn("docker buildx imagetools create", job)
-        self.assertIn('"$IMAGE@${digests[amd64]}"', job)
-        self.assertIn('"$IMAGE@${digests[arm64]}"', job)
+        self.assertIn("scripts/finalize-oci-index.sh", job)
+        self.assertIn('"${digests[amd64]}"', job)
+        self.assertIn('"${digests[arm64]}"', job)
         self.assertIn("in-toto.io/predicate-type", job)
         self.assertIn("https://spdx.dev/Document", job)
         self.assertIn("https://slsa.dev/provenance/", job)
@@ -111,12 +111,18 @@ class PackagesWorkflowTests(unittest.TestCase):
         )
         comparison = job.index('test "$current_main" = "$GITHUB_SHA"')
         registry_login = job.index("uses: docker/login-action@")
-        index_write = job.index("docker buildx imagetools create")
+        index_write = job.index("scripts/finalize-oci-index.sh")
         chart_push = job.index('helm push "$package" "$CHART_REGISTRY"')
         self.assertLess(stale_check, comparison)
         self.assertLess(comparison, registry_login)
         self.assertLess(comparison, index_write)
         self.assertLess(comparison, chart_push)
+
+    def test_finalizer_never_reads_a_just_updated_mutable_tag(self):
+        job = self.job("publish")
+        self.assertNotIn('imagetools inspect "$first_tag"', job)
+        self.assertNotIn('imagetools inspect "$tag"', job)
+        self.assertIn('imagetools inspect "$IMAGE@$IMAGE_DIGEST"', job)
 
     def test_every_checkout_is_explicitly_sha_bound(self):
         checkout_steps = re.findall(

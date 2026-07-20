@@ -153,6 +153,7 @@ jobs:
             scripts/check-alpha-smoke-log.sh \
             scripts/check-packaging.sh \
             scripts/check-release-metadata.sh \
+            scripts/finalize-oci-index.sh \
             scripts/install-just-ci.sh \
             scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh
@@ -160,6 +161,7 @@ jobs:
             scripts/check-alpha-smoke-log.sh \
             scripts/check-packaging.sh \
             scripts/check-release-metadata.sh \
+            scripts/finalize-oci-index.sh \
             scripts/install-just-ci.sh \
             scripts/prove-local-p2p.sh \
             scripts/run-alpha-two-client.sh
@@ -502,27 +504,11 @@ jobs:
 
           mapfile -t tags <<< "$IMAGE_TAGS"
           test "${#tags[@]}" -ge 1
-          tag_args=()
-          for tag in "${tags[@]}"; do
-            [[ "$tag" == "$IMAGE:"* ]]
-            tag_args+=(--tag "$tag")
-          done
-          docker buildx imagetools create \
-            "${tag_args[@]}" \
-            "$IMAGE@${digests[amd64]}" \
-            "$IMAGE@${digests[arm64]}"
-
-          first_tag="${tags[0]}"
-          final_digest="$(docker buildx imagetools inspect "$first_tag" | awk '$1 == "Digest:" { print $2; exit }')"
-          [[ "$final_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          for tag in "${tags[@]}"; do
-            tag_digest="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')"
-            test "$tag_digest" = "$final_digest"
-          done
-          final_raw="$(docker buildx imagetools inspect "$IMAGE@$final_digest" --raw)"
-          jq -e \
-            '[.manifests[] | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | "\(.platform.os)/\(.platform.architecture)"] | sort == ["linux/amd64", "linux/arm64"]' \
-            <<< "$final_raw" >/dev/null
+          final_digest="$(scripts/finalize-oci-index.sh \
+            "$IMAGE" \
+            "${digests[amd64]}" \
+            "${digests[arm64]}" \
+            "${tags[@]}")"
           echo "digest=$final_digest" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Helm
