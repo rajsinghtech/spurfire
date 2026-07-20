@@ -20,7 +20,7 @@ A `main` push publishes:
 - `main`
 - `sha-<full-commit-sha>`
 
-A stable tag such as `v0.1.0` publishes `v0.1.0`, `0.1.0`, `0.1`, `latest`, and the SHA tag. A prerelease such as `v0.2.0-rc.1` publishes only the exact prefixed tag, the unprefixed version, and the SHA tag; it never advances stable aliases.
+Tag pushes are validation-only and publish no OCI aliases. Current `main` runs publish only `main` and `sha-<full-sha>` after package checks. Stable or prerelease aliases require a separately reviewed future publication change; a tag is never the action that discovers readiness.
 
 Release tags must be strict `vX.Y.Z` or `vX.Y.Z-prerelease`, point to a commit on `main`, and match all of these files:
 
@@ -34,7 +34,7 @@ Release tags must be strict `vX.Y.Z` or `vX.Y.Z-prerelease`, point to a commit o
 
 ### Chart versions
 
-A semantic release tag publishes the same semantic chart version, with no synthetic `latest` chart tag. Each `main` run publishes a unique prerelease chart version shaped like:
+Tag pushes validate but do not publish a semantic chart. Each `main` run publishes a unique prerelease chart version shaped like:
 
 ```text
 <server-version>-main.<run-number>.<run-attempt>.sha-<12-character-sha>
@@ -156,7 +156,7 @@ The PVC contains non-secret JSON state and needs a writable directory because st
 
 Do not apply this example to a public listener. Safe-groundwork server revisions recognize the independent switch and reject real create/mint/delete while it is false; the chart pins it false and rejects true. Older binary/chart revisions without this contract are unsuitable. A future activation change may make `true` renderable only after every other gate is attested; credentials and non-dry values never suffice.
 
-Do not restart or upgrade the current process-local-vault prototype while child lobbies are active. After restart, retained child-backed lobbies fail closed with `cleanup_pending` and may require exact-ID manual remediation. Production requires a dynamic encrypted child vault with workload identity/audit/backup/CAS/deletion, mutation-closed startup reconciliation across store/vault/lease/exact upstream IDs, and proven create crash-window handling. Dynamic child credentials must never enter JSON, a static Kubernetes Secret, SOPS, rendered Helm output, logs, or metrics. Shared-tailnet mode separately remains blocked until its required scopes are live-verified and still consumes the one-real-lobby quota.
+The integrated prototype uses an encrypted exact-tuple file vault, CAS deletion, mutation-closed startup reconciliation, and a lifetime-held OS writer fence. Do not treat that as production custody or enable hosted mutations: workload identity/setec, external audit/backup/rotation, approved live restrictive child-policy evidence, persistent gateway limits/alerts, private operator controls, and exercised create crash-window/orphan remediation remain mandatory. Dynamic child credentials must never enter the non-secret state JSON, a static Kubernetes Secret, SOPS, rendered Helm output, logs, or metrics. Shared-tailnet mode separately remains blocked until its required scopes are live-verified and still consumes the one-real-lobby quota.
 
 The hosted public deployment's required GitOps posture remains `dryRun=true`, `provisioningMode=dry_run`, `existingSecret=""`, and `persistence.enabled=false`. Changing it requires a separate review after every activation gate is green.
 

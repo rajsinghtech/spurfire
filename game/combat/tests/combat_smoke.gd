@@ -6,6 +6,11 @@ class FakeWeaponController:
 	signal ammo_changed(mag, reserve)
 	signal shot_fired(tick, weapon_id)
 	signal hit_confirmed(target_id, hit_zone, damage)
+	signal fire_rejected(tick, reason)
+	signal reload_started(tick, required_ticks)
+	signal reload_progressed(tick, progress, active_ticks, required_ticks)
+	signal reload_completed(tick, mag, reserve)
+	signal reload_rejected(tick, reason)
 	var weapon_id := 0
 	var fire_calls: Array = []
 	var reload_calls := 0
@@ -26,10 +31,12 @@ class FakeWeaponController:
 
 	func request_reload() -> bool:
 		reload_calls += 1
+		reload_started.emit(42, 126)
+		reload_progressed.emit(43, 0.5, 63, 126)
 		return true
 
 	func get_weapon_stats() -> Dictionary:
-		return {"weapon_id": weapon_id, "display_name": "SF-C30 Dustwalker", "magazine": 30, "reserve": 120, "ammo_mag": mag, "ammo_reserve": reserve, "base_spread_deg": 0.8}
+		return {"weapon_id": weapon_id, "display_name": "SF-C30 Dustwalker", "magazine": 30, "reserve": 120, "ammo_mag": mag, "ammo_reserve": reserve, "base_spread_deg": 0.8, "is_reloading": false, "reload_progress": 0.0, "reload_ticks": 126}
 
 const SCENES := {
 	"hud": "res://ui/combat/combat_hud.tscn",
@@ -65,11 +72,16 @@ func _ready() -> void:
 	for path in ["%Crosshair", "%HitMarker", "%ReloadRing", "%WeaponName", "%Ammo", "%State", "%Gait"]:
 		if hud.get_node_or_null(path) == null:
 			failures.append("HUD missing %s" % path)
-	for method in ["bind_controller", "refresh_stats", "set_spread", "set_gait", "begin_reload"]:
+	for method in ["bind_controller", "refresh_stats", "set_spread", "set_gait", "show_reload_rejection"]:
 		if not hud.has_method(method):
 			failures.append("HUD lacks %s" % method)
 	hud.set_spread(2.6, "gallop", true)
-	hud.begin_reload(2.1)
+	controller.request_reload()
+	if not hud.get_node("%ReloadRing").visible or float(hud.get_node("%ReloadRing").value) != 50.0:
+		failures.append("HUD reload ring did not follow native tick progress")
+	controller.reload_rejected.emit(44, &"recovering")
+	if "RECOVERING" not in str(hud.get_node("%State").text):
+		failures.append("HUD did not show reasoned reload rejection")
 
 	var rifle: Node3D = loaded.rifle
 	rifle.controller = controller
@@ -133,13 +145,13 @@ func _check_native_api_if_available(failures: Array[String]) -> void:
 		failures.append("MountedWeaponController could not instantiate")
 		return
 	add_child(native)
-	for method in ["equip_weapon", "request_fire", "request_reload", "get_weapon_stats", "resolve_local_hit", "resolve_local_miss", "set_rider_context", "advance_to_tick"]:
+	for method in ["equip_weapon", "request_fire", "request_reload", "preview_dive_direction", "get_weapon_stats", "resolve_local_hit", "resolve_local_miss", "set_rider_context", "advance_to_tick"]:
 		if not native.has_method(method):
 			failures.append("MountedWeaponController lacks %s" % method)
 	for unsafe_method in ["begin_saddle_dive", "finish_saddle_dive", "complete_remount"]:
 		if native.has_method(unsafe_method):
 			failures.append("MountedWeaponController exposes forgeable %s transition" % unsafe_method)
-	for signal_name in [&"weapon_changed", &"ammo_changed", &"shot_fired", &"shot_accepted", &"shot_resolved", &"fire_rejected", &"hit_confirmed"]:
+	for signal_name in [&"weapon_changed", &"ammo_changed", &"shot_fired", &"shot_accepted", &"shot_resolved", &"fire_rejected", &"reload_started", &"reload_progressed", &"reload_completed", &"reload_rejected", &"hit_confirmed"]:
 		if not native.has_signal(signal_name):
 			failures.append("MountedWeaponController lacks %s signal" % signal_name)
 	native.queue_free()

@@ -21,6 +21,10 @@ config:
   # activation-closed and rejects true until the auth, encrypted child-
   # credential recovery, and startup-reconciliation gates are implemented.
   realMutationsEnabled: false
+  # Separate product admission stays closed even in private provider staging.
+  realAdmissionEnabled: false
+  allowLegacyClientAssertions: false
+  trustForwardedFor: false
   # Alpha safety invariant: shared compatibility mode cannot bypass this cap.
   maxActiveRealLobbies: 1
   dryRunTtlSeconds: 300
@@ -28,6 +32,14 @@ config:
   provisioningMode: dry_run
   sharedTailnet: "-"
   statePath: /var/lib/spurfire/server-state.json
+  childVaultPath: /var/lib/spurfire/child-vault.json
+
+# Root/workload-managed encryption key for dynamic child custody. This is not a
+# destination for child OAuth plaintext and remains absent in hosted dry-run.
+childVault:
+  existingSecret: ""
+  key: vault.key
+  mountPath: /var/run/secrets/spurfire/vault.key
 
 # Cached one-lobby network-summary timing contract. Collection is performed by
 # background workers; an inspection GET must never trigger provider I/O.

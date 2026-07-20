@@ -1,22 +1,27 @@
 //! Lobby store abstraction, retention rules, and durable JSON implementation.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use spurfire_protocol::{
-    AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby, LobbyId,
-    LobbyState, NetworkLifecycle, PlayerId, TailnetDnsName, UnixMillis,
+    AuthorityElection, ConnectivitySample, InputHash, JoinCredentialReceipt, Lobby,
+    LobbyCapabilityScope, LobbyId, LobbyState, NetworkLifecycle, PlayerId, ProvisioningMode,
+    TailnetDnsName, UnixMillis,
 };
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
 
-use crate::crypto::{constant_time_eq, sha256};
+use crate::{
+    crypto::{constant_time_eq, sha256},
+    rehearsal::LocalRehearsalQualification,
+};
 
 /// Idempotency records and destroyed tombstones are retained for 24 hours.
 pub const IDEMPOTENCY_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -32,9 +37,12 @@ pub const MAX_CREATE_REPLAYS: usize = 20_000;
 pub const CREATOR_CAPABILITY_CLEANUP_GRACE_MS: u64 = 15 * 60 * 1_000;
 
 const IDEMPOTENCY_DIGEST_DOMAIN: &[u8] = b"spurfire-real-lobby-lease-v1\0";
-const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 
 const fn default_network_generation() -> u64 {
+    1
+}
+
+const fn default_roster_revision() -> u64 {
     1
 }
 
@@ -123,59 +131,84 @@ impl fmt::Debug for StoredNetworkIdentity {
     }
 }
 
-/// Persisted capability scope. This slice issues creator `lobby.read` only;
-/// invitation, reporting, and mutation scopes remain activation blockers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StoredCapabilityScope {
-    #[default]
-    LobbyRead,
-}
-
 /// Hash-only exact-lobby capability record. Plaintext is never persisted.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredCapabilityVerifier {
     verifier: [u8; 32],
-    #[serde(default)]
-    scope: StoredCapabilityScope,
+    scopes: Vec<LobbyCapabilityScope>,
     lobby_id: LobbyId,
+    #[serde(default)]
+    player_id: Option<PlayerId>,
     network_generation: u64,
     expires_at: UnixMillis,
+    #[serde(default)]
     revoked: bool,
+    #[serde(default)]
+    consumed_at: Option<UnixMillis>,
 }
 
 impl StoredCapabilityVerifier {
-    /// Constructs a verifier already hashed with the service's domain separator.
+    /// Constructs a generation-bound hash-only capability.
     #[must_use]
     pub fn new(
         verifier: [u8; 32],
+        scopes: Vec<LobbyCapabilityScope>,
         lobby_id: LobbyId,
+        player_id: Option<PlayerId>,
         network_generation: u64,
         expires_at: UnixMillis,
     ) -> Self {
+        let mut scopes = scopes;
+        scopes.sort_unstable();
+        scopes.dedup();
         Self {
             verifier,
-            scope: StoredCapabilityScope::LobbyRead,
+            scopes,
             lobby_id,
+            player_id,
             network_generation,
             expires_at,
             revoked: false,
+            consumed_at: None,
         }
     }
 
-    fn authorizes(
+    pub(crate) fn authorizes(
         &self,
         candidate: &[u8; 32],
         lobby_id: LobbyId,
         generation: u64,
+        required: LobbyCapabilityScope,
+        expected_player: Option<PlayerId>,
         now: UnixMillis,
     ) -> bool {
         !self.revoked
-            && self.scope == StoredCapabilityScope::LobbyRead
+            && self.consumed_at.is_none()
+            && self.scopes.contains(&required)
             && self.lobby_id == lobby_id
             && self.network_generation == generation
+            && expected_player.is_none_or(|player| self.player_id == Some(player))
             && now < self.expires_at
             && constant_time_eq(&self.verifier, candidate)
+    }
+
+    pub(crate) fn consume(
+        &mut self,
+        candidate: &[u8; 32],
+        lobby_id: LobbyId,
+        generation: u64,
+        required: LobbyCapabilityScope,
+        now: UnixMillis,
+    ) -> bool {
+        if !self.authorizes(candidate, lobby_id, generation, required, None, now) {
+            return false;
+        }
+        self.consumed_at = Some(now);
+        true
+    }
+
+    pub(crate) const fn player_id(&self) -> Option<PlayerId> {
+        self.player_id
     }
 }
 
@@ -184,11 +217,13 @@ impl fmt::Debug for StoredCapabilityVerifier {
         formatter
             .debug_struct("StoredCapabilityVerifier")
             .field("verifier", &"<sha256-verifier>")
-            .field("scope", &self.scope)
+            .field("scopes", &self.scopes)
             .field("lobby_id", &self.lobby_id)
+            .field("player_id", &self.player_id)
             .field("network_generation", &self.network_generation)
             .field("expires_at", &self.expires_at)
             .field("revoked", &self.revoked)
+            .field("consumed", &self.consumed_at.is_some())
             .finish()
     }
 }
@@ -213,10 +248,20 @@ pub struct StoredLobby {
     pub(crate) dry_run: bool,
     #[serde(default = "default_network_generation")]
     pub(crate) network_generation: u64,
+    #[serde(default = "default_roster_revision")]
+    pub(crate) roster_revision: u64,
+    #[serde(default)]
+    pub(crate) session_generation: u64,
     #[serde(default = "default_network_lifecycle")]
     pub(crate) network_lifecycle: NetworkLifecycle,
     #[serde(default)]
     pub(crate) network_identity: Option<StoredNetworkIdentity>,
+    /// SHA-256 over normalized generated child-policy semantics; never a provider body.
+    #[serde(default)]
+    pub(crate) child_policy_digest: Option<String>,
+    /// Coarse policy gate status (`verified`, `mismatch`, `denied`, or `unavailable`).
+    #[serde(default)]
+    pub(crate) child_policy_status: Option<String>,
     #[serde(default)]
     pub(crate) cleanup_requested_at: Option<UnixMillis>,
     #[serde(default)]
@@ -228,9 +273,17 @@ pub struct StoredLobby {
     #[serde(default)]
     pub(crate) absence_confirmed_at: Option<UnixMillis>,
     #[serde(default)]
-    pub(crate) creator_capability: Option<StoredCapabilityVerifier>,
+    pub(crate) absence_observation_generation: Option<u64>,
+    #[serde(default)]
+    pub(crate) absence_observation_provider_id: Option<String>,
+    #[serde(default)]
+    pub(crate) absence_monotonic_verified: bool,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<StoredCapabilityVerifier>,
     pub(crate) idle_ttl_ms: u64,
     pub(crate) measurements: BTreeMap<PlayerId, ConnectivitySample>,
+    #[serde(default)]
+    pub(crate) authenticated_reporters: BTreeSet<PlayerId>,
     pub(crate) credentials: BTreeMap<PlayerId, StoredCredential>,
     pub(crate) join_replays: BTreeMap<String, StoredJoinReplay>,
     pub(crate) start_replays: BTreeMap<String, StoredMutationReplay>,
@@ -267,20 +320,28 @@ impl StoredLobby {
             tag: tag.into(),
             dry_run,
             network_generation: 1,
+            roster_revision: 1,
+            session_generation: 0,
             network_lifecycle: if dry_run {
                 NetworkLifecycle::Simulated
             } else {
                 NetworkLifecycle::Reserved
             },
             network_identity: None,
+            child_policy_digest: None,
+            child_policy_status: None,
             cleanup_requested_at: None,
             delete_acknowledged_at: None,
             child_secret_erased_at: None,
             first_absence_observed_at: None,
             absence_confirmed_at: None,
-            creator_capability: None,
+            absence_observation_generation: None,
+            absence_observation_provider_id: None,
+            absence_monotonic_verified: false,
+            capabilities: Vec::new(),
             idle_ttl_ms,
             measurements: BTreeMap::new(),
+            authenticated_reporters: BTreeSet::new(),
             credentials: BTreeMap::new(),
             join_replays: BTreeMap::new(),
             start_replays: BTreeMap::new(),
@@ -300,14 +361,90 @@ impl StoredLobby {
     /// Installs a hash-only creator capability before the atomic create.
     #[must_use]
     pub fn with_creator_capability(mut self, capability: StoredCapabilityVerifier) -> Self {
-        self.creator_capability = Some(capability);
+        self.capabilities.push(capability);
         self
     }
 
-    /// Revokes the creator capability without retaining replacement plaintext.
+    /// Adds another exact-lobby hash-only capability.
+    pub fn add_capability(&mut self, capability: StoredCapabilityVerifier) {
+        self.capabilities.push(capability);
+    }
+
+    /// Finds a capability without revealing whether the lobby exists.
+    pub(crate) fn authorize(
+        &self,
+        verifier: &[u8; 32],
+        required: LobbyCapabilityScope,
+        expected_player: Option<PlayerId>,
+        now: UnixMillis,
+    ) -> Option<Option<PlayerId>> {
+        self.capabilities
+            .iter()
+            .find(|capability| {
+                capability.authorizes(
+                    verifier,
+                    self.lobby.lobby_id,
+                    self.network_generation,
+                    required,
+                    expected_player,
+                    now,
+                )
+            })
+            .map(StoredCapabilityVerifier::player_id)
+    }
+
+    pub(crate) fn active_invitation_count(&self, now: UnixMillis) -> usize {
+        self.capabilities
+            .iter()
+            .filter(|capability| {
+                capability.scopes.contains(&LobbyCapabilityScope::LobbyJoin)
+                    && !capability.revoked
+                    && capability.consumed_at.is_none()
+                    && now < capability.expires_at
+            })
+            .count()
+    }
+
+    pub(crate) fn matches_invitation(&self, verifier: &[u8; 32], now: UnixMillis) -> bool {
+        self.capabilities.iter().any(|capability| {
+            capability.scopes.contains(&LobbyCapabilityScope::LobbyJoin)
+                && !capability.revoked
+                && now < capability.expires_at
+                && constant_time_eq(&capability.verifier, verifier)
+        })
+    }
+
+    /// Atomically consumes a one-use invitation while the caller holds the lobby lock.
+    pub(crate) fn consume_invitation(&mut self, verifier: &[u8; 32], now: UnixMillis) -> bool {
+        self.capabilities.iter_mut().any(|capability| {
+            capability.consume(
+                verifier,
+                self.lobby.lobby_id,
+                self.network_generation,
+                LobbyCapabilityScope::LobbyJoin,
+                now,
+            )
+        })
+    }
+
+    /// Revokes every participant capability bound to a player who has left.
+    pub(crate) fn revoke_player_capabilities(&mut self, player_id: PlayerId) {
+        for capability in &mut self.capabilities {
+            if capability.player_id() == Some(player_id) {
+                capability.revoked = true;
+            }
+        }
+    }
+
+    /// Revokes all creator control capabilities.
     pub fn revoke_creator_capability(&mut self) {
-        if let Some(capability) = &mut self.creator_capability {
-            capability.revoked = true;
+        for capability in &mut self.capabilities {
+            if capability
+                .scopes
+                .contains(&LobbyCapabilityScope::LobbyDestroy)
+            {
+                capability.revoked = true;
+            }
         }
     }
 
@@ -336,9 +473,16 @@ impl fmt::Debug for StoredLobby {
             .field("tag", &self.tag)
             .field("dry_run", &self.dry_run)
             .field("network_generation", &self.network_generation)
+            .field("roster_revision", &self.roster_revision)
+            .field("session_generation", &self.session_generation)
             .field("network_lifecycle", &self.network_lifecycle)
             .field("network_identity_present", &self.network_identity.is_some())
-            .field("creator_capability", &self.creator_capability)
+            .field(
+                "child_policy_digest_present",
+                &self.child_policy_digest.is_some(),
+            )
+            .field("child_policy_status", &self.child_policy_status)
+            .field("capability_count", &self.capabilities.len())
             .field("measurement_count", &self.measurements.len())
             .field("credential_receipt_count", &self.credentials.len())
             .field("pending_issuance_count", &self.pending_issuances.len())
@@ -375,6 +519,47 @@ struct RealLobbyLease {
     lifecycle: NetworkLifecycle,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredCreateGrant {
+    verifier: [u8; 32],
+    expires_at: UnixMillis,
+    consumed_at: Option<UnixMillis>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredLocalRehearsalReceipt {
+    verifier: [u8; 32],
+    receipt_id_digest: [u8; 32],
+    lobby_id: LobbyId,
+    network_generation: u64,
+    expires_at: UnixMillis,
+    #[serde(default = "default_rehearsal_deadline")]
+    absolute_deadline: UnixMillis,
+    participant_cap: u8,
+    policy_profile_digest: [u8; 32],
+    consumed_at: Option<UnixMillis>,
+}
+
+fn default_rehearsal_deadline() -> UnixMillis {
+    UnixMillis::new(u64::MAX)
+}
+
+impl From<&LocalRehearsalQualification> for StoredLocalRehearsalReceipt {
+    fn from(value: &LocalRehearsalQualification) -> Self {
+        Self {
+            verifier: value.receipt_verifier,
+            receipt_id_digest: value.receipt_id_digest,
+            lobby_id: value.lobby_id,
+            network_generation: value.network_generation,
+            expires_at: value.expires_at,
+            absolute_deadline: value.absolute_deadline,
+            participant_cap: value.participant_cap,
+            policy_profile_digest: value.policy_profile_digest,
+            consumed_at: None,
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct StoreData {
     #[serde(default)]
@@ -385,6 +570,10 @@ struct StoreData {
     real_lobby_lease: Option<RealLobbyLease>,
     #[serde(default)]
     real_creation_quarantined: bool,
+    #[serde(default)]
+    real_create_grants: Vec<StoredCreateGrant>,
+    #[serde(default)]
+    local_rehearsal_receipt: Option<StoredLocalRehearsalReceipt>,
 }
 
 /// Store failures that indicate an internal consistency or persistence error.
@@ -408,6 +597,15 @@ pub enum StoreError {
     /// The singleton real-lobby lease is held or quarantined.
     #[error("real lobby capacity reached")]
     RealLobbyCapacityReached,
+    /// The one-use real-create grant was absent, invalid, expired, or consumed.
+    #[error("real create grant invalid")]
+    InvalidCreateGrant,
+    /// The typed local-rehearsal receipt was incompatible or already installed.
+    #[error("local rehearsal receipt invalid")]
+    InvalidRehearsalReceipt,
+    /// Real local-rehearsal activation is fail-closed until durable recovery exists.
+    #[error("local rehearsal activation is disabled")]
+    RehearsalDisabled,
     /// Durable state could not be read or replaced.
     #[error("durable lobby state I/O failed")]
     Io,
@@ -419,7 +617,24 @@ pub enum StoreError {
 /// Persistence boundary used by the HTTP service.
 #[async_trait]
 pub trait LobbyStore: Send + Sync {
+    /// Durably installs one verified, hash-only local rehearsal receipt.
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError>;
+
+    /// Durably records a hash-only operator-issued real-create grant.
+    async fn issue_real_create_grant(
+        &self,
+        verifier: [u8; 32],
+        expires_at: UnixMillis,
+    ) -> Result<(), StoreError>;
+
+    /// Durably quarantines real admission after an orphan or reconciliation conflict.
+    async fn quarantine_real_creation(&self) -> Result<(), StoreError>;
+
     /// Atomically inserts a lobby or resolves its create idempotency key.
+    #[allow(clippy::too_many_arguments)]
     async fn create(
         &self,
         idempotency_key: String,
@@ -427,6 +642,7 @@ pub trait LobbyStore: Send + Sync {
         actor: PlayerId,
         now: UnixMillis,
         lobby: StoredLobby,
+        real_create_grant: Option<[u8; 32]>,
         allow_new_real: bool,
     ) -> Result<CreateStoreOutcome, StoreError>;
 
@@ -494,6 +710,36 @@ impl fmt::Debug for InMemoryStore {
 
 #[async_trait]
 impl LobbyStore for InMemoryStore {
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        install_rehearsal_in_data(&mut data, qualification)
+    }
+
+    async fn issue_real_create_grant(
+        &self,
+        verifier: [u8; 32],
+        expires_at: UnixMillis,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        if data.real_create_grants.len() >= 128 {
+            return Err(StoreError::Capacity);
+        }
+        data.real_create_grants.push(StoredCreateGrant {
+            verifier,
+            expires_at,
+            consumed_at: None,
+        });
+        Ok(())
+    }
+
+    async fn quarantine_real_creation(&self) -> Result<(), StoreError> {
+        self.inner.write().await.real_creation_quarantined = true;
+        Ok(())
+    }
+
     async fn create(
         &self,
         idempotency_key: String,
@@ -501,6 +747,7 @@ impl LobbyStore for InMemoryStore {
         actor: PlayerId,
         now: UnixMillis,
         lobby: StoredLobby,
+        real_create_grant: Option<[u8; 32]>,
         allow_new_real: bool,
     ) -> Result<CreateStoreOutcome, StoreError> {
         let mut data = self.inner.write().await;
@@ -511,6 +758,7 @@ impl LobbyStore for InMemoryStore {
             actor,
             now,
             lobby,
+            real_create_grant,
             allow_new_real,
         )
     }
@@ -549,12 +797,23 @@ impl LobbyStore for InMemoryStore {
 pub struct JsonFileStore {
     path: Arc<PathBuf>,
     inner: Arc<RwLock<StoreData>>,
+    /// Lifetime-held OS advisory lock fencing every writer of this state image.
+    _writer_lock: Arc<std::fs::File>,
 }
 
 impl JsonFileStore {
     /// Opens existing state or creates an empty in-memory image when absent.
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| StoreError::Io)?;
+        }
+        let writer_lock = open_writer_lock(&path).map_err(|_| StoreError::Io)?;
         let (mut data, existed) = match tokio::fs::read(&path).await {
             Ok(bytes) => (
                 serde_json::from_slice(&bytes).map_err(|_| StoreError::Decode)?,
@@ -572,6 +831,7 @@ impl JsonFileStore {
         Ok(Self {
             path: Arc::new(path),
             inner: Arc::new(RwLock::new(data)),
+            _writer_lock: Arc::new(writer_lock),
         })
     }
 
@@ -607,6 +867,50 @@ impl fmt::Debug for JsonFileStore {
 
 #[async_trait]
 impl LobbyStore for JsonFileStore {
+    async fn install_local_rehearsal_receipt(
+        &self,
+        qualification: &LocalRehearsalQualification,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        let mut next = data.clone();
+        install_rehearsal_in_data(&mut next, qualification)?;
+        self.commit(&next).await?;
+        *data = next;
+        Ok(())
+    }
+
+    async fn issue_real_create_grant(
+        &self,
+        verifier: [u8; 32],
+        expires_at: UnixMillis,
+    ) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        if data.real_create_grants.len() >= 128 {
+            return Err(StoreError::Capacity);
+        }
+        let mut next = data.clone();
+        next.real_create_grants.push(StoredCreateGrant {
+            verifier,
+            expires_at,
+            consumed_at: None,
+        });
+        self.commit(&next).await?;
+        *data = next;
+        Ok(())
+    }
+
+    async fn quarantine_real_creation(&self) -> Result<(), StoreError> {
+        let mut data = self.inner.write().await;
+        if data.real_creation_quarantined {
+            return Ok(());
+        }
+        let mut next = data.clone();
+        next.real_creation_quarantined = true;
+        self.commit(&next).await?;
+        *data = next;
+        Ok(())
+    }
+
     async fn create(
         &self,
         idempotency_key: String,
@@ -614,6 +918,7 @@ impl LobbyStore for JsonFileStore {
         actor: PlayerId,
         now: UnixMillis,
         lobby: StoredLobby,
+        real_create_grant: Option<[u8; 32]>,
         allow_new_real: bool,
     ) -> Result<CreateStoreOutcome, StoreError> {
         let mut data = self.inner.write().await;
@@ -625,6 +930,7 @@ impl LobbyStore for JsonFileStore {
             actor,
             now,
             lobby,
+            real_create_grant,
             allow_new_real,
         )?;
         self.commit(&next).await?;
@@ -679,6 +985,22 @@ impl PartialEq for StoreData {
     }
 }
 
+fn install_rehearsal_in_data(
+    data: &mut StoreData,
+    qualification: &LocalRehearsalQualification,
+) -> Result<(), StoreError> {
+    if data.local_rehearsal_receipt.is_some()
+        || data.real_lobby_lease.is_some()
+        || data.real_creation_quarantined
+        || data.lobbies.values().any(|lobby| !lobby.dry_run)
+    {
+        return Err(StoreError::InvalidRehearsalReceipt);
+    }
+    data.local_rehearsal_receipt = Some(qualification.into());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_in_data(
     data: &mut StoreData,
     idempotency_key: String,
@@ -686,6 +1008,7 @@ fn create_in_data(
     actor: PlayerId,
     now: UnixMillis,
     lobby: StoredLobby,
+    real_create_grant: Option<[u8; 32]>,
     allow_new_real: bool,
 ) -> Result<CreateStoreOutcome, StoreError> {
     purge_retained(data, now);
@@ -715,6 +1038,31 @@ fn create_in_data(
         }
         if data.real_creation_quarantined || data.real_lobby_lease.is_some() {
             return Err(StoreError::RealLobbyCapacityReached);
+        }
+        let candidate = real_create_grant.ok_or(StoreError::InvalidCreateGrant)?;
+        if let Some(receipt) = data.local_rehearsal_receipt.as_mut() {
+            if receipt.consumed_at.is_some()
+                || now >= receipt.expires_at
+                || receipt.lobby_id != lobby.lobby.lobby_id
+                || receipt.network_generation != lobby.network_generation
+                || lobby.lobby.provisioning_mode != ProvisioningMode::TailnetPerLobby
+                || lobby.lobby.max_players > receipt.participant_cap
+                || !constant_time_eq(&receipt.verifier, &candidate)
+            {
+                return Err(StoreError::InvalidRehearsalReceipt);
+            }
+            receipt.consumed_at = Some(now);
+        } else {
+            let grant = data
+                .real_create_grants
+                .iter_mut()
+                .find(|grant| {
+                    grant.consumed_at.is_none()
+                        && now < grant.expires_at
+                        && constant_time_eq(&grant.verifier, &candidate)
+                })
+                .ok_or(StoreError::InvalidCreateGrant)?;
+            grant.consumed_at = Some(now);
         }
         data.real_lobby_lease = Some(RealLobbyLease {
             holder_lobby_id: lobby.lobby.lobby_id,
@@ -776,9 +1124,7 @@ fn authorized_network_view(
     now: UnixMillis,
 ) -> Option<StoredLobby> {
     let stored = data.lobbies.get(&lobby_id)?;
-    stored.creator_capability.as_ref().filter(|capability| {
-        capability.authorizes(verifier, lobby_id, stored.network_generation, now)
-    })?;
+    stored.authorize(verifier, LobbyCapabilityScope::LobbyRead, None, now)?;
     Some(stored.clone())
 }
 
@@ -808,16 +1154,15 @@ fn has_release_proof(stored: &StoredLobby) -> bool {
                 && stored.cleanup_requested_at.is_some()
                 && stored.delete_acknowledged_at.is_some()
                 && stored.child_secret_erased_at.is_some()
-                && matches!(
-                    (
-                        stored.first_absence_observed_at,
-                        stored.absence_confirmed_at
-                    ),
-                    (Some(first), Some(confirmed))
-                        if confirmed
-                            .checked_duration_since(first)
-                            .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS)
-                )
+                && stored.absence_monotonic_verified
+                && stored.absence_observation_generation == Some(stored.network_generation)
+                && stored.absence_observation_provider_id.as_deref()
+                    == stored
+                        .network_identity
+                        .as_ref()
+                        .and_then(|identity| identity.provider_tailnet_id.as_deref())
+                && stored.first_absence_observed_at.is_some()
+                && stored.absence_confirmed_at.is_some()
                 && !stored.cleanup_pending
         }
         NetworkLifecycle::SharedResourcesClean => {
@@ -973,6 +1318,12 @@ pub(crate) fn apply_time_transitions(record: &mut StoredLobby, now: UnixMillis) 
 }
 
 fn purge_retained(data: &mut StoreData, now: UnixMillis) {
+    data.real_create_grants.retain(|grant| {
+        grant.expires_at > now
+            || grant
+                .consumed_at
+                .is_some_and(|at| !age_at_least(now, at, IDEMPOTENCY_RETENTION_MS))
+    });
     for record in data.lobbies.values_mut() {
         record
             .join_replays
@@ -1029,6 +1380,20 @@ fn age_at_least(now: UnixMillis, earlier: UnixMillis, duration: u64) -> bool {
         .is_some_and(|age| age >= duration)
 }
 
+fn open_writer_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(lock_path)?;
+    file.try_lock_exclusive()?;
+    Ok(file)
+}
+
 async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     if let Some(parent) = path
         .parent()
@@ -1040,13 +1405,11 @@ async fn persist_data(path: &Path, data: &StoreData) -> Result<(), StoreError> {
     }
     let bytes = serde_json::to_vec(data).map_err(|_| StoreError::Decode)?;
     let temporary = path.with_extension("tmp");
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .await
-        .map_err(|_| StoreError::Io)?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary).await.map_err(|_| StoreError::Io)?;
     file.write_all(&bytes).await.map_err(|_| StoreError::Io)?;
     file.sync_all().await.map_err(|_| StoreError::Io)?;
     drop(file);
@@ -1144,6 +1507,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(0),
                 record(),
+                None,
                 false,
             )
             .await
@@ -1189,6 +1553,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(0),
                 record(),
+                None,
                 false,
             )
             .await
@@ -1206,6 +1571,10 @@ mod tests {
     #[tokio::test]
     async fn real_lease_resolves_replay_before_quota_and_holds_ambiguity() {
         let store = InMemoryStore::new();
+        store
+            .issue_real_create_grant([1; 32], UnixMillis::new(1_000))
+            .await
+            .unwrap();
         let first = real_record("00000000-0000-4000-8000-000000000011");
         let first_id = first.lobby.lobby_id;
         assert!(matches!(
@@ -1216,6 +1585,7 @@ mod tests {
                     player_id(),
                     UnixMillis::new(10),
                     first,
+                    Some([1; 32]),
                     true,
                 )
                 .await
@@ -1232,6 +1602,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(11),
                 replay_candidate,
+                None,
                 false,
             )
             .await
@@ -1247,6 +1618,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(12),
                 real_record("00000000-0000-4000-8000-000000000013"),
+                None,
                 true,
             )
             .await;
@@ -1259,8 +1631,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rehearsal_receipt_is_exact_singleton_and_atomically_consumed() {
+        let store = InMemoryStore::new();
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-000000000019").unwrap();
+        let qualification = LocalRehearsalQualification {
+            receipt_verifier: [8; 32],
+            receipt_id_digest: [9; 32],
+            lobby_id,
+            network_generation: 1,
+            expires_at: UnixMillis::new(1_000),
+            absolute_deadline: UnixMillis::new(1_000),
+            participant_cap: 8,
+            policy_profile_digest: [10; 32],
+        };
+        store
+            .install_local_rehearsal_receipt(&qualification)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .create(
+                    "wrong-id".into(),
+                    b"wrong".to_vec(),
+                    player_id(),
+                    UnixMillis::new(10),
+                    real_record("00000000-0000-4000-8000-000000000018"),
+                    Some([8; 32]),
+                    true,
+                )
+                .await
+                .unwrap_err(),
+            StoreError::InvalidRehearsalReceipt
+        );
+
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let first = real_record("00000000-0000-4000-8000-000000000019");
+        let second = first.clone();
+        let (a, b) = tokio::join!(
+            first_store.create(
+                "concurrent-a".into(),
+                b"same".to_vec(),
+                player_id(),
+                UnixMillis::new(20),
+                first,
+                Some([8; 32]),
+                true,
+            ),
+            second_store.create(
+                "concurrent-b".into(),
+                b"same".to_vec(),
+                player_id(),
+                UnixMillis::new(20),
+                second,
+                Some([8; 32]),
+                true,
+            )
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert_eq!(store.len().await, 1);
+        assert!(store.real_lobby_lease_held().await);
+    }
+
+    #[tokio::test]
     async fn lease_releases_only_at_explicit_safe_terminal_network_lifecycle() {
         let store = InMemoryStore::new();
+        store
+            .issue_real_create_grant([2; 32], UnixMillis::new(1_000))
+            .await
+            .unwrap();
         let record = real_record("00000000-0000-4000-8000-000000000021");
         let lobby_id = record.lobby.lobby_id;
         store
@@ -1270,6 +1709,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(10),
                 record,
+                Some([2; 32]),
                 true,
             )
             .await
@@ -1308,7 +1748,10 @@ mod tests {
         stored.delete_acknowledged_at = Some(UnixMillis::new(21));
         stored.child_secret_erased_at = Some(UnixMillis::new(21));
         stored.first_absence_observed_at = Some(UnixMillis::new(30));
-        stored.absence_confirmed_at = Some(UnixMillis::new(35 + 5_000));
+        stored.absence_confirmed_at = Some(UnixMillis::new(31));
+        stored.absence_observation_generation = Some(1);
+        stored.absence_observation_provider_id = Some("TtReleaseCNTRL".to_owned());
+        stored.absence_monotonic_verified = true;
         stored.cleanup_pending = false;
         store.replace(stored).await.unwrap();
         assert!(!store.real_lobby_lease_held().await);
@@ -1323,7 +1766,9 @@ mod tests {
             record.lobby.lobby_id = lobby_id;
             record.with_creator_capability(StoredCapabilityVerifier::new(
                 [7; 32],
+                vec![LobbyCapabilityScope::LobbyRead],
                 lobby_id,
+                None,
                 1,
                 UnixMillis::new(100),
             ))
@@ -1335,6 +1780,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(0),
                 record,
+                None,
                 false,
             )
             .await
@@ -1368,6 +1814,10 @@ mod tests {
         ));
         let _ = tokio::fs::remove_file(&path).await;
         let store = JsonFileStore::open(&path).await.unwrap();
+        store
+            .issue_real_create_grant([3; 32], UnixMillis::new(1_000))
+            .await
+            .unwrap();
         let mut record = real_record("00000000-0000-4000-8000-000000000041");
         record.network_lifecycle = NetworkLifecycle::Active;
         record.tailnet = "tail-restart.ts.net".to_owned();
@@ -1384,6 +1834,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(10),
                 record,
+                Some([3; 32]),
                 true,
             )
             .await

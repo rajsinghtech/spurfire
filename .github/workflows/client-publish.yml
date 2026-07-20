@@ -8,7 +8,11 @@ on:
         required: true
         type: string
       run_id:
-        description: Successful tag-triggered Client Preflight run containing the platform artifacts
+        description: Successful protected trusted-release Client Preflight dispatch at qualified source S
+        required: true
+        type: string
+      evidence_sha256:
+        description: Independently reviewed SHA-256 of the committed release-evidence manifest
         required: true
         type: string
 
@@ -25,19 +29,27 @@ jobs:
     timeout-minutes: 15
     permissions:
       actions: read
+      attestations: read
       contents: write
+      pull-requests: read
+    environment: alpha-release
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.tag }}
 
-      - name: Validate source run, jobs, artifacts, and tag
+      - id: validate
+        name: Validate source run, jobs, artifacts, and tag
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.ALPHA_EVIDENCE_TOKEN || github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.run_id }}
+          EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          PRIVATE_LIVE_REPOSITORY: ${{ vars.ALPHA_PRIVATE_LIVE_REPOSITORY }}
+          PRIVATE_LIVE_WORKFLOW: ${{ vars.ALPHA_PRIVATE_LIVE_WORKFLOW }}
         run: |
           set -euo pipefail
 
@@ -49,7 +61,18 @@ jobs:
 
           git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
           tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
-          notes="docs/release-notes-${RELEASE_TAG#v}.md"
+          version="${RELEASE_TAG#v}"
+          notes="docs/release-notes-${version}.md"
+          evidence="docs/release-evidence/${version}.json"
+          scripts/check-alpha-evidence.py "$evidence" \
+            --version "$version" \
+            --expected-sha256 "$EVIDENCE_SHA256"
+          source_sha="$(scripts/check-release-tag-binding.sh "$version" "$tag_sha")"
+          # Publication is reserved for qualified source contained in the
+          # protected main branch; a successful dispatch at an arbitrary
+          # off-main ref must never satisfy this evidence chain.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main
           git cat-file -e "$RELEASE_TAG:$notes"
           git show "$RELEASE_TAG:$notes" > "$RUNNER_TEMP/release-notes.md"
           test -s "$RUNNER_TEMP/release-notes.md"
@@ -66,16 +89,14 @@ jobs:
           jq -e \
             --arg repository "$expected_repository" \
             --arg workflow "$expected_workflow" \
-            --arg tag "$RELEASE_TAG" \
-            --arg sha "$tag_sha" \
+            --arg sha "$source_sha" \
             --argjson workflow_id "$workflow_id" \
             '(.name == "Client Preflight") and
              (.path == $workflow) and
              (.workflow_id == $workflow_id) and
-             (.event == "push") and
+             (.event == "workflow_dispatch") and
              (.status == "completed") and
              (.conclusion == "success") and
-             (.head_branch == $tag) and
              (.head_sha == $sha) and
              (.repository.full_name == $repository) and
              (.head_repository.full_name == $repository)' \
@@ -87,36 +108,39 @@ jobs:
           jq -e '
             ([.jobs[] | {name, status, conclusion}] | sort_by(.name)) ==
             ([
-              {name: "Validate client preflight", status: "completed", conclusion: "success"},
+              {name: "Validate client candidate", status: "completed", conclusion: "success"},
               {name: "Linux x86_64 client", status: "completed", conclusion: "success"},
+              {name: "Linux ARM64 client", status: "completed", conclusion: "success"},
               {name: "Windows x86_64 client", status: "completed", conclusion: "success"},
-              {name: "macOS universal client", status: "completed", conclusion: "success"}
+              {name: "macOS universal client", status: "completed", conclusion: "success"},
+              {name: "Assemble checksummed nonpublishing candidate", status: "completed", conclusion: "success"},
+              {name: "Validate protected trusted release candidate", status: "completed", conclusion: "success"}
             ] | sort_by(.name))' <<< "$jobs_json" > /dev/null
 
           ci_runs_json="$(
-            gh api "/repos/$expected_repository/actions/workflows/ci.yml/runs?head_sha=$tag_sha&event=push&status=completed&per_page=100"
+            gh api "/repos/$expected_repository/actions/workflows/ci.yml/runs?head_sha=$source_sha&event=push&status=completed&per_page=100"
           )"
           ci_run_id="$(
             jq -er \
               --arg repository "$expected_repository" \
-              --arg tag "$RELEASE_TAG" \
-              --arg sha "$tag_sha" '
+              --arg sha "$source_sha" '
                 [.workflow_runs[] |
                   select(
                     (.name == "CI") and
                     (.path == ".github/workflows/ci.yml") and
                     (.event == "push") and
-                    (.head_branch == $tag) and
                     (.head_sha == $sha) and
                     (.conclusion == "success") and
                     (.repository.full_name == $repository) and
                     (.head_repository.full_name == $repository)
                   )] |
                 if length >= 1 then sort_by(.run_attempt) | last | .id
-                else error("no successful tag CI run") end' \
+                else error("no successful exact-source CI run") end' \
               <<< "$ci_runs_json"
           )"
           [[ "$ci_run_id" =~ ^[0-9]+$ ]]
+          test "$(jq -r '.runs.client_preflight.id' "$evidence")" = "$SOURCE_RUN_ID"
+          test "$(jq -r '.runs.ci.id' "$evidence")" = "$ci_run_id"
 
           ci_jobs_json="$(
             gh api "/repos/$expected_repository/actions/runs/$ci_run_id/jobs?per_page=100"
@@ -133,13 +157,86 @@ jobs:
             passed("Godot / Rust M2 (Linux)")' \
             <<< "$ci_jobs_json" > /dev/null
 
+          # Resolve private-live proof through a repository-configured trusted
+          # harness instead of trusting booleans and run IDs in the manifest.
+          test -n "$PRIVATE_LIVE_REPOSITORY"
+          test -n "$PRIVATE_LIVE_WORKFLOW"
+          private_id="$(jq -er '.runs.private_live_lifecycle.id' "$evidence")"
+          private_repo="$(jq -er '.runs.private_live_lifecycle.repository' "$evidence")"
+          private_workflow="$(jq -er '.runs.private_live_lifecycle.workflow_path' "$evidence")"
+          private_artifact="$(jq -er '.runs.private_live_lifecycle.evidence_artifact' "$evidence")"
+          private_file="$(jq -er '.runs.private_live_lifecycle.evidence_file' "$evidence")"
+          private_digest="$(jq -er '.runs.private_live_lifecycle.evidence_sha256' "$evidence")"
+          test "$private_repo" = "$PRIVATE_LIVE_REPOSITORY"
+          test "$private_repo" != "$expected_repository"
+          test "$private_workflow" = "$PRIVATE_LIVE_WORKFLOW"
+          [[ "$private_file" =~ ^[A-Za-z0-9_.-]+$ ]]
+          private_run_json="$(gh api "/repos/$private_repo/actions/runs/$private_id")"
+          jq -e \
+            --arg repository "$private_repo" \
+            --arg workflow "$private_workflow" \
+            --arg sha "$source_sha" '
+              (.path == $workflow) and
+              (.event == "workflow_dispatch") and
+              (.status == "completed") and
+              (.conclusion == "success") and
+              (.head_sha == $sha) and
+              (.repository.full_name == $repository) and
+              (.head_repository.full_name == $repository)' \
+            <<< "$private_run_json" > /dev/null
+          private_dir="$RUNNER_TEMP/private-live-evidence"
+          rm -rf "$private_dir"
+          mkdir -p "$private_dir"
+          gh run download "$private_id" --repo "$private_repo" \
+            --name "$private_artifact" --dir "$private_dir"
+          test -f "$private_dir/$private_file"
+          test "$(find "$private_dir" -type f | wc -l)" -eq 1
+          echo "$private_digest  $private_dir/$private_file" | sha256sum --check
+          scripts/check-alpha-lifecycle-evidence.py --require-live \
+            "$private_dir/$private_file" > /dev/null
+          test "$(jq -r '.source_sha' "$private_dir/$private_file")" = "$source_sha"
+
+          # Resolve two distinct GitHub approvals bound to S and their evidence
+          # digests. Dismissed, stale, outsider, or PR-author reviews fail closed.
+          approval_reviewers=()
+          for approval_name in activation release; do
+            approval_repo="$(jq -er --arg name "$approval_name" '.approvals[$name].repository' "$evidence")"
+            approval_pr="$(jq -er --arg name "$approval_name" '.approvals[$name].pull_request' "$evidence")"
+            approval_review="$(jq -er --arg name "$approval_name" '.approvals[$name].review_id' "$evidence")"
+            approval_reviewer="$(jq -er --arg name "$approval_name" '.approvals[$name].reviewer' "$evidence")"
+            approval_digest="$(jq -er --arg name "$approval_name" '.approvals[$name].evidence_digest' "$evidence")"
+            test "$approval_repo" = "$expected_repository"
+            if test "$approval_name" = activation; then
+              test "$approval_digest" = "sha256:$private_digest"
+            fi
+            pr_json="$(gh api "/repos/$approval_repo/pulls/$approval_pr")"
+            test "$(jq -r '.head.sha' <<< "$pr_json")" = "$source_sha"
+            pr_author="$(jq -r '.user.login | ascii_downcase' <<< "$pr_json")"
+            review_json="$(gh api "/repos/$approval_repo/pulls/$approval_pr/reviews/$approval_review")"
+            marker="SPURFIRE_ALPHA_${approval_name^^}_APPROVED source_sha=$source_sha evidence_digest=$approval_digest"
+            jq -e \
+              --arg reviewer "$approval_reviewer" \
+              --arg sha "$source_sha" \
+              --arg marker "$marker" '
+                (.state == "APPROVED") and
+                (.commit_id == $sha) and
+                ((.user.login | ascii_downcase) == ($reviewer | ascii_downcase)) and
+                (.author_association | IN("MEMBER", "OWNER", "COLLABORATOR")) and
+                (.body | contains($marker))' <<< "$review_json" > /dev/null
+            test "$(jq -r '.user.login | ascii_downcase' <<< "$review_json")" != "$pr_author"
+            approval_reviewers+=("$(jq -r '.user.login | ascii_downcase' <<< "$review_json")")
+          done
+          test "${approval_reviewers[0]}" != "${approval_reviewers[1]}"
+
           artifacts_json="$(
             gh api "/repos/$expected_repository/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100"
           )"
-          jq -e '
-            (.total_count == 3) and
+          jq -e \
+            --arg candidate "alpha-candidate-$source_sha" \
+            --arg trusted "alpha-trusted-candidate-$source_sha" '
+            (.total_count == 6) and
             (([.artifacts[].name] | sort) ==
-             (["client-linux", "client-macos", "client-windows"] | sort)) and
+             (["client-linux", "client-linux-arm64", "client-macos", "client-windows", $candidate, $trusted] | sort)) and
             all(.artifacts[]; (.expired == false) and (.size_in_bytes > 0))' \
             <<< "$artifacts_json" > /dev/null
 
@@ -151,13 +248,13 @@ jobs:
               '[.[] | select(.tag_name == $tag)]' <<< "$releases_json"
           )"
           release_count="$(jq length <<< "$matching_releases")"
-          test "$release_count" -le 1
-          if test "$release_count" -eq 1; then
-            jq -e '.[0].draft == true' <<< "$matching_releases" > /dev/null || {
-              echo "release $RELEASE_TAG is already published; refusing to overwrite it" >&2
-              exit 1
-            }
+          if test "$release_count" -ne 0; then
+            echo "release $RELEASE_TAG already exists (including draft); refusing to overwrite it" >&2
+            exit 1
           fi
+
+          echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -167,27 +264,82 @@ jobs:
           path: release
           merge-multiple: true
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: alpha-trusted-candidate-*
+          path: candidate-metadata
+          merge-multiple: true
+
       - name: Verify and publish release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          VALIDATED_TAG_SHA: ${{ steps.validate.outputs.tag_sha }}
+          VALIDATED_SOURCE_SHA: ${{ steps.validate.outputs.source_sha }}
         run: |
           set -euo pipefail
 
-          cd release
-          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$VALIDATED_TAG_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VALIDATED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          version="${RELEASE_TAG#v}"
+          evidence="docs/release-evidence/${version}.json"
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$VALIDATED_TAG_SHA"
+          test "$(scripts/check-release-tag-binding.sh "$version" "$VALIDATED_TAG_SHA")" = "$VALIDATED_SOURCE_SHA"
+          # Re-prove protected-main ancestry from the workspace fetch in the
+          # validation step before any artifact is trusted for publication.
+          git merge-base --is-ancestor "$VALIDATED_SOURCE_SHA" refs/remotes/origin/main
+          scripts/check-alpha-evidence.py "$evidence" \
+            --version "$version" \
+            --source-sha "$VALIDATED_SOURCE_SHA" \
+            --expected-sha256 "$EVIDENCE_SHA256" >/dev/null
+
           expected=(
+            Spurfire-linux-arm64.tar.gz
             Spurfire-linux-x86_64.tar.gz
             Spurfire-macos-universal.zip
             Spurfire-windows-x86_64.zip
           )
-          test "${files[*]}" = "${expected[*]}"
           for file in "${expected[@]}"; do
-            test -s "$file"
+            test -s "release/$file"
+            cmp -s "release/$file" "candidate-metadata/$file"
           done
-          sha256sum "${expected[@]}" > SHA256SUMS
-          cd ..
+          (cd release && sha256sum "${expected[@]}") > release/SHA256SUMS
+          cmp -s release/SHA256SUMS candidate-metadata/SHA256SUMS
+          jq -e \
+            --arg source_sha "$VALIDATED_SOURCE_SHA" \
+            --argjson run_id "$SOURCE_RUN_ID" '
+            .schema_version == 2 and
+            .candidate_mode == "trusted-release" and
+            .candidate_only == false and
+            .source_sha == $source_sha and
+            .workflow.run_id == $run_id and
+            .workflow.event == "workflow_dispatch" and
+            .release_eligible == true and
+            .provenance_verified == true and
+            .distribution_trust.macos.developer_id_signed == true and
+            .distribution_trust.macos.notarized == true and
+            .distribution_trust.windows.authenticode_signed == true and
+            .blockers == []
+          ' candidate-metadata/candidate-manifest.json >/dev/null || {
+            echo 'candidate remains explicitly nonpublishing because platform trust or provenance is incomplete' >&2
+            exit 1
+          }
+          jq -e --arg source_sha "$VALIDATED_SOURCE_SHA" '
+            (.documentNamespace | contains("/candidate/" + $source_sha + "/")) and
+            all(.packages[]; .versionInfo == $source_sha)
+          ' candidate-metadata/candidate.spdx.json >/dev/null
+          cp candidate-metadata/candidate.spdx.json release/Spurfire-client.spdx.json
+          for file in "${expected[@]}"; do
+            gh attestation verify "release/$file" --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$VALIDATED_SOURCE_SHA"
+          done
 
           releases_json="$(
             gh api "/repos/$GITHUB_REPOSITORY/releases?per_page=100"
@@ -196,19 +348,25 @@ jobs:
             jq --arg tag "$RELEASE_TAG" \
               '[.[] | select(.tag_name == $tag)] | length' <<< "$releases_json"
           )"
-          test "$release_count" -le 1
-          if test "$release_count" -eq 0; then
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --draft \
-              --title "Spurfire ${RELEASE_TAG#v}" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              release/Spurfire-linux-x86_64.tar.gz \
-              release/Spurfire-macos-universal.zip \
-              release/Spurfire-windows-x86_64.zip \
-              release/SHA256SUMS > /dev/null
-          fi
+          test "$release_count" -eq 0 || {
+            echo "release $RELEASE_TAG appeared during validation; refusing overwrite" >&2
+            exit 1
+          }
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$VALIDATED_TAG_SHA"
+          test "$(scripts/check-release-tag-binding.sh "$version" "$VALIDATED_TAG_SHA")" = "$VALIDATED_SOURCE_SHA"
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "Spurfire ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            release/Spurfire-linux-arm64.tar.gz \
+            release/Spurfire-linux-x86_64.tar.gz \
+            release/Spurfire-macos-universal.zip \
+            release/Spurfire-windows-x86_64.zip \
+            release/Spurfire-client.spdx.json \
+            release/SHA256SUMS > /dev/null
 
           release_json="$(
             gh api "/repos/$GITHUB_REPOSITORY/releases?per_page=100" |
@@ -224,6 +382,8 @@ jobs:
             (([.assets[].name] | sort) ==
              ([
                "SHA256SUMS",
+               "Spurfire-client.spdx.json",
+               "Spurfire-linux-arm64.tar.gz",
                "Spurfire-linux-x86_64.tar.gz",
                "Spurfire-macos-universal.zip",
                "Spurfire-windows-x86_64.zip"
@@ -232,7 +392,7 @@ jobs:
             <<< "$release_json" > /dev/null
 
           verify_dir="$(mktemp -d)"
-          for file in "${expected[@]}" SHA256SUMS; do
+          for file in "${expected[@]}" SHA256SUMS Spurfire-client.spdx.json; do
             asset_id="$(
               jq -er --arg name "$file" '
                 [.assets[] | select(.name == $name)] |
@@ -263,6 +423,8 @@ jobs:
               (([.assets[].name] | sort) ==
                ([
                  "SHA256SUMS",
+                 "Spurfire-client.spdx.json",
+                 "Spurfire-linux-arm64.tar.gz",
                  "Spurfire-linux-x86_64.tar.gz",
                  "Spurfire-macos-universal.zip",
                  "Spurfire-windows-x86_64.zip"

@@ -88,13 +88,63 @@ jobs:
 
       - name: Validate game and release helpers
         run: |
-          bash -n scripts/build-gdext.sh scripts/test-godot.sh scripts/install-just-ci.sh scripts/check-release-metadata.sh
+          bash -n scripts/build-gdext.sh scripts/test-godot.sh scripts/install-just-ci.sh scripts/check-release-metadata.sh scripts/check-godot-secret-paths.sh
+          scripts/check-godot-secret-paths.sh
           scripts/build-gdext.sh --self-test
           scripts/test-godot.sh --self-test
           scripts/check-release-metadata.sh
 
-      - name: Build extension and run bounded smoke tests
-        run: just game-test
+      - name: Run credential-free signed peer and migration process proofs
+        shell: bash
+        run: just p2p-proof
+
+      - name: Build extension and run bounded gameplay and one-lobby smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          just game-test 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
+          scripts/check-alpha-smoke-log.sh "$RUNNER_TEMP/godot-smoke.log"
+
+  release-qa:
+    name: Alpha release QA tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate release/check tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            scripts/check-alpha-smoke-log.sh \
+            scripts/check-godot-secret-paths.sh \
+            scripts/prove-local-p2p.sh \
+            scripts/run-alpha-two-client.sh \
+            scripts/check-release-metadata.sh
+          python3 -m py_compile \
+            scripts/aggregate-playtest.py \
+            scripts/check-alpha-evidence.py \
+            scripts/check-alpha-lifecycle-evidence.py \
+            scripts/make-alpha-candidate-metadata.py
+          python3 -m unittest discover -s scripts/tests -v
+          scripts/check-godot-secret-paths.sh
+          if proof_output="$(TS_CLIENT_ID=sentinel scripts/prove-local-p2p.sh 2>&1)"; then
+            echo 'error: signed process proof accepted an inherited credential variable' >&2
+            exit 1
+          fi
+          grep -Fqx 'error: TS_CLIENT_ID must be unset for the credential-free process proof' <<<"$proof_output"
+
+      - name: Confirm the evidence template fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if scripts/check-alpha-evidence.py docs/release-evidence/template.json --version 0.2.0; then
+            echo 'error: incomplete release-evidence template unexpectedly passed' >&2
+            exit 1
+          fi
 
   e2e:
     name: e2e (Tailscale API, manual)

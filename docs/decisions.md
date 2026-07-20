@@ -145,10 +145,32 @@ absence plus encrypted-secret erasure, or complete shared-resource cleanup.
 Public real activation additionally requires capability migration on every lobby route, an
 independent default-off real-mutation kill switch, a dynamic encrypted child-OAuth vault,
 mutation-closed startup reconciliation, exact-ID orphan/cleanup operations, application and
-gateway abuse controls, private operator identity, restrictive child policy, privacy approval,
-alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
+gateway abuse controls, private operator identity, live restrictive child-policy qualification,
+privacy approval, alerts/runbook exercises, persistent non-secret state, clean Linux/cross-platform checks, and a
 separate GitOps review. The hosted public deployment remains `dryRun=true`, `provisioningMode=dry_run`,
 `existingSecret=""`, and `persistence.enabled=false` until that review.
+
+## D12 — Session identity is WireGuard channel binding plus ephemeral Ed25519
+
+**Status:** accepted for Alpha session identity
+
+A RustScale-delivered UDP source address is authenticated by WireGuard cryptokey routing and is
+used only as channel binding. Tailscale node keys are Curve25519 transport keys and never sign
+Spurfire messages. Every client instead generates a fresh native-only Ed25519 key for each lobby
+session generation, proves possession through its participant-capability-bound endpoint
+registration, and signs canonical domain-separated wire 1.2 envelopes. The signature binds the
+lobby, network and session generations, complete signed roster hash, sender, authority epoch,
+sequence, simulation tick, and fixed-layout payload.
+
+The server signs the complete endpoint/key projection with a per-lobby memory-only key. Peers
+reject duplicate IP or claimed node keys, unknown senders, source endpoint mismatches, generation
+or roster mismatches, non-strict signatures, and replay before state mutation. Node-key rotation
+requires increasing-sequence re-registration; the application identity remains the session key
+plus tailnet IP. A server restart cannot silently replace its manifest key inside an old replay
+domain: active sessions bump generation and re-key/re-register. Unsigned compatibility is limited
+to explicit dry-run/demo/test mode. This does not verify a peer's own gameplay truth and does not
+resolve D5 ranked verification. Canonical formats, validation ordering, and rotation rules are
+specified in `docs/session-identity-architecture.md`.
 
 ## Settled design questions (formerly open, 2026-07-17)
 

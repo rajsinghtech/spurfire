@@ -6,7 +6,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// Current Spurfire wire version.
-pub const WIRE_VERSION: WireVersion = WireVersion::new(1, 1);
+pub const WIRE_VERSION: WireVersion = WireVersion::new(1, 2);
 
 /// Alias that reads naturally at call sites comparing against the local build.
 pub const CURRENT_WIRE_VERSION: WireVersion = WIRE_VERSION;

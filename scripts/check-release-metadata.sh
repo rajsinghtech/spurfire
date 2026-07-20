@@ -83,8 +83,8 @@ grep -Fqi 'playtest pending' "$notes" || {
   echo "error: $notes must say that observational playtesting is pending" >&2
   exit 1
 }
-grep -Fq '| M2 | Saddle Dive | **implementation complete / playtest pending** |' docs/prototype-plan.md || {
-  echo "error: docs/prototype-plan.md must keep M2 implementation complete / playtest pending" >&2
+grep -Eq '^\| M2 \| [^|]+ \| \*\*source complete / credentialed playtest pending\*\* \|' docs/prototype-plan.md || {
+  echo "error: docs/prototype-plan.md must keep M2 source complete / credentialed playtest pending" >&2
   exit 1
 }
 
@@ -96,5 +96,27 @@ grep -Fq 'Open latest published release' crates/spurfire-server/src/landing.html
   echo "error: landing page must not claim that the release candidate is already published" >&2
   exit 1
 }
+
+grep -Fq "github.ref == 'refs/heads/main'" .github/workflows/packages.yml || {
+  echo "error: package publication must be limited to main/SHA artifacts, never tag aliases" >&2
+  exit 1
+}
+grep -Fq 'scripts/check-alpha-evidence.py' .github/workflows/packages.yml || {
+  echo "error: tag validation must require exact-SHA Alpha evidence" >&2
+  exit 1
+}
+grep -Fq 'environment: alpha-release' .github/workflows/client-publish.yml || {
+  echo "error: client publication must use the protected Alpha release environment" >&2
+  exit 1
+}
+grep -Fq 'refusing to overwrite it' .github/workflows/client-publish.yml || {
+  echo "error: client publication must refuse release overwrite" >&2
+  exit 1
+}
+if grep -Eq '(^|[[:space:]])(git[[:space:]]+tag|git[[:space:]]+push|gh[[:space:]]+release[[:space:]]+create)' \
+  .github/workflows/client-release.yml; then
+  echo "error: Client Preflight must remain nonpublishing and must not create tags" >&2
+  exit 1
+fi
 
 printf '%s\n' "$version"

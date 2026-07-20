@@ -9,6 +9,8 @@ use thiserror::Error;
 use tokio::time::{timeout, Duration};
 use zeroize::Zeroizing;
 
+use spurfire_protocol::NodeKey;
+
 use crate::{decode, encode, CodecError, Envelope};
 
 #[derive(Debug, Error)]
@@ -27,9 +29,18 @@ pub enum RustScaleTransportError {
     StateDirectory(String),
 }
 
+/// RustScale server owner that clears builder-copied enrollment material on every exit path.
+struct ClearedAuthServer(Server);
+
+impl Drop for ClearedAuthServer {
+    fn drop(&mut self) {
+        self.0.clear_auth_key();
+    }
+}
+
 /// One ephemeral embedded RustScale node with an application UDP socket.
 pub struct RustScalePeer {
-    server: Server,
+    server: ClearedAuthServer,
     socket: UdpListener,
     state_dir: TempDir,
     tailnet_ip: IpAddr,
@@ -50,27 +61,35 @@ impl RustScalePeer {
     /// Enroll an ephemeral node, clear the one-use key, and bind application UDP.
     pub async fn connect(
         hostname: impl Into<String>,
-        auth_key: Zeroizing<String>,
+        auth_key: Zeroizing<Vec<u8>>,
         port: u16,
     ) -> Result<Self, RustScaleTransportError> {
         let state_dir = tempfile::Builder::new()
             .prefix("spurfire-rustscale-")
             .tempdir()
             .map_err(|error| RustScaleTransportError::StateDirectory(error.to_string()))?;
-        let mut server = Server::builder()
-            .hostname(hostname)
-            .auth_key(auth_key.as_str())
-            .state_dir(state_dir.path())
-            .ephemeral(true)
-            .build()?;
-        let status = server.up().await?;
-        server.clear_auth_key();
+        // Keep the controlled owner byte-oriented until the pinned RustScale
+        // builder's final borrowed UTF-8 boundary. The builder may transiently
+        // copy internally; that third-party copy cannot be claimed zeroized.
+        let auth_key_text = std::str::from_utf8(&auth_key)
+            .map_err(|error| RustScaleTransportError::Netstack(error.to_string()))?;
+        let mut server = ClearedAuthServer(
+            Server::builder()
+                .hostname(hostname)
+                .auth_key(auth_key_text)
+                .state_dir(state_dir.path())
+                .ephemeral(true)
+                .build()?,
+        );
+        let status = server.0.up().await;
+        server.0.clear_auth_key();
         drop(auth_key);
+        let status = status?;
         let tailnet_ip = *status
             .tailscale_ips
             .first()
             .ok_or(RustScaleTransportError::NoTailnetIp)?;
-        let socket = server.listen_packet(&format!(":{port}")).await?;
+        let socket = server.0.listen_packet(&format!(":{port}")).await?;
         Ok(Self {
             server,
             socket,
@@ -98,11 +117,25 @@ impl RustScalePeer {
     #[must_use]
     pub fn route_to(&self, peer_ip: IpAddr) -> Option<String> {
         self.server
+            .0
             .status()
             .peers
             .into_iter()
             .find(|peer| peer.ips.contains(&peer_ip))
             .map(|peer| format!("{:?}", peer.path_class))
+    }
+
+    /// Maps a WireGuard-authenticated source IP to the current netmap node key.
+    /// Rotation changes this value and therefore requires a fresh registration.
+    #[must_use]
+    pub fn node_key_for(&self, peer_ip: IpAddr) -> Option<NodeKey> {
+        self.server
+            .0
+            .status()
+            .peers
+            .into_iter()
+            .find(|peer| peer.ips.contains(&peer_ip))
+            .and_then(|peer| NodeKey::parse(&peer.node_key.to_string()).ok())
     }
 
     pub async fn send(
@@ -131,7 +164,7 @@ impl RustScalePeer {
     /// Close the embedded node. RustScale may ask the caller to retry while
     /// platform port-mapper cleanup is still settling.
     pub async fn close(&mut self) -> Result<(), RustScaleTransportError> {
-        self.server.close().await?;
+        self.server.0.close().await?;
         Ok(())
     }
 }

@@ -10,7 +10,6 @@ COPY Cargo.toml Cargo.lock ./
 # must be present even though only spurfire-server and its dependencies compile.
 COPY crates/ crates/
 COPY vendor/boringtun/ vendor/boringtun/
-COPY vendor/rustscale-netstack/ vendor/rustscale-netstack/
 
 ARG TARGETARCH
 RUN --mount=type=cache,id=spurfire-registry,target=/usr/local/cargo/registry,sharing=locked \

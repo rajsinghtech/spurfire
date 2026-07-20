@@ -1,12 +1,12 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The integration is pinned to RustScale revision `8511e0b78074bf07b59d53cf1a2eb349cd0d2407` plus the focused vendored netstack wakeup patch documented in `vendor/rustscale-netstack/PROVENANCE.md`; do not update either without rerunning the live lifecycle probe.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. Both direct RustScale dependencies are pinned to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; do not update the pin without rerunning the dependency gates and live lifecycle probe.
 
 ## Components
 
 - `crates/spurfire-net` defines transport-independent, 1,200-byte-bounded envelopes.
 - Envelopes carry heartbeats, rider input/snapshots, shot commands/results, authority announcements, and migration snapshots.
-- `SessionState` rejects replayed/out-of-order sequences, wrong-lobby traffic, and stale authority epochs. Silent authority loss elects the lowest connected `PlayerId` and advances the epoch.
+- `SessionState` rejects replayed/out-of-order sequences, wrong-lobby traffic, and stale authority epochs. Silent authority loss elects the lowest connected `PlayerId` and advances the epoch. Remote authority claims are accepted only as self-nominations: an exact one-epoch advance while the current authority is silent in the receiver's own view (the local player always counts as fresh), or a same-epoch tie-break toward the lowest `PlayerId` only after that same silence timeout; reannouncements by the installed authority remain valid; third-party installs and epoch jumps such as `u64::MAX` are rejected as `InvalidAuthorityClaim` before any state can mutate, so a signed roster member cannot freeze legitimate lower-epoch traffic.
 - `spurfire_net::rustscale::RustScalePeer` enrolls an ephemeral node with a one-use auth key, clears the key after `up()`, binds `Server::listen_packet`, and sends/receives through `UdpListener`.
 - `SnapshotBuffer` interpolates authoritative states two ticks behind, follows the shortest yaw arc, caps velocity extrapolation at fifteen ticks (250 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
 - Godot's native `PeerSession` node owns RustScale on a background Tokio runtime and moves packets to the main thread through signals. OAuth credentials remain control-plane-only; this class accepts only a narrow join auth key.
@@ -14,7 +14,7 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
 
-RustScale revision `8511e0b` did not wake its smoltcp poll loop after `UdpListener::send_to` enqueued application data, allowing packets to batch behind a one-second idle fallback. Spurfire's pinned patch wakes after enqueue and includes a sub-500-ms idle-send regression test. This is tracked upstream as [rustscale#75](https://github.com/rajsinghtech/rustscale/issues/75). A managed 1,600-snapshot-per-peer soak measured steady maximum packet gaps around 41–54 ms; control-map reconnects caused brief 125–287 ms gaps but no rejection, disconnect, accumulated delay, or traffic loss.
+RustScale v0.1.4 owns the netstack poll-loop notification in `UdpListener`, wakes it after a successful application-UDP enqueue, and includes idle-delivery and 20 Hz anti-batching regression tests. Spurfire therefore carries no local netstack override. A managed 1,600-snapshot-per-peer soak measured steady maximum packet gaps around 41–54 ms; control-map reconnects caused brief 125–287 ms gaps but no rejection, disconnect, accumulated delay, or traffic loss.
 
 ## Live proof
 
@@ -41,11 +41,15 @@ On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRA
 
 ## Security boundaries
 
+Canonical formats, key custody, validation ordering, and rotation rules for signed sessions
+are specified in `docs/session-identity-architecture.md` (decision D12).
+
 - Never pass organization or child OAuth credentials to Godot.
 - Never print auth keys. The live script writes them only to its private temporary directory and deletes that directory on every exit path.
 - Datagram size is checked before JSON parsing and before send.
-- Application identity is the validated lobby/player ID in the envelope, not an untrusted hostname.
-- Sequence rejection limits replay within a peer session; authority epochs prevent a disconnected old host from resuming authority.
+- Wire 1.2 binds each gameplay datagram to the exact lobby, network generation, session generation, signed complete-roster hash, sender, authority epoch, sequence, tick, and canonical fixed-layout payload with a native-only ephemeral Ed25519 key. RustScale's cryptokey routing authenticates the tailnet source IP; the native receive gate checks that IP/port against the signed manifest before signature, replay, epoch, or authority state can mutate. A current netmap node-key claim is an advisory WireGuard cross-check, never an application signing key.
+- The capability-bound endpoint route verifies key possession, rejects duplicate IP/node claims, and returns a server-signed complete projection. Server restart cannot reuse its memory-only manifest key silently: active sessions bump generation and must re-key/re-register. Unknown senders never auto-insert. Unsigned packets remain available only after explicit local demo/test opt-in.
+- This defeats cross-player forgery and cross-lobby/generation/session replay. It does not make a peer's own gameplay claims truthful, defeat control-plane/Tailscale compromise, prevent dropping/DoS, or solve ranked verification. Real product readiness remains forced closed on the coherent authority and native secret-handoff gates.
 
 ## Remaining production work
 
@@ -60,9 +64,10 @@ Design for the first four items is settled in `docs/decisions.md` D6/D7 and
   hash.
 - Add lag compensation (D7): authority-side rewind over ~250 ms position + stance history,
   capped at 150 ms; stance must be in snapshots from M2 onward.
-- Drive `PeerSession` from the lobby join HTTP flow and distribute peer endpoints via the
-  roster (additive measurements field), replacing file-based demo discovery.
-- Add authenticated session-level packet tags if tailnet membership alone is not sufficient for the final threat model.
+- The Alpha shell now drives `PeerSession` from invitation join and consumes a
+  capability-protected, server-signed, memory-only endpoint/key projection bound to the exact
+  roster, network/session generation, and revision. Replace the remaining GDScript HTTP secret
+  boundary with native zeroizing HTTPS handoff before real activation.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
 - Exercise forced DERP, route transitions, roaming, packet loss, and 16-peer churn.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.

@@ -4,6 +4,7 @@ config_version=5
 [application]
 config/name="Spurfire"
 config/version="0.2.0"
+config/build_commit="development"
 run/main_scene="res://scenes/bootstrap.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
@@ -21,6 +22,7 @@ textures/vram_compression/import_etc2_astc=true
 
 [physics]
 common/physics_ticks_per_second=60
+common/physics_interpolation=true
 3d/default_gravity=22.0
 
 [input]
@@ -111,4 +113,8 @@ scoreboard={
 release_mouse={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":4194305)]
+}
+toggle_diagnostics={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194334)]
 }

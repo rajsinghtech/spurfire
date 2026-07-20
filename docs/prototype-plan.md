@@ -26,15 +26,16 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 |---|---|---|---|
 | M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
-| M2 | Saddle Dive | **implementation complete / playtest pending** | measurable risk/reward; testers dive 2–4x/match |
+| M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | not started | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
-| M6 | Networked lobby: complete the loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
+| M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
-Build order is strict: each milestone's tuning depends on the previous one's feel. M6's
-spine (control plane, election, peer UDP transport, replication) was built early and is
-live-verified; its remaining work (§M6) waits for the M5 fun verdict.
+Build order is strict: each milestone's tuning depends on the previous one's feel. The invited-
+friends M2 movement/combat/failover source path is implemented now; it is not deferred to M6.
+M6 retains scale, scoring/objective continuity, soak, joining churn, live qualification, and
+release evidence after the M5 fun verdict.
 
 Every gameplay milestone follows the established pattern: deterministic Rust kernel in
 `spurfire-protocol`/`spurfire-gdext`, thin Godot adapter, headless smoke test.
@@ -47,7 +48,7 @@ Every gameplay milestone follows the established pattern: deterministic Rust ker
 
 **Mechanics in scope:** gait state machine (stand/walk/trot/gallop), accel/decel curves,
 rein turn (rate-limited at speed), drift/power-turn (handbrake), jump, terrain speed factors,
-slope momentum (+15% downhill accel, -15% uphill), camera (chase, speed FOV 70->85).
+slope momentum (+15% downhill accel, -15% uphill), camera (chase, speed FOV 70->78).
 
 **Tuning table:**
 
@@ -324,12 +325,13 @@ encounter math below); (3) respawn ride-back time at 16p radius (~50–75s to ce
 
 **Goal:** everything above works over a real tailnet with one elected authority, 8+ players.
 
-**Status: the spine is built and live-verified** — lobby HTTP service, `election_v1`,
-peer UDP transport (`spurfire-net` + embedded RustScale), prediction/reconciliation and
-interpolation (`NetworkRider`/`PeerSession`), and a three-peer live probe with forced
-authority-kill migration at the session level. What remains is completing the loop:
+**Status: the spine plus invited-friends M2 source path are built** — lobby HTTP service,
+`election_v1`, signed peer UDP transport (`spurfire-net` + embedded RustScale), player-keyed
+authority simulation, prediction/reconciliation, authority-only combat results, and bounded
+hash-checked epoch-2 state continuation. Credential-free tests prove source behavior; credentialed
+packaged-client and human evidence is still outstanding.
 
-**Remaining scope (build after the M5 fun verdict):**
+**Remaining scale/qualification scope (build after the M5 fun verdict):**
 
 1. **One migration rule, peers own it.** Mid-match authority is decided by peers: on 2s
    authority silence, every survivor recomputes `election_v1` over the match-start
@@ -338,19 +340,20 @@ authority-kill migration at the session level. What remains is completing the lo
    the same protocol scoring function; the server's scored re-election applies only in
    `READY`, and during `IN_MATCH` the service validates the successor's heartbeat by
    recomputing the same function. Split-brain prevented by construction + existing epochs.
-2. **Real state handoff.** New `MatchState` DTO (scores, match clock, per-player
-   rider/horse/health/ammo/Spur, objective state, RNG counter). Authority broadcasts 2 Hz
-   keyframes alongside 20 Hz deltas; every peer keeps the 10s ring buffer; successor
-   restores keyframe + deltas and announces with the hash of the *restored* state
-   (divergence check — `state_hash` stops being a stub).
+2. **Scale the implemented M2 handoff.** The invited-friends path already carries bounded
+   per-rider movement/health/ammo/input/shot receipts and verifies the restored-state hash before
+   epoch continuation. Extend it with M5 score, match clock, Spur, objectives, RNG counter,
+   delta-compressed 2 Hz keyframes/20 Hz deltas, and the full 10-second ring needed for 8–16 riders.
 3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
    ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
    capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
-4. **Client join flow.** Godot client drives the lobby HTTP API end-to-end: create/join
-   (one-use key from the first 201 into `PeerSession`), measurement reporting, `/authority`
-   poll, creator start, authority heartbeats, results submission. Roster-driven peer
-   endpoints replace file-based demo discovery (clients report their tailnet address via an
-   additive measurements field). Per-lobby **join code** shared by the creator; no accounts.
+4. **Client join flow.** The gated Alpha shell now drives one-use create/invitation/join,
+   capability-bound key proof, server-signed exact-roster endpoint/session-key projection,
+   wire 1.2 signed native source-checked traffic, route/RTT election reports, creator start,
+   peer Leave, self-leave, and truthful teardown into `PeerSession`. Real activation remains
+   dark because the current Godot HTTP adapter copies first-response secrets through
+   GDScript/GString; replace it with native zeroizing HTTPS handoff, then gather credentialed
+   packaged-client M2 and cleanup evidence. Per-lobby join code; no accounts.
 5. **Landing-page live stats.** Secret-free aggregate stats endpoint feeding
    spurfire.rajsingh.info: riders online, lobbies by state, direct-connection rate, median
    RTT. No lobby IDs, no join material.
@@ -449,8 +452,12 @@ and angle; clamp flag; horizontal impulse, vertical pop, launch height, resultin
 total speed, and nominal airtime; landing tick and actual airtime; shot attempts, accepted
 shots, hits, headshots, reversal hits, and damage dealt; landing terrain, quantized slope,
 outcome, and landing damage; damage taken and death within the inclusive landing-through-3s
-window; remount tick/time; and terminal censor reason. It contains no score delta, bond gain,
-credential, seed, or client-claimed style credit.
+window; remount tick/time; and terminal censor reason. The client appends exactly one
+allowlisted finalized/censored row to a per-session JSONL file under `user://logs`; each line
+is flushed so an interrupted session remains parseable and prior sessions are preserved.
+Session rows include a random local session ID, schema, build identifier, and fixed simulation
+rate. They contain no score delta, bond gain, credential, capability, join code, seed,
+endpoint, or client-claimed style credit.
 
 | Metric | Target band | Dial if out of band |
 |---|---|---|

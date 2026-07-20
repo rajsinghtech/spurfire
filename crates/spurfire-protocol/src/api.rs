@@ -4,11 +4,13 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{
-    AuthorityElection, AuthorityScore, AuthoritySummary, ConnectivitySample, HorseSelection,
-    InputHash, JoinCredential, Lobby, LobbyId, LobbyState, Player, PlayerId, ProvisioningMode,
-    RouteSummary, UnixMillis, WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION,
+    credential::DeserializedSecret, AuthorityElection, AuthorityScore, AuthoritySummary,
+    ConnectivitySample, HorseSelection, InputHash, JoinCredential, Lobby, LobbyId, LobbyState,
+    NodeKey, Player, PlayerId, ProvisioningMode, RosterHash, RouteSummary, SessionPublicKey,
+    SessionSignature, UnixMillis, WireVersion, WireVersionMismatch, AUTHORITY_FORMULA_VERSION,
     DEFAULT_MAX_PLAYERS, MAX_PLAYERS, WIRE_VERSION,
 };
 
@@ -25,6 +27,10 @@ fn is_false(value: &bool) -> bool {
 
 fn default_authority_formula_version() -> String {
     AUTHORITY_FORMULA_VERSION.to_owned()
+}
+
+const fn default_public_provisioning_mode() -> ProvisioningMode {
+    ProvisioningMode::TailnetPerLobby
 }
 
 /// Non-secret description of a mutating call suppressed or planned by dry-run mode.
@@ -58,7 +64,11 @@ pub struct CreateLobbyRequest {
     /// Roster capacity; defaults to 8 and may not exceed 16.
     #[serde(default = "default_max_players")]
     pub max_players: u8,
-    /// Shared-tailnet, dedicated child-tailnet, or dry-run behavior.
+    /// Dedicated child-tailnet behavior for public real clients. The field is
+    /// retained for dry-run/development compatibility; omission defaults to the
+    /// server-selected dedicated mode and secure real admission rejects any
+    /// other value.
+    #[serde(default = "default_public_provisioning_mode")]
     pub provisioning_mode: ProvisioningMode,
     /// Optional placement hint; it does not affect election behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,19 +106,257 @@ pub struct CreateLobbyResponse {
     pub metadata: ResponseMetadata,
 }
 
+/// First successful create response. Replay uses [`CreateLobbyResponse`] and
+/// never re-emits capability plaintext.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateLobbyFirstResponse {
+    /// Non-secret create receipt.
+    #[serde(flatten)]
+    pub response: CreateLobbyResponse,
+    /// Creator control capability returned once.
+    pub creator_capability: OpaqueCapability,
+}
+
 /// Pollable `GET /v1/lobbies/{lobby_id}` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LobbyResponse {
     /// Public snapshot with no secret material.
     #[serde(flatten)]
     pub lobby: Lobby,
+    /// Exact backing generation used by participant capabilities and endpoints.
+    pub network_generation: u64,
+    /// Monotonic roster revision. Endpoint registrations are bound to it.
+    pub roster_revision: u64,
+    /// Current application session generation.
+    pub session_generation: u64,
+    /// Current memory-only lobby manifest verification key. A changed key
+    /// requires clients to discard every previously pinned manifest.
+    pub manifest_public_key: SessionPublicKey,
+    /// Current election input hash used by the authority heartbeat, when elected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_input_hash: Option<InputHash>,
+    /// Capability-protected, memory-only gameplay endpoint projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<LobbySessionProjection>,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
 }
 
+/// One current participant application endpoint. This topology metadata is
+/// capability-protected, retained only in server memory, and never rendered in
+/// the ordinary roster UI or persisted to telemetry/support artifacts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbySessionPeer {
+    /// Capability-bound roster subject.
+    pub player_id: PlayerId,
+    /// Validated RustScale tailnet address, never a physical/public endpoint.
+    pub tailnet_address: String,
+    /// Application UDP port inside the selected lobby tailnet.
+    pub application_port: u16,
+    /// Ephemeral application signing key. Required for secure real admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_public_key: Option<SessionPublicKey>,
+    /// Advisory WireGuard node-key claim, cross-checked by each peer's netmap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key: Option<NodeKey>,
+    /// Service receipt time used for expiry/freshness.
+    pub received_at: UnixMillis,
+}
+
+/// Exact selected-lobby endpoint projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbySessionProjection {
+    /// Exact lobby network generation.
+    pub network_generation: u64,
+    /// Exact roster revision to which every row is bound.
+    pub roster_revision: u64,
+    /// Exact application session generation.
+    pub session_generation: u64,
+    /// True only when every current roster member has a secure registration.
+    pub secure: bool,
+    /// Hash of the complete secure roster, absent for an incomplete/insecure projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster_hash: Option<RosterHash>,
+    /// Signature by the memory-only lobby manifest key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_signature: Option<SessionSignature>,
+    /// Public half used to verify `manifest_signature`.
+    pub manifest_public_key: SessionPublicKey,
+    /// Fresh current-roster endpoints, sorted by player ID.
+    pub peers: Vec<LobbySessionPeer>,
+}
+
+/// `POST /v1/lobbies/{id}/session/endpoint` request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterSessionEndpointRequest {
+    /// Must equal the selected lobby generation.
+    pub network_generation: u64,
+    /// Must equal the current roster revision.
+    pub roster_revision: u64,
+    /// Strictly increasing per-participant registration sequence.
+    pub sequence: u64,
+    /// RustScale CGNAT or applicable ULA address only.
+    pub tailnet_address: String,
+    /// Bounded application UDP port.
+    pub application_port: u16,
+    /// Ephemeral application public key. Optional only for explicit dry-run/demo mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_public_key: Option<SessionPublicKey>,
+    /// Proof of possession over the capability-bound registration tuple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_proof: Option<SessionSignature>,
+    /// Advisory current WireGuard node-key claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key: Option<NodeKey>,
+}
+
+/// Successful endpoint registration and refreshed exact-lobby projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterSessionEndpointResponse {
+    /// Current public lobby snapshot.
+    pub lobby: Lobby,
+    /// Memory-only endpoint projection for the selected lobby.
+    pub session: LobbySessionProjection,
+}
+
 /// Conventional route-specific alias for [`LobbyResponse`].
 pub type GetLobbyResponse = LobbyResponse;
+
+/// Public names for exact-lobby capability privileges. Plaintext capabilities are
+/// returned only in explicitly documented first-success responses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LobbyCapabilityScope {
+    /// Read the selected lobby and cached network view.
+    LobbyRead,
+    /// Submit bounded participant/network measurements.
+    LobbyReport,
+    /// Create one-use invitations.
+    LobbyInvite,
+    /// Start and otherwise manage lobby coordination.
+    LobbyManage,
+    /// End the lobby and request exact cleanup.
+    LobbyDestroy,
+    /// Consume once to join one exact lobby.
+    LobbyJoin,
+    /// Participate in heartbeat/results coordination.
+    LobbyPlay,
+    /// Remove only the capability-bound participant.
+    LobbyLeaveSelf,
+    /// Operator-issued one-use admission to one real create.
+    LobbyCreateReal,
+}
+
+/// First-response-only opaque capability. Debug output remains redacted.
+#[derive(PartialEq, Eq)]
+pub struct OpaqueCapability {
+    token: Zeroizing<String>,
+    /// Non-secret privileges bound to the token verifier.
+    pub scopes: Vec<LobbyCapabilityScope>,
+    /// Absolute capability expiry.
+    pub expires_at: UnixMillis,
+}
+
+impl OpaqueCapability {
+    /// Constructs an explicitly exposable first-response capability.
+    #[must_use]
+    pub fn new(
+        token: impl Into<String>,
+        scopes: Vec<LobbyCapabilityScope>,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            token: Zeroizing::new(token.into()),
+            scopes,
+            expires_at,
+        }
+    }
+
+    /// Moves an already protected allocation into the first-response DTO.
+    #[must_use]
+    pub fn from_zeroizing(
+        token: Zeroizing<String>,
+        scopes: Vec<LobbyCapabilityScope>,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            token,
+            scopes,
+            expires_at,
+        }
+    }
+
+    /// Exposes plaintext only to the dedicated first-response serializer/native handoff.
+    #[must_use]
+    pub fn expose_token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueCapability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            token: DeserializedSecret,
+            scopes: Vec<LobbyCapabilityScope>,
+            expires_at: UnixMillis,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            token: wire.token.into_zeroizing(),
+            scopes: wire.scopes,
+            expires_at: wire.expires_at,
+        })
+    }
+}
+
+impl fmt::Debug for OpaqueCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpaqueCapability")
+            .field("token", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl Serialize for OpaqueCapability {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            token: &'a str,
+            scopes: &'a [LobbyCapabilityScope],
+            expires_at: UnixMillis,
+        }
+        Wire {
+            token: &self.token,
+            scopes: &self.scopes,
+            expires_at: self.expires_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// `POST /v1/lobbies/{id}/invitations` request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateInvitationRequest {}
+
+/// First-success invitation returned once. Replays never re-emit this object.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateInvitationResponse {
+    /// One-use invitation capability.
+    pub invitation: OpaqueCapability,
+    /// Lobby generation to which the invitation is bound.
+    pub network_generation: u64,
+}
 
 /// `POST /v1/lobbies/{lobby_id}/join` request body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,12 +391,18 @@ impl JoinLobbyRequest {
 /// Its custom serializer is the sole protocol serializer allowed to expose an
 /// auth key. Its derived-style `Debug` path delegates to the credential's
 /// redacted implementation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct JoinLobbyResponse {
     /// One-use secret returned exactly once.
     pub join_credential: JoinCredential,
+    /// Participant capability returned exactly once with the enrollment key.
+    pub participant_capability: OpaqueCapability,
     /// Public post-join lobby snapshot.
     pub lobby: Lobby,
+    /// Exact application session generation (zero before first start).
+    pub session_generation: u64,
+    /// Memory-only lobby manifest verification key.
+    pub manifest_public_key: SessionPublicKey,
     /// Dry-run metadata.
     pub metadata: ResponseMetadata,
 }
@@ -161,14 +415,20 @@ impl Serialize for JoinLobbyResponse {
         #[derive(Serialize)]
         struct Wire<'a> {
             join_credential: crate::credential::JoinCredentialWire<'a>,
+            participant_capability: &'a OpaqueCapability,
             lobby: &'a Lobby,
+            session_generation: u64,
+            manifest_public_key: SessionPublicKey,
             #[serde(flatten)]
             metadata: &'a ResponseMetadata,
         }
 
         Wire {
             join_credential: self.join_credential.as_wire(),
+            participant_capability: &self.participant_capability,
             lobby: &self.lobby,
+            session_generation: self.session_generation,
+            manifest_public_key: self.manifest_public_key,
             metadata: &self.metadata,
         }
         .serialize(serializer)
@@ -183,7 +443,10 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
         #[derive(Deserialize)]
         struct Wire {
             join_credential: JoinCredential,
+            participant_capability: OpaqueCapability,
             lobby: Lobby,
+            session_generation: u64,
+            manifest_public_key: SessionPublicKey,
             #[serde(flatten)]
             metadata: ResponseMetadata,
         }
@@ -191,7 +454,10 @@ impl<'de> Deserialize<'de> for JoinLobbyResponse {
         let wire = Wire::deserialize(deserializer)?;
         Ok(Self {
             join_credential: wire.join_credential,
+            participant_capability: wire.participant_capability,
             lobby: wire.lobby,
+            session_generation: wire.session_generation,
+            manifest_public_key: wire.manifest_public_key,
             metadata: wire.metadata,
         })
     }
@@ -396,6 +662,11 @@ pub struct StartLobbyResponse {
     pub map_seed: u64,
     /// Elected authority.
     pub authority: AuthoritySummary,
+    /// Exact deterministic election input bound to authority heartbeats.
+    pub input_hash: InputHash,
+    /// Fresh application session generation created by this start. Clients
+    /// must re-register before entering gameplay in this replay domain.
+    pub session_generation: u64,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
@@ -511,6 +782,13 @@ pub struct CapabilityModes {
 /// `GET /v1/capabilities` response. It contains booleans and verdicts only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
+    /// Product-level admission decision. Provider probes alone never open Create Lobby.
+    #[serde(default)]
+    pub real_lobby_creation_authorized: bool,
+    /// Product-level join decision. It remains false unless startup reconciliation
+    /// and every real admission gate are ready; provider probes alone never open Join.
+    #[serde(default)]
+    pub real_lobby_join_authorized: bool,
     /// OAuth token exchange succeeded.
     pub oauth_token_ok: bool,
     /// Organization tailnet listing is permitted.
@@ -572,6 +850,14 @@ pub enum ApiValidationError {
         /// Advertised version.
         version: WireVersion,
     },
+    /// Secure session admission requires wire 1.2 or newer from every member.
+    #[error("player {player_id} uses unsigned-session wire version {version}")]
+    SecureSessionWireVersionRequired {
+        /// Incompatible player.
+        player_id: PlayerId,
+        /// Advertised version.
+        version: WireVersion,
+    },
     /// At least one roster member uses a different election formula.
     #[error("player {player_id} uses incompatible authority formula {formula_version}")]
     MixedAuthorityFormula {
@@ -585,6 +871,20 @@ pub enum ApiValidationError {
 /// Validates the wire and formula start guards for every roster member.
 pub fn validate_start_roster(roster: &[Player]) -> Result<(), ApiValidationError> {
     validate_start_roster_against(roster, WIRE_VERSION, AUTHORITY_FORMULA_VERSION)
+}
+
+/// Refuses mixed signed/unsigned rosters for secure real admission.
+pub fn validate_secure_start_roster(roster: &[Player]) -> Result<(), ApiValidationError> {
+    validate_start_roster(roster)?;
+    for player in roster {
+        if player.wire_version.major() != 1 || player.wire_version.minor() < 2 {
+            return Err(ApiValidationError::SecureSessionWireVersionRequired {
+                player_id: player.player_id,
+                version: player.wire_version,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Variant of [`validate_start_roster`] for rolling upgrades and test vectors.
@@ -710,14 +1010,21 @@ mod tests {
     fn auth_key_is_serialized_only_by_explicit_first_join_response() {
         let secret = "synthetic-auth-key-canary-secret-value";
         let response = JoinLobbyResponse {
+            participant_capability: OpaqueCapability::new(
+                "synthetic-participant-capability",
+                vec![LobbyCapabilityScope::LobbyRead],
+                UnixMillis::new(300_000),
+            ),
             join_credential: JoinCredential::new(
                 "credential-1",
-                secret,
+                Zeroizing::new(secret.into()),
                 "example.ts.net",
                 vec!["tag:spurfire-lobby-example".into()],
                 UnixMillis::new(300_000),
             ),
             lobby: lobby(),
+            session_generation: 0,
+            manifest_public_key: SessionPublicKey::from_bytes([3; 32]),
             metadata: ResponseMetadata::default(),
         };
         let debug = format!("{response:?}");
@@ -743,7 +1050,7 @@ mod tests {
     fn dry_run_placeholder_is_structurally_valid_and_non_secret() {
         let credential = JoinCredential::new(
             "dry-credential",
-            DRY_RUN_AUTH_KEY,
+            Zeroizing::new(DRY_RUN_AUTH_KEY.into()),
             "dry-run.invalid",
             vec!["tag:spurfire-lobby-dry-run".into()],
             UnixMillis::new(1),
@@ -783,10 +1090,13 @@ mod tests {
             state: LobbyState::Starting,
             map_seed: 42,
             authority,
+            input_hash: InputHash::from_bytes([7; 32]),
+            session_generation: 3,
             metadata: ResponseMetadata::default(),
         };
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["state"], "STARTING");
+        assert_eq!(value["session_generation"], 3);
         assert!(value.get("dry_run").is_none());
     }
 }

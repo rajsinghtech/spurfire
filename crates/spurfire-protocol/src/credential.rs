@@ -3,22 +3,64 @@
 use std::fmt;
 
 use serde::{de, Deserialize, Deserializer, Serialize};
+use zeroize::Zeroizing;
 
 use crate::UnixMillis;
 
 /// Placeholder returned instead of key material by a dry-run join.
 pub const DRY_RUN_AUTH_KEY: &str = "DRY_RUN_NO_KEY";
 
+pub(crate) struct DeserializedSecret(Option<Zeroizing<String>>);
+
+impl DeserializedSecret {
+    pub(crate) fn into_zeroizing(mut self) -> Zeroizing<String> {
+        self.0.take().expect("deserialized secret is present")
+    }
+}
+
+impl<'de> Deserialize<'de> for DeserializedSecret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SecretVisitor;
+
+        impl de::Visitor<'_> for SecretVisitor {
+            type Value = DeserializedSecret;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a secret string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DeserializedSecret(Some(Zeroizing::new(value.to_owned()))))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DeserializedSecret(Some(Zeroizing::new(value))))
+            }
+        }
+
+        deserializer.deserialize_string(SecretVisitor)
+    }
+}
+
 /// One-use, ephemeral, preauthorized credential delivered only by a join response.
 ///
 /// This type intentionally does **not** implement [`Serialize`]. The protocol's
 /// explicit `JoinLobbyResponse` serializer is the only built-in wire path that
 /// reveals `auth_key`; normal snapshots and debug formatting cannot emit it.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct JoinCredential {
     /// Stable receipt ID used for idempotent replays.
     pub credential_id: String,
-    auth_key: String,
+    auth_key: Zeroizing<String>,
     /// Tailnet the embedded client should join.
     pub tailnet: String,
     /// Lobby-confined ownership tags.
@@ -32,14 +74,14 @@ impl JoinCredential {
     #[must_use]
     pub fn new(
         credential_id: impl Into<String>,
-        auth_key: impl Into<String>,
+        auth_key: Zeroizing<String>,
         tailnet: impl Into<String>,
         tags: Vec<String>,
         expires_at: UnixMillis,
     ) -> Self {
         Self {
             credential_id: credential_id.into(),
-            auth_key: auth_key.into(),
+            auth_key,
             tailnet: tailnet.into(),
             tags,
             expires_at,
@@ -107,7 +149,7 @@ pub(crate) struct JoinCredentialWire<'a> {
 #[derive(Deserialize)]
 struct OwnedJoinCredentialWire {
     credential_id: String,
-    auth_key: String,
+    auth_key: DeserializedSecret,
     tailnet: String,
     tags: Vec<String>,
     expires_at: UnixMillis,
@@ -125,7 +167,7 @@ impl<'de> Deserialize<'de> for JoinCredential {
         }
         Ok(Self::new(
             wire.credential_id,
-            wire.auth_key,
+            wire.auth_key.into_zeroizing(),
             wire.tailnet,
             wire.tags,
             wire.expires_at,
@@ -141,7 +183,7 @@ mod tests {
     fn debug_never_contains_auth_key() {
         let credential = JoinCredential::new(
             "credential-1",
-            "synthetic-auth-key-super-secret-canary",
+            Zeroizing::new("synthetic-auth-key-super-secret-canary".into()),
             "example.ts.net",
             vec!["tag:spurfire-lobby-example".into()],
             UnixMillis::new(100),

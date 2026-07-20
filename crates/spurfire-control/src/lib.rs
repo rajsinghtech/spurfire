@@ -7,18 +7,22 @@
 //! auth-key and device methods on [`TailscaleClient`].
 
 use std::{
+    collections::BTreeMap,
     fmt,
     time::{Duration, Instant},
 };
 
 use reqwest::{Method, Url};
 use serde::{de, de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 const REDACTED: &str = "<redacted>";
 const MAX_TAILNET_DNS_NAME_LEN: usize = 253;
+/// The single application UDP port admitted between lobby riders.
+pub const SPURFIRE_GAMEPLAY_UDP_PORT: u16 = 41_643;
 
 /// Validated provider-returned tailnet DNS name/FQDN.
 ///
@@ -195,6 +199,13 @@ impl ChildOAuthCredentials {
             client_secret: ChildOAuthClientSecret::new(client_secret),
         }
     }
+
+    /// Transfers both secret allocations into an encrypted-vault adapter.
+    /// Callers must encrypt immediately and must never log or persist plaintext.
+    #[must_use]
+    pub fn into_secret_parts(self) -> (Zeroizing<String>, Zeroizing<String>) {
+        (self.client_id.0, self.client_secret.0)
+    }
 }
 
 impl fmt::Debug for ChildOAuthCredentials {
@@ -303,6 +314,140 @@ impl Default for AuthKeyOpts {
     }
 }
 
+/// Normalized restrictive policy installed in every dedicated lobby tailnet.
+///
+/// Construction is intentionally generated rather than caller-defined: the one rider tag may
+/// reach only the Spurfire application UDP port on same-tag peers. Empty policy sections are
+/// explicit so SSH, Funnel/Serve attributes, route auto-approval, exit-node approval, legacy ACLs,
+/// and policy tests cannot accidentally inherit permissive values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildTailnetPolicy {
+    wire: ChildTailnetPolicyWire,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyGrant {
+    src: Vec<String>,
+    dst: Vec<String>,
+    ip: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyAutoApprovers {
+    #[serde(default)]
+    routes: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    exit_node: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChildTailnetPolicyWire {
+    #[serde(default)]
+    groups: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    hosts: BTreeMap<String, String>,
+    #[serde(default)]
+    tag_owners: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    grants: Vec<PolicyGrant>,
+    #[serde(default)]
+    acls: Vec<serde_json::Value>,
+    #[serde(default)]
+    ssh: Vec<serde_json::Value>,
+    #[serde(default)]
+    node_attrs: Vec<serde_json::Value>,
+    #[serde(default)]
+    auto_approvers: PolicyAutoApprovers,
+    #[serde(default)]
+    tests: Vec<serde_json::Value>,
+}
+
+impl ChildTailnetPolicy {
+    /// Generates the only child-tailnet policy Spurfire accepts.
+    pub fn restrictive_riders(rider_tag: &str) -> Result<Self, ControlError> {
+        validate_rider_tag(rider_tag)?;
+        let mut tag_owners = BTreeMap::new();
+        tag_owners.insert(rider_tag.to_owned(), Vec::new());
+        Ok(Self {
+            wire: ChildTailnetPolicyWire {
+                tag_owners,
+                grants: vec![PolicyGrant {
+                    src: vec![rider_tag.to_owned()],
+                    dst: vec![rider_tag.to_owned()],
+                    ip: vec![format!("udp:{SPURFIRE_GAMEPLAY_UDP_PORT}")],
+                }],
+                ..ChildTailnetPolicyWire::default()
+            },
+        })
+    }
+
+    fn from_wire(mut wire: ChildTailnetPolicyWire) -> Self {
+        normalize_map_values(&mut wire.groups);
+        normalize_map_values(&mut wire.tag_owners);
+        normalize_map_values(&mut wire.auto_approvers.routes);
+        wire.auto_approvers.exit_node.sort();
+        wire.auto_approvers.exit_node.dedup();
+        for grant in &mut wire.grants {
+            grant.src.sort();
+            grant.src.dedup();
+            grant.dst.sort();
+            grant.dst.dedup();
+            grant.ip.sort();
+            grant.ip.dedup();
+        }
+        wire.grants.sort();
+        wire.grants.dedup();
+        Self { wire }
+    }
+
+    /// Returns a stable SHA-256 digest of normalized policy semantics, never a provider body.
+    #[must_use]
+    pub fn semantic_digest(&self) -> String {
+        let normalized = Self::from_wire(self.wire.clone());
+        let bytes = serde_json::to_vec(&normalized.wire)
+            .expect("the generated child policy is always JSON serializable");
+        let digest = Sha256::digest(bytes);
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Compares normalized policy meaning, independent of object and set-like array order.
+    #[must_use]
+    pub fn semantically_matches(&self, other: &Self) -> bool {
+        Self::from_wire(self.wire.clone()).wire == Self::from_wire(other.wire.clone()).wire
+    }
+}
+
+fn normalize_map_values(map: &mut BTreeMap<String, Vec<String>>) {
+    for values in map.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+}
+
+fn validate_rider_tag(tag: &str) -> Result<(), ControlError> {
+    let suffix = tag.strip_prefix("tag:spurfire-lobby-").unwrap_or_default();
+    if !suffix.is_empty()
+        && tag.len() <= 128
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err(ControlError::InvalidPolicy)
+    }
+}
+
+/// Non-secret evidence that an exact normalized policy passed provider readback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildPolicyEvidence {
+    /// SHA-256 of normalized policy semantics.
+    pub semantic_digest: String,
+}
+
 /// A minted auth key. `key` is a secret — never log it.
 #[derive(Clone, Deserialize)]
 pub struct AuthKey {
@@ -363,6 +508,10 @@ pub enum ControlError {
     ProvisioningUnavailable(String),
     #[error("provider URL or path could not be constructed safely")]
     InvalidProviderPath,
+    #[error("child-tailnet policy is invalid")]
+    InvalidPolicy,
+    #[error("child-tailnet policy readback did not match required semantics")]
+    PolicyMismatch,
     #[error("Tailscale transport failed; details redacted")]
     Reqwest(#[source] reqwest::Error),
     #[error("Tailscale JSON response was invalid; details redacted")]
@@ -398,6 +547,8 @@ impl fmt::Debug for ControlError {
                 formatter.write_str("ProvisioningUnavailable(<redacted>)")
             }
             Self::InvalidProviderPath => formatter.write_str("InvalidProviderPath"),
+            Self::InvalidPolicy => formatter.write_str("InvalidPolicy"),
+            Self::PolicyMismatch => formatter.write_str("PolicyMismatch"),
             Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
         }
@@ -526,8 +677,8 @@ impl OAuthSession {
                 status: status.as_u16(),
             });
         }
-        let bytes = response.bytes().await?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let bytes = Zeroizing::new(response.bytes().await?.to_vec());
+        Ok(serde_json::from_slice(bytes.as_slice())?)
     }
 
     async fn http_error(response: reqwest::Response) -> ControlError {
@@ -628,8 +779,25 @@ impl OAuthSession {
     }
 }
 
+fn validate_configured_api_base(value: &str) -> Result<(), ControlError> {
+    let url = Url::parse(value).map_err(|_| ControlError::InvalidProviderPath)?;
+    let exact_origin = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host_str().is_some()
+        && url.path().trim_end_matches('/') == "/api/v2";
+    if exact_origin {
+        Ok(())
+    } else {
+        Err(ControlError::InvalidProviderPath)
+    }
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
@@ -646,8 +814,10 @@ impl TailscaleClient {
     /// Build from env: `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TS_API_BASE`.
     pub async fn from_env() -> Result<Self, ControlError> {
         let get = |name: &str| std::env::var(name).map_err(|_| ControlError::Env(name.into()));
+        let api_base = get("TS_API_BASE")?;
+        validate_configured_api_base(&api_base)?;
         Ok(Self::new(
-            get("TS_API_BASE")?,
+            api_base,
             get("TS_CLIENT_ID")?,
             get("TS_CLIENT_SECRET")?,
         ))
@@ -787,6 +957,60 @@ impl ChildTailscaleClient {
         self.session.probe_token().await
     }
 
+    /// Writes the generated policy to one exact child-tailnet selector.
+    ///
+    /// Redirects are disabled by the bounded client, and path segments are percent-encoded without
+    /// changing the configured origin. A successful write is not readiness evidence until
+    /// [`Self::verify_policy`] succeeds.
+    pub async fn write_policy(
+        &self,
+        tailnet: &str,
+        policy: &ChildTailnetPolicy,
+    ) -> Result<(), ControlError> {
+        validate_tailnet_selector(tailnet)?;
+        let body = serde_json::to_value(&policy.wire)?;
+        self.session
+            .send_segments(Method::POST, &["tailnet", tailnet, "acl"], Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// Reads and normalizes one exact child-tailnet policy without retaining a raw provider body.
+    pub async fn read_policy(&self, tailnet: &str) -> Result<ChildTailnetPolicy, ControlError> {
+        validate_tailnet_selector(tailnet)?;
+        let response = self
+            .session
+            .send_segments(Method::GET, &["tailnet", tailnet, "acl"], None)
+            .await?;
+        let wire = OAuthSession::decode::<ChildTailnetPolicyWire>(response).await?;
+        Ok(ChildTailnetPolicy::from_wire(wire))
+    }
+
+    /// Requires a semantic readback match and returns digest-only evidence.
+    pub async fn verify_policy(
+        &self,
+        tailnet: &str,
+        expected: &ChildTailnetPolicy,
+    ) -> Result<ChildPolicyEvidence, ControlError> {
+        let actual = self.read_policy(tailnet).await?;
+        if !expected.semantically_matches(&actual) {
+            return Err(ControlError::PolicyMismatch);
+        }
+        Ok(ChildPolicyEvidence {
+            semantic_digest: expected.semantic_digest(),
+        })
+    }
+
+    /// Writes then semantically reads back the required restrictive policy.
+    pub async fn apply_and_verify_policy(
+        &self,
+        tailnet: &str,
+        policy: &ChildTailnetPolicy,
+    ) -> Result<ChildPolicyEvidence, ControlError> {
+        self.write_policy(tailnet, policy).await?;
+        self.verify_policy(tailnet, policy).await
+    }
+
     /// Mint a one-use player auth key under the child scope.
     pub async fn create_auth_key(
         &self,
@@ -903,6 +1127,48 @@ mod tests {
             expected,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn oauth_redirect_never_replays_credentials() {
+        let mut origin = Server::new_async().await;
+        let mut attacker = Server::new_async().await;
+        let sink = attacker
+            .mock("POST", "/stolen")
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+        let redirect = origin
+            .mock("POST", "/oauth/token")
+            .with_status(307)
+            .with_header("location", &format!("{}/stolen", attacker.url()))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(origin.url(), "client-canary", "secret-canary");
+        assert!(matches!(
+            client.probe_oauth_token().await,
+            Err(ControlError::Http { status: 307 })
+        ));
+        redirect.assert_async().await;
+        sink.assert_async().await;
+    }
+
+    #[test]
+    fn configured_provider_origin_is_exact_https_api_v2() {
+        assert!(validate_configured_api_base("https://api.tailscale.com/api/v2").is_ok());
+        for rejected in [
+            "http://api.tailscale.com/api/v2",
+            "https://user@api.tailscale.com/api/v2",
+            "https://api.tailscale.com/api/v2?redirect=1",
+            "https://api.tailscale.com/other",
+        ] {
+            assert!(matches!(
+                validate_configured_api_base(rejected),
+                Err(ControlError::InvalidProviderPath)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1034,6 +1300,183 @@ mod tests {
         child.authenticate().await.unwrap();
 
         token.assert_async().await;
+    }
+
+    #[test]
+    fn generated_child_policy_is_restrictive_and_digest_is_semantic() {
+        let tag = "tag:spurfire-lobby-00000000-0000-4000-8000-000000000001";
+        let policy = ChildTailnetPolicy::restrictive_riders(tag).unwrap();
+        let value = serde_json::to_value(&policy.wire).unwrap();
+
+        assert_eq!(value["tagOwners"][tag], json!([]));
+        assert_eq!(
+            value["grants"],
+            json!([{
+                "src":[tag], "dst":[tag], "ip":["udp:41643"]
+            }])
+        );
+        for empty in ["acls", "ssh", "nodeAttrs", "tests"] {
+            assert_eq!(value[empty], json!([]));
+        }
+        assert_eq!(value["autoApprovers"], json!({"routes":{},"exitNode":[]}));
+        assert_eq!(policy.semantic_digest().len(), 64);
+        assert!(!value.to_string().contains("tcp"));
+        assert!(!value.to_string().contains("*:"));
+    }
+
+    #[tokio::test]
+    async fn policy_write_requires_normalized_matching_readback_before_evidence() {
+        let mut server = Server::new_async().await;
+        let token = token_mock_for(
+            &mut server,
+            "child-client",
+            "child-secret",
+            "child-token",
+            3600,
+            1,
+        )
+        .await;
+        let tag = "tag:spurfire-lobby-00000000-0000-4000-8000-000000000001";
+        let policy = ChildTailnetPolicy::restrictive_riders(tag).unwrap();
+        let write = server
+            .mock("POST", "/tailnet/tail-test.ts.net/acl")
+            .match_header("authorization", "Bearer child-token")
+            .match_body(Matcher::Json(serde_json::to_value(&policy.wire).unwrap()))
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let read = server
+            .mock("GET", "/tailnet/tail-test.ts.net/acl")
+            .match_header("authorization", "Bearer child-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            // Missing empty/default fields and object order do not change semantics.
+            .with_body(
+                json!({
+                    "grants":[{"ip":["udp:41643"],"dst":[tag],"src":[tag]}],
+                    "tagOwners":{(tag):[]}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(server.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+
+        let evidence = child
+            .apply_and_verify_policy("tail-test.ts.net", &policy)
+            .await
+            .unwrap();
+
+        assert_eq!(evidence.semantic_digest, policy.semantic_digest());
+        token.assert_async().await;
+        write.assert_async().await;
+        read.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn policy_mismatch_and_scope_denial_are_typed_and_body_safe() {
+        let mut mismatch_server = Server::new_async().await;
+        let _token = token_mock_for(
+            &mut mismatch_server,
+            "child-client",
+            "child-secret",
+            "child-token",
+            3600,
+            1,
+        )
+        .await;
+        let tag = "tag:spurfire-lobby-00000000-0000-4000-8000-000000000001";
+        let policy = ChildTailnetPolicy::restrictive_riders(tag).unwrap();
+        let _read = mismatch_server
+            .mock("GET", "/tailnet/tail-test.ts.net/acl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "tagOwners":{(tag):[]},
+                    "grants":[{"src":[tag],"dst":[tag],"ip":["tcp:41643"]}]
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(mismatch_server.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+        assert!(matches!(
+            child.verify_policy("tail-test.ts.net", &policy).await,
+            Err(ControlError::PolicyMismatch)
+        ));
+
+        let mut denied_server = Server::new_async().await;
+        let _token = token_mock_for(
+            &mut denied_server,
+            "child-client",
+            "child-secret",
+            "child-token",
+            3600,
+            1,
+        )
+        .await;
+        let _denied = denied_server
+            .mock("POST", "/tailnet/tail-test.ts.net/acl")
+            .with_status(403)
+            .with_body(r#"{"secret":"provider-body-canary"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(denied_server.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+        let error = child
+            .write_policy("tail-test.ts.net", &policy)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ControlError::Http { status: 403 }));
+        assert!(!format!("{error:?}").contains("provider-body-canary"));
+    }
+
+    #[tokio::test]
+    async fn policy_redirect_never_replays_bearer_or_policy_body() {
+        let mut origin = Server::new_async().await;
+        let mut attacker = Server::new_async().await;
+        let _token = token_mock_for(
+            &mut origin,
+            "child-client",
+            "child-secret",
+            "child-token",
+            3600,
+            1,
+        )
+        .await;
+        let sink = attacker
+            .mock("POST", "/stolen-policy")
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+        let redirect = origin
+            .mock("POST", "/tailnet/tail-test.ts.net/acl")
+            .with_status(307)
+            .with_header("location", &format!("{}/stolen-policy", attacker.url()))
+            .expect(1)
+            .create_async()
+            .await;
+        let parent = TailscaleClient::new(origin.url(), "org-client", "org-secret");
+        let child = parent.child_scoped(ChildOAuthCredentials::new("child-client", "child-secret"));
+        let policy = ChildTailnetPolicy::restrictive_riders(
+            "tag:spurfire-lobby-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            child.write_policy("tail-test.ts.net", &policy).await,
+            Err(ControlError::Http { status: 307 })
+        ));
+        redirect.assert_async().await;
+        sink.assert_async().await;
     }
 
     #[tokio::test]

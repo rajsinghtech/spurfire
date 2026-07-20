@@ -61,7 +61,7 @@ Organization and child OAuth credentials are control-plane secrets. They must ne
 
 ## Provisioning modes
 
-- `TailnetPerLobby`: implemented through verified `GET/POST /organizations/-/tailnets`, child OAuth token exchange, and child-scoped tailnet deletion. The one-time child OAuth pair lives only in a provider-owned in-memory vault keyed by lobby ID. Restart fails closed with manual remediation; production requires an encrypted secret manager and reconciliation. Child auth-key minting is mock-tested but still needs live end-to-end verification.
+- `TailnetPerLobby`: implemented through verified `GET/POST /organizations/-/tailnets`, child OAuth token exchange, and child-scoped tailnet deletion. The integrated branch has an encrypted, exact-tuple, CAS-deleted file vault plus mutation-closed startup reconciliation and OS writer fencing. This remains prototype custody: production still requires workload identity/setec, external audit/backup/rotation, restrictive child-policy proof, and exercised crash-window/orphan remediation. Child auth-key minting is mock-tested but still needs live end-to-end verification.
 - `SharedTailnet`: remains implemented but historically received 403 for auth-key, device-list, and ACL operations. Its readiness is reported independently from organization-tailnet access and still requires appropriate scopes, ACL/tag ownership, device cleanup, and live integration tests.
 
 See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changing either verdict.
@@ -70,7 +70,7 @@ See `docs/tailscale-api.md` and `crates/spurfire-control/NOTES.md` before changi
 
 Godot 4.7.1 with Rust GDExtension is the accepted game stack. Keep engine-facing scenes and content in `game/` and gameplay classes in `crates/spurfire-gdext/`; never commit generated libraries under `game/bin/`. M0 is movement-only, and RustScale integration starts only after the movement acceptance checks in `docs/godot-m0.md` pass.
 
-A sibling checkout of the RustScale repository (conventionally `../rustscale`) is under active development. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live there rather than in Spurfire. In-process Rust integration is feasible, but production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check its pinned survey revision before integrating.
+A sibling checkout of the RustScale repository (conventionally `../rustscale`) is under active development. Spurfire pins its direct RustScale dependencies to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; the UDP wakeup fix is upstream and no local netstack override remains. The consumer-workspace BoringTun override is still required and documented in `vendor/boringtun/PROVENANCE.md`. Connectivity, relay, enrollment, telemetry, FFI, or platform bugs may live in RustScale rather than Spurfire. Production all-platform embedding and Godot packaging are not validated. See `docs/rustscale-integration.md` and re-check both its survey snapshot and the active dependency pin before integrating.
 
 ## Agent worktree pattern
 
@@ -87,7 +87,7 @@ For parallel agent work, create one branch and sibling worktree per disjoint tas
 
 ## Known issues
 
-- Tailnet-per-lobby prototype secrets are process-local; restart makes retained child lobbies `cleanup_pending` with manual remediation until an encrypted secret manager/reconciler is integrated.
+- Tailnet-per-lobby encrypted file custody and startup reconciliation are implemented, but production workload identity, external audit/backup/rotation, restrictive child policy, persistent gateway abuse controls, and approved orphan remediation remain activation blockers.
 - Child one-use auth-key issuance is implemented and mock-tested but was not live-mutated in this correction workflow.
 - Shared-tailnet live provisioning is blocked by the historical OAuth client's insufficient auth-key, device, and ACL permissions.
 - Godot desktop native-library packaging is automated but mobile, console, Windows ARM64, and large-world/16-rider performance remain unvalidated.

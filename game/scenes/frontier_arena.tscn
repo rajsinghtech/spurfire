@@ -1,0 +1,7 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/graybox_course.tscn" id="1_course"]
+[ext_resource type="Script" path="res://scripts/frontier_arena.gd" id="2_arena"]
+
+[node name="FrontierArena" instance=ExtResource("1_course")]
+script = ExtResource("2_arena")

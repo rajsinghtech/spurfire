@@ -1,36 +1,47 @@
 //! Axum router and lobby application service.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    sync::Arc,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
 use axum::{
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Path, State},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{from_fn, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use spurfire_protocol::{
-    elect_authority, elect_authority_for_roster, validate_start_roster, AcceptedHeartbeatReference,
-    ApplicationQuality, AuthorityCandidate, AuthorityElection, AuthorityElectionError,
-    AuthorityHeartbeatRequest, AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary,
-    BackingMode, CapabilitiesResponse, ControlElectionReference, CreateLobbyRequest,
-    CreateLobbyResponse, DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore,
-    Freshness, InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt,
-    JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest,
-    LeaveLobbyResponse, Lobby, LobbyId, LobbyNetworkView, LobbyResponse, LobbyState, LobbyTtl,
+    canonical_keyreg_digest, canonical_manifest_digest, elect_authority,
+    elect_authority_for_roster, validate_secure_start_roster, validate_start_roster,
+    AcceptedHeartbeatReference, ApplicationQuality, AuthorityCandidate, AuthorityElection,
+    AuthorityElectionError, AuthorityHeartbeatRequest, AuthorityHeartbeatResponse,
+    AuthorityResponse, AuthoritySummary, BackingMode, CapabilitiesResponse,
+    ControlElectionReference, CreateInvitationRequest, CreateInvitationResponse,
+    CreateLobbyFirstResponse, CreateLobbyRequest, CreateLobbyResponse, DestroyLobbyResponse, Fact,
+    FactAssurance, FactSource, FinalScore, Freshness, InspectedLobbyLifecycle, JoinCredential,
+    JoinCredentialReceipt, JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse,
+    LeaveLobbyRequest, LeaveLobbyResponse, Lobby, LobbyCapabilityScope, LobbyId, LobbyNetworkView,
+    LobbyResponse, LobbySessionPeer, LobbySessionProjection, LobbyState, LobbyTtl,
     NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
-    NetworkLifecycle, NetworkTruthLabel, ParticipantCleanupReason, Player, PlayerId,
-    PlayerJoinState, ProvisioningMode, ResponseMetadata, RouteAggregate, StartLobbyRequest,
-    StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
-    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
-    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
-    MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
+    NetworkLifecycle, NetworkTruthLabel, OpaqueCapability, ParticipantCleanupReason, Player,
+    PlayerId, PlayerJoinState, ProvisioningMode, RegisterSessionEndpointRequest,
+    RegisterSessionEndpointResponse, ResponseMetadata, RosterManifest, RosterManifestEntry,
+    RouteAggregate, SessionPublicKey, SessionSignature, StartLobbyRequest, StartLobbyResponse,
+    SubmitMeasurementsRequest, SubmitMeasurementsResponse, SubmitResultsRequest,
+    SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
+    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS,
+    PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -42,10 +53,12 @@ use crate::{
     crypto::{base64url_decode, base64url_encode, sha256},
     error::ApiError,
     provider::{
-        CleanupLobbyRequest, CleanupOutcome, CredentialCleanup, MintCredentialRequest,
-        MutationGatedProvider, NetworkProvider, ObserveNetworkRequest, PrepareLobbyRequest,
-        ProviderError, ProviderNetworkIdentity, TailnetPresenceRequest,
+        dedicated_policy_digest, dedicated_rider_tag, CleanupLobbyRequest, CleanupOutcome,
+        CredentialCleanup, MintCredentialRequest, MutationGatedProvider, NetworkProvider,
+        ObserveNetworkRequest, PrepareLobbyRequest, ProviderError, ProviderNetworkIdentity,
+        TailnetPresenceRequest,
     },
+    rehearsal::LocalRehearsalQualification,
     store::{
         apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
         StoredCapabilityVerifier, StoredCredential, StoredIssuanceReservation, StoredJoinAttempt,
@@ -66,13 +79,21 @@ const PROVIDER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FINAL_SCORE_ABS: i64 = 1_000_000;
 const MAX_MATCH_DURATION_S: u32 = 60 * 60;
 const AUTHORIZATION_HEADER: &str = "authorization";
+const VERIFIED_PEER_IP_HEADER: &str = "x-spurfire-internal-peer-ip";
 const CAPABILITY_SCHEME: &str = "Spurfire-Capability";
-const CAPABILITY_HASH_DOMAIN: &[u8] = b"spurfire-capability-lobby-read-v1\0";
+const CAPABILITY_HASH_DOMAIN: &[u8] = b"spurfire-capability-v2\0";
+const INVITATION_TTL_MS: u64 = 10 * 60 * 1_000;
+const MAX_ACTIVE_INVITATIONS: usize = 32;
 const INSPECTOR_REPORT_FRESHNESS_MS: u64 = 15_000;
 const PROVIDER_DEVICE_FRESHNESS_MS: u64 = 30_000;
 const PROVIDER_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_ABSENCE_MIN_SEPARATION_MS: u64 = 5_000;
 const MAX_CACHED_PROVIDER_OBSERVATIONS: usize = 10_000;
+const SESSION_ENDPOINT_RETENTION_MS: u64 = 60_000;
+const ABUSE_WINDOW_MS: u64 = 60_000;
+const MAX_MUTATIONS_GLOBAL_PER_MINUTE: usize = 600;
+const MAX_MUTATIONS_PER_IP_PER_MINUTE: usize = 120;
+const MAX_MUTATIONS_PER_ACTOR_PER_MINUTE: usize = 60;
 const LANDING_HTML: &str = include_str!("landing.html");
 const INSPECT_HTML: &str = include_str!("inspect.html");
 
@@ -134,6 +155,41 @@ impl CachedProviderObservation {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SessionEndpointRecord {
+    player_id: PlayerId,
+    network_generation: u64,
+    roster_revision: u64,
+    sequence: u64,
+    tailnet_address: String,
+    application_port: u16,
+    session_public_key: Option<SessionPublicKey>,
+    node_key: Option<spurfire_protocol::NodeKey>,
+    received_at: UnixMillis,
+}
+
+struct ManifestKey(Zeroizing<[u8; 32]>);
+
+impl fmt::Debug for ManifestKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManifestKey(<redacted>)")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AbuseEvent {
+    at: UnixMillis,
+    ip: String,
+    actor_digest: [u8; 32],
+}
+
+#[derive(Default)]
+struct AbuseState {
+    events: VecDeque<AbuseEvent>,
+    create_events: VecDeque<AbuseEvent>,
+    join_events: VecDeque<AbuseEvent>,
+}
+
 struct GeneratedCapability {
     plaintext: Zeroizing<String>,
     verifier: [u8; 32],
@@ -159,19 +215,16 @@ impl GeneratedCapability {
             verifier,
         }
     }
+
+    fn opaque(self, scopes: Vec<LobbyCapabilityScope>, expires_at: UnixMillis) -> OpaqueCapability {
+        OpaqueCapability::from_zeroizing(self.plaintext, scopes, expires_at)
+    }
 }
 
 impl fmt::Debug for GeneratedCapability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("GeneratedCapability(<redacted>)")
     }
-}
-
-#[derive(Serialize)]
-struct FirstCreateResponse<'a> {
-    #[serde(flatten)]
-    response: CreateLobbyResponse,
-    creator_capability: &'a str,
 }
 
 /// Cloneable application dependencies shared by every Axum handler.
@@ -184,7 +237,15 @@ pub struct AppState {
     lobby_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     observation_locks: Arc<Mutex<BTreeMap<LobbyId, Arc<Mutex<()>>>>>,
     provider_observations: Arc<RwLock<BTreeMap<LobbyId, CachedProviderObservation>>>,
+    /// Process-local monotonic anchors. A restart deliberately discards them and
+    /// restarts the two-observation proof rather than trusting wall time.
+    absence_observation_starts: Arc<RwLock<BTreeMap<LobbyId, (u64, tokio::time::Instant)>>>,
+    session_endpoints: Arc<RwLock<BTreeMap<LobbyId, BTreeMap<PlayerId, SessionEndpointRecord>>>>,
+    manifest_keys: Arc<RwLock<BTreeMap<LobbyId, ManifestKey>>>,
     provider_limit: Arc<Semaphore>,
+    abuse: Arc<Mutex<AbuseState>>,
+    startup_reconciled: Arc<AtomicBool>,
+    local_rehearsal: Option<Arc<LocalRehearsalQualification>>,
 }
 
 impl AppState {
@@ -204,8 +265,40 @@ impl AppState {
             lobby_locks: Arc::new(Mutex::new(BTreeMap::new())),
             observation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             provider_observations: Arc::new(RwLock::new(BTreeMap::new())),
+            absence_observation_starts: Arc::new(RwLock::new(BTreeMap::new())),
+            session_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
+            manifest_keys: Arc::new(RwLock::new(BTreeMap::new())),
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
+            abuse: Arc::new(Mutex::new(AbuseState::default())),
+            startup_reconciled: Arc::new(AtomicBool::new(false)),
+            local_rehearsal: None,
         }
+    }
+
+    /// Creates state for the ordinary server binary. Real provider mutations
+    /// remain denied regardless of environment/config booleans.
+    #[must_use]
+    pub fn new_deny_all(
+        config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+    ) -> Self {
+        let mut state = Self::new(config, store, Arc::clone(&provider));
+        state.provider = Arc::new(MutationGatedProvider::deny_all(provider));
+        state
+    }
+
+    /// Refuses real local-rehearsal activation until the dedicated path has a
+    /// globally fenced receipt, cleanup-only restart authority, and an attested
+    /// supervisor protocol. Keeping this constructor fail-closed prevents a
+    /// library caller from bypassing the disabled supervisor.
+    pub async fn new_local_rehearsal(
+        _config: Config,
+        _store: Arc<dyn LobbyStore>,
+        _provider: Arc<dyn NetworkProvider>,
+        _qualification: LocalRehearsalQualification,
+    ) -> Result<Self, crate::store::StoreError> {
+        Err(crate::store::StoreError::RehearsalDisabled)
     }
 
     /// Replaces the wall clock, normally for deterministic tests.
@@ -225,6 +318,17 @@ impl AppState {
     #[must_use]
     pub fn store(&self) -> Arc<dyn LobbyStore> {
         Arc::clone(&self.store)
+    }
+
+    async fn manifest_signing_key(&self, lobby_id: LobbyId) -> Result<SigningKey, ApiError> {
+        if let Some(key) = self.manifest_keys.read().await.get(&lobby_id) {
+            return Ok(SigningKey::from_bytes(&key.0));
+        }
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        getrandom::getrandom(seed.as_mut()).map_err(|_| internal_error(false))?;
+        let mut keys = self.manifest_keys.write().await;
+        let key = keys.entry(lobby_id).or_insert_with(|| ManifestKey(seed));
+        Ok(SigningKey::from_bytes(&key.0))
     }
 
     async fn lock_lobby(&self, lobby_id: LobbyId) -> OwnedMutexGuard<()> {
@@ -381,6 +485,138 @@ impl AppState {
         .await;
     }
 
+    /// Performs fail-closed startup reconciliation before admission, including
+    /// exact local custody checks and a read-only parent inventory comparison.
+    /// Any missing identity, mismatch, or unmatched managed child quarantines
+    /// real creation; destructive orphan remediation remains operator-only.
+    pub async fn reconcile_startup(&self) -> bool {
+        let mut ready = true;
+        let mut expected_upstream = Vec::new();
+        for lobby_id in self.store.lobby_ids().await {
+            let Some(mut stored) = self.store.get(lobby_id).await else {
+                continue;
+            };
+            // Manifest signing keys are intentionally memory-only. A process
+            // restart must therefore move every active signed session into a
+            // fresh replay domain before a new key can be pinned.
+            if stored.session_generation > 0
+                && matches!(
+                    stored.lobby.state,
+                    LobbyState::Starting | LobbyState::InMatch
+                )
+            {
+                stored.session_generation = stored.session_generation.saturating_add(1);
+                if self.store.replace(stored.clone()).await.is_err() {
+                    ready = false;
+                    continue;
+                }
+            }
+            if stored.dry_run {
+                continue;
+            }
+            let identity_missing = stored.lobby.provisioning_mode
+                == ProvisioningMode::TailnetPerLobby
+                && stored.network_identity.is_none()
+                && !matches!(
+                    stored.network_lifecycle,
+                    NetworkLifecycle::Reserved | NetworkLifecycle::CreateRejected
+                );
+            let expected_policy_digest = dedicated_policy_digest(stored.lobby.lobby_id).ok();
+            let policy_evidence_missing = stored.lobby.provisioning_mode
+                == ProvisioningMode::TailnetPerLobby
+                && stored.network_lifecycle == NetworkLifecycle::Active
+                && (stored.child_policy_status.as_deref() != Some("verified")
+                    || stored.child_policy_digest.as_deref() != expected_policy_digest.as_deref());
+            let access_error = self
+                .provider
+                .lobby_access_error(
+                    lobby_id,
+                    stored.lobby.provisioning_mode,
+                    stored.network_lifecycle,
+                    false,
+                )
+                .or_else(|| {
+                    if stored.lobby.provisioning_mode != ProvisioningMode::TailnetPerLobby
+                        || matches!(
+                            stored.network_lifecycle,
+                            NetworkLifecycle::Reserved
+                                | NetworkLifecycle::CreateRejected
+                                | NetworkLifecycle::DedicatedAbsent
+                        )
+                    {
+                        return None;
+                    }
+                    provider_identity(&stored).map_or(
+                        Some(ProviderError::IdentityMismatch),
+                        |identity| {
+                            self.provider
+                                .validate_child_custody(
+                                    lobby_id,
+                                    stored.network_generation,
+                                    &identity,
+                                )
+                                .err()
+                        },
+                    )
+                });
+            if identity_missing || policy_evidence_missing || access_error.is_some() {
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.cleanup_pending = true;
+                stored.lobby.state_reason = Some(
+                    access_error
+                        .map_or(
+                            if policy_evidence_missing {
+                                "child_policy_evidence_missing_manual_remediation"
+                            } else {
+                                "provider_identity_missing_manual_remediation"
+                            },
+                            |error| error.state_reason(),
+                        )
+                        .to_owned(),
+                );
+                let _ = self.store.replace(stored).await;
+                ready = false;
+            } else if matches!(
+                stored.network_lifecycle,
+                NetworkLifecycle::Active
+                    | NetworkLifecycle::CleanupRequested
+                    | NetworkLifecycle::CleanupPending
+            ) {
+                if let Some(identity) = provider_identity(&stored) {
+                    expected_upstream.push(identity);
+                }
+            }
+        }
+        if self.config.real_mutations_enabled {
+            match self
+                .provider
+                .reconcile_upstream_identities(expected_upstream)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    let _ = self.store.quarantine_real_creation().await;
+                    ready = false;
+                }
+            }
+        }
+        self.startup_reconciled.store(ready, Ordering::Release);
+        ready
+    }
+
+    /// Issues one operator-delivered, one-use real-create grant. The caller must
+    /// deliver the plaintext out of band; only its verifier is persisted.
+    pub async fn issue_real_create_grant(
+        &self,
+        expires_at: UnixMillis,
+    ) -> Result<OpaqueCapability, crate::store::StoreError> {
+        let generated = GeneratedCapability::generate();
+        self.store
+            .issue_real_create_grant(generated.verifier, expires_at)
+            .await?;
+        Ok(generated.opaque(vec![LobbyCapabilityScope::LobbyCreateReal], expires_at))
+    }
+
     /// Runs deterministic expiry/start-timeout transitions and teardown retries.
     pub async fn cleanup_expired_at(&self, now: UnixMillis) -> Vec<LobbyId> {
         let lobby_ids = self.store.lobby_ids().await;
@@ -426,12 +662,13 @@ impl fmt::Debug for AppState {
             .field("provider", &"<network-provider>")
             .field("clock", &"<clock>")
             .field("provider_observations", &"<bounded-coarse-cache>")
+            .field("session_endpoints", &"<memory-only-selected-lobby-cache>")
+            .field("manifest_keys", &"<memory-only-redacted-signing-keys>")
             .finish()
     }
 }
 
-/// Builds the complete HTTP router.
-pub fn build_router(state: AppState) -> Router {
+fn route_set() -> Router<AppState> {
     Router::new()
         .route("/", get(landing))
         .route("/inspect", get(inspect_shell))
@@ -443,10 +680,22 @@ pub fn build_router(state: AppState) -> Router {
             get(get_lobby).delete(delete_lobby),
         )
         .route("/v1/lobbies/{lobby_id}/network", get(get_lobby_network))
+        .route(
+            "/v1/lobbies/{lobby_id}/invitations",
+            post(create_invitation),
+        )
         .route("/v1/lobbies/{lobby_id}/join", post(join_lobby))
         .route("/v1/lobbies/{lobby_id}/leave", post(leave_lobby))
         .route(
+            "/v1/lobbies/{lobby_id}/session/endpoint",
+            post(register_session_endpoint),
+        )
+        .route(
             "/v1/lobbies/{lobby_id}/measurements",
+            post(submit_measurements),
+        )
+        .route(
+            "/v1/lobbies/{lobby_id}/network/reports",
             post(submit_measurements),
         )
         .route(
@@ -463,6 +712,35 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(64 * 1_024))
+        .layer(from_fn(capture_verified_peer_ip))
+}
+
+/// Builds the complete HTTP router.
+pub fn build_router(state: AppState) -> Router {
+    route_set().with_state(state)
+}
+
+async fn capture_verified_peer_ip(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    // Never trust a client-supplied internal attribution header. Axum inserts
+    // ConnectInfo only from the accepted socket when the binary uses
+    // into_make_service_with_connect_info.
+    request.headers_mut().remove(VERIFIED_PEER_IP_HEADER);
+    if let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        if let Ok(value) = HeaderValue::from_str(&peer.ip().to_string()) {
+            request.headers_mut().insert(VERIFIED_PEER_IP_HEADER, value);
+        }
+    }
+    next.run(request).await
+}
+
+/// Builds the dedicated local operator router. The ordinary router never
+/// exposes this receipt-bound create endpoint.
+pub fn build_local_rehearsal_router(state: AppState) -> Router {
+    route_set()
+        .route(
+            "/local-rehearsal/v1/lobbies",
+            post(create_local_rehearsal_lobby),
+        )
         .with_state(state)
 }
 
@@ -554,12 +832,7 @@ struct HealthResponse {
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
-    let ready = state.config.force_dry_run
-        || (state.config.real_mutations_enabled
-            && state
-                .provider
-                .cached_capabilities()
-                .mode_available(state.config.provisioning_mode));
+    let ready = state.config.force_dry_run || real_creation_authorized(&state);
     Json(HealthResponse {
         status: if ready { "ok" } else { "degraded" },
         provisioning_ready: ready,
@@ -567,12 +840,14 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn get_capabilities(State(state): State<AppState>) -> Json<CapabilitiesResponse> {
-    Json(
-        state
-            .provider
-            .cached_capabilities()
-            .response(metadata_for(state.config.force_dry_run)),
-    )
+    let mut response = state
+        .provider
+        .cached_capabilities()
+        .response(metadata_for(state.config.force_dry_run));
+    let authorized = real_creation_authorized(&state);
+    response.real_lobby_creation_authorized = authorized;
+    response.real_lobby_join_authorized = authorized;
+    Json(response)
 }
 
 async fn create_lobby(
@@ -580,6 +855,25 @@ async fn create_lobby(
     headers: HeaderMap,
     payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    create_lobby_impl(state, headers, payload, false).await
+}
+
+async fn create_local_rehearsal_lobby(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    create_lobby_impl(state, headers, payload, true).await
+}
+
+async fn create_lobby_impl(
+    state: AppState,
+    headers: HeaderMap,
+    payload: Result<Json<CreateLobbyRequest>, JsonRejection>,
+    local_operator: bool,
+) -> Result<Response, ApiError> {
+    enforce_mutation_budget(&state, &headers).await?;
+    enforce_route_budget(&state, &headers, true).await?;
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
     let request = parse_json(payload, dry_hint)?;
@@ -599,15 +893,68 @@ async fn create_lobby(
         .dry_run(effective_dry_run));
     }
 
+    let legacy_real_test_mode = state.config.allow_legacy_client_assertions
+        && state.config.test_only_allow_legacy_real_mutations;
+    if !effective_dry_run && state.config.allow_legacy_client_assertions && !legacy_real_test_mode {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "legacy_real_mutations_forbidden",
+            "legacy asserted-player mode cannot perform real provider mutations",
+        )
+        .dry_run(false));
+    }
     let effective_mode = if effective_dry_run {
         ProvisioningMode::DryRun
-    } else {
+    } else if legacy_real_test_mode {
         request.provisioning_mode
+    } else {
+        if !real_creation_authorized(&state) || local_operator != state.local_rehearsal.is_some() {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "real_admission_closed",
+                "real lobby admission is closed",
+            )
+            .dry_run(false));
+        }
+        if request.provisioning_mode != ProvisioningMode::TailnetPerLobby {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provisioning_mode_server_selected",
+                "real lobbies use the server-selected dedicated mode",
+            )
+            .dry_run(false));
+        }
+        ProvisioningMode::TailnetPerLobby
     };
     let request_fingerprint =
         fingerprint(&(request.clone(), effective_mode, actor), effective_dry_run)?;
     let now = state.clock.now();
-    let lobby_id = new_lobby_id();
+    let real_create_grant = if effective_dry_run {
+        None
+    } else if legacy_real_test_mode {
+        let generated = GeneratedCapability::generate();
+        state
+            .store
+            .issue_real_create_grant(generated.verifier, now.saturating_add(60_000))
+            .await
+            .map_err(|error| store_api_error(&error, false))?;
+        Some(generated.verifier)
+    } else if local_operator {
+        Some(
+            state
+                .local_rehearsal
+                .as_ref()
+                .ok_or_else(|| lobby_not_found(false))?
+                .receipt_verifier,
+        )
+    } else {
+        Some(capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?)
+    };
+    let lobby_id = state
+        .local_rehearsal
+        .as_ref()
+        .filter(|_| local_operator)
+        .map_or_else(new_lobby_id, |qualification| qualification.lobby_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let absolute_ttl_ms = if effective_dry_run {
         state.config.dry_run_ttl_ms()
@@ -634,14 +981,25 @@ async fn create_lobby(
         cleanup_pending: false,
     };
     let creator_capability = GeneratedCapability::generate();
+    let creator_expires_at = now.saturating_add(
+        absolute_ttl_ms.saturating_add(crate::store::CREATOR_CAPABILITY_CLEANUP_GRACE_MS),
+    );
+    let creator_scopes = vec![
+        LobbyCapabilityScope::LobbyRead,
+        LobbyCapabilityScope::LobbyInvite,
+        LobbyCapabilityScope::LobbyManage,
+        LobbyCapabilityScope::LobbyDestroy,
+    ];
     let capability_record = StoredCapabilityVerifier::new(
         creator_capability.verifier,
+        creator_scopes.clone(),
         lobby_id,
+        None,
         1,
-        now.saturating_add(
-            absolute_ttl_ms.saturating_add(crate::store::CREATOR_CAPABILITY_CLEANUP_GRACE_MS),
-        ),
+        creator_expires_at,
     );
+    let creator_capability_wire = creator_capability.opaque(creator_scopes, creator_expires_at);
+
     // Persist PROVISIONING/RESERVED and acquire the singleton real lease before
     // a child-tailnet mutation. Replay resolution occurs inside this same store
     // transaction before either the kill switch or quota is evaluated.
@@ -663,6 +1021,7 @@ async fn create_lobby(
             actor,
             now,
             stored,
+            real_create_grant,
             state.config.real_mutations_enabled,
         )
         .await
@@ -709,6 +1068,13 @@ async fn create_lobby(
                             network_generation: advanced.network_generation,
                             captured_at: now,
                         });
+                        if effective_mode == ProvisioningMode::TailnetPerLobby {
+                            let evidence = prepared
+                                .child_policy_evidence
+                                .ok_or_else(|| internal_error(effective_dry_run))?;
+                            advanced.child_policy_digest = Some(evidence.semantic_digest);
+                            advanced.child_policy_status = Some("verified".to_owned());
+                        }
                         advanced.network_lifecycle = NetworkLifecycle::Active;
                     }
                     if prepared.dry_run
@@ -735,6 +1101,44 @@ async fn create_lobby(
                 }
                 Err(error) => {
                     transition(&mut advanced.lobby, LobbyState::Failed, effective_dry_run)?;
+                    if let ProviderError::ChildPolicyGate {
+                        identity,
+                        expected_digest,
+                        status,
+                        delete_acknowledged,
+                    } = &error
+                    {
+                        advanced.tailnet = identity.tailnet_dns_name.as_str().to_owned();
+                        advanced.network_identity = Some(StoredNetworkIdentity {
+                            provider_tailnet_id: identity.provider_tailnet_id.clone(),
+                            tailnet_dns_name: identity.tailnet_dns_name.clone(),
+                            network_generation: advanced.network_generation,
+                            captured_at: now,
+                        });
+                        advanced.child_policy_digest = Some(expected_digest.clone());
+                        advanced.child_policy_status = Some(status.as_str().to_owned());
+                        advanced.cleanup_requested_at = Some(now);
+                        if *delete_acknowledged {
+                            advanced.delete_acknowledged_at = Some(now);
+                            advanced.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
+                        } else {
+                            advanced.network_lifecycle = NetworkLifecycle::CleanupPending;
+                        }
+                        advanced.cleanup_pending = true;
+                        advanced.lobby.state_reason = Some(error.state_reason().to_owned());
+                        advanced.terminal_at = Some(now);
+                        let response = create_response(&advanced, metadata_for(effective_dry_run));
+                        state.store.replace(advanced).await.map_err(|store_error| {
+                            store_api_error(&store_error, effective_dry_run)
+                        })?;
+                        return Ok(sensitive_json_response(
+                            StatusCode::CREATED,
+                            &CreateLobbyFirstResponse {
+                                response,
+                                creator_capability: creator_capability_wire,
+                            },
+                        ));
+                    }
                     let ambiguous_child_create = effective_mode
                         == ProvisioningMode::TailnetPerLobby
                         && matches!(error, ProviderError::Unavailable { .. });
@@ -771,9 +1175,9 @@ async fn create_lobby(
                 .map_err(|error| store_api_error(&error, effective_dry_run))?;
             Ok(sensitive_json_response(
                 StatusCode::CREATED,
-                &FirstCreateResponse {
+                &CreateLobbyFirstResponse {
                     response,
-                    creator_capability: creator_capability.plaintext.as_str(),
+                    creator_capability: creator_capability_wire,
                 },
             ))
         }
@@ -829,9 +1233,98 @@ async fn get_lobby_inner(
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let stored = load_maintained_lobby(state, lobby_id, now, dry_hint).await?;
+    let session = session_projection(state, &stored, now).await?;
     Ok(LobbyResponse {
         lobby: stored.snapshot(),
+        network_generation: stored.network_generation,
+        roster_revision: stored.roster_revision,
+        session_generation: stored.session_generation,
+        manifest_public_key: session.manifest_public_key,
+        authority_input_hash: stored
+            .last_election
+            .as_ref()
+            .map(|election| election.input_hash),
+        session: Some(session),
         metadata: metadata_for(stored.dry_run || dry_hint),
+    })
+}
+
+async fn session_projection(
+    state: &AppState,
+    stored: &StoredLobby,
+    now: UnixMillis,
+) -> Result<LobbySessionProjection, ApiError> {
+    let signing_key = state.manifest_signing_key(stored.lobby.lobby_id).await?;
+    let manifest_public_key = SessionPublicKey::from_bytes(signing_key.verifying_key().to_bytes());
+    let endpoints = state.session_endpoints.read().await;
+    let peers: Vec<_> = endpoints
+        .get(&stored.lobby.lobby_id)
+        .into_iter()
+        .flat_map(BTreeMap::values)
+        .filter(|record| {
+            record.network_generation == stored.network_generation
+                && record.roster_revision == stored.roster_revision
+                && stored
+                    .lobby
+                    .roster
+                    .iter()
+                    .any(|player| player.player_id == record.player_id)
+                && now
+                    .checked_duration_since(record.received_at)
+                    .is_some_and(|age| age <= SESSION_ENDPOINT_RETENTION_MS)
+        })
+        .map(|record| LobbySessionPeer {
+            player_id: record.player_id,
+            tailnet_address: record.tailnet_address.clone(),
+            application_port: record.application_port,
+            session_public_key: record.session_public_key,
+            node_key: record.node_key,
+            received_at: record.received_at,
+        })
+        .collect();
+    let secure = !stored.lobby.roster.is_empty()
+        && peers.len() == stored.lobby.roster.len()
+        && peers.iter().all(|peer| peer.session_public_key.is_some());
+    let (roster_hash, manifest_signature) = if secure {
+        let manifest = RosterManifest {
+            lobby_id: stored.lobby.lobby_id,
+            network_generation: stored.network_generation,
+            session_generation: stored.session_generation,
+            roster_revision: stored.roster_revision,
+            entries: peers
+                .iter()
+                .map(|peer| RosterManifestEntry {
+                    player_id: peer.player_id,
+                    session_public_key: peer.session_public_key.expect("secure peers have keys"),
+                    tailnet_address: peer
+                        .tailnet_address
+                        .parse()
+                        .expect("registered addresses were validated"),
+                    application_port: peer.application_port,
+                    node_key: peer.node_key,
+                })
+                .collect(),
+        };
+        manifest.validate().map_err(|_| internal_error(false))?;
+        let hash = manifest.hash();
+        let signature = SessionSignature::from_bytes(
+            signing_key
+                .sign(&canonical_manifest_digest(manifest_public_key, &manifest))
+                .to_bytes(),
+        );
+        (Some(hash), Some(signature))
+    } else {
+        (None, None)
+    };
+    Ok(LobbySessionProjection {
+        network_generation: stored.network_generation,
+        roster_revision: stored.roster_revision,
+        session_generation: stored.session_generation,
+        secure,
+        roster_hash,
+        manifest_signature,
+        manifest_public_key,
+        peers,
     })
 }
 
@@ -871,20 +1364,92 @@ async fn get_lobby_network_inner(
     build_network_view(&stored, observation, now).map_err(|_| internal_error(false))
 }
 
+async fn create_invitation(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateInvitationRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let dry_hint = state.config.force_dry_run;
+    let _request = parse_json(payload, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
+    let legacy_actor = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyInvite,
+        None,
+    )
+    .await?;
+    let _lobby = state.lock_lobby(lobby_id).await;
+    let now = state.clock.now();
+    let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
+    let dry_run = stored.dry_run;
+    ensure_new_lobby_work_authorized(&state, &stored)?;
+    ensure_joinable(stored.lobby.state, dry_run)?;
+    if let Some(actor) = legacy_actor {
+        ensure_creator(&stored, actor, stored.dry_run)?;
+    }
+    if stored.active_invitation_count(now) >= MAX_ACTIVE_INVITATIONS {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "invitation_limit_reached",
+            "too many active invitations",
+        )
+        .dry_run(stored.dry_run));
+    }
+    let generated = GeneratedCapability::generate();
+    let expires_at = now
+        .saturating_add(INVITATION_TTL_MS)
+        .min(stored.lobby.ttl.absolute_expires_at);
+    stored.add_capability(StoredCapabilityVerifier::new(
+        generated.verifier,
+        vec![LobbyCapabilityScope::LobbyJoin],
+        lobby_id,
+        None,
+        stored.network_generation,
+        expires_at,
+    ));
+    state
+        .store
+        .replace(stored.clone())
+        .await
+        .map_err(|error| store_api_error(&error, stored.dry_run))?;
+    Ok(sensitive_json_response(
+        StatusCode::CREATED,
+        &CreateInvitationResponse {
+            invitation: generated.opaque(vec![LobbyCapabilityScope::LobbyJoin], expires_at),
+            network_generation: stored.network_generation,
+        },
+    ))
+}
+
 async fn join_lobby(
     State(state): State<AppState>,
     Path(lobby_id): Path<String>,
     headers: HeaderMap,
     payload: Result<Json<JoinLobbyRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    enforce_mutation_budget(&state, &headers).await?;
+    enforce_route_budget(&state, &headers, false).await?;
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.player_id {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let invitation_verifier = if state.config.allow_legacy_client_assertions {
+        None
+    } else {
+        Some(capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?)
+    };
+    let actor = if state.config.allow_legacy_client_assertions {
+        let actor = require_actor(&headers, dry_hint)?;
+        if actor != request.player_id {
+            return Err(actor_mismatch(dry_hint));
+        }
+        actor
+    } else {
+        request.player_id
+    };
 
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
@@ -894,6 +1459,12 @@ async fn join_lobby(
     let request_fingerprint = fingerprint(&request, dry_run)?;
 
     if let Some(replay) = stored.join_replays.get(&idempotency_key) {
+        if invitation_verifier
+            .as_ref()
+            .is_some_and(|verifier| !stored.matches_invitation(verifier, now))
+        {
+            return Err(lobby_not_found(false));
+        }
         if replay.fingerprint != request_fingerprint || replay.player_id != actor {
             return Err(idempotency_conflict(dry_run));
         }
@@ -907,6 +1478,7 @@ async fn join_lobby(
         ));
     }
 
+    ensure_new_lobby_work_authorized(&state, &stored)?;
     request
         .validate(WIRE_VERSION)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
@@ -1010,6 +1582,14 @@ async fn join_lobby(
             .dry_run(dry_run)
         })?;
 
+    // Consume the one-use invitation in the same durable reservation update,
+    // only after validation, state/capacity checks, abuse budgets, and provider
+    // concurrency have succeeded. Pre-mint failures therefore remain retryable.
+    if let Some(verifier) = invitation_verifier {
+        if !stored.consume_invitation(&verifier, now) {
+            return Err(lobby_not_found(false));
+        }
+    }
     let expires_at = now.saturating_add(JOIN_CREDENTIAL_TTL_MS);
     stored.pending_issuances.insert(
         request.player_id,
@@ -1056,6 +1636,21 @@ async fn join_lobby(
                 transition(&mut stored.lobby, LobbyState::Failed, dry_run)?;
             }
             stored.lobby.state_reason = Some(reason.clone());
+            if let ProviderError::ChildPolicyGate {
+                expected_digest,
+                status,
+                delete_acknowledged,
+                ..
+            } = &error
+            {
+                stored.child_policy_digest = Some(expected_digest.clone());
+                stored.child_policy_status = Some(status.as_str().to_owned());
+                stored.cleanup_requested_at = Some(now);
+                if *delete_acknowledged {
+                    stored.delete_acknowledged_at = Some(now);
+                    stored.network_lifecycle = NetworkLifecycle::VerifyingAbsence;
+                }
+            }
             stored.lobby.authority = None;
             stored.last_election = None;
             stored.terminal_at = Some(now);
@@ -1072,7 +1667,10 @@ async fn join_lobby(
                     ProviderError::ChildSecretUnavailable | ProviderError::IdentityMismatch
                 );
             if stored.cleanup_pending
-                && stored.network_lifecycle != NetworkLifecycle::ManualRemediation
+                && !matches!(
+                    stored.network_lifecycle,
+                    NetworkLifecycle::ManualRemediation | NetworkLifecycle::VerifyingAbsence
+                )
             {
                 stored.network_lifecycle = NetworkLifecycle::CleanupPending;
             }
@@ -1126,7 +1724,7 @@ async fn join_lobby(
 
     let credential = JoinCredential::new(
         minted.credential_id.clone(),
-        minted.auth_key.into_exposed(),
+        minted.auth_key.into_zeroizing(),
         minted.tailnet,
         vec![stored.tag.clone()],
         expires_at,
@@ -1135,6 +1733,24 @@ async fn join_lobby(
         minted.metadata.dry_run || credential.expose_auth_key() != DRY_RUN_AUTH_KEY,
         "only dry-run may emit the synthetic credential marker"
     );
+    let participant_capability = GeneratedCapability::generate();
+    let participant_expires_at = stored.lobby.ttl.absolute_expires_at;
+    let participant_scopes = vec![
+        LobbyCapabilityScope::LobbyRead,
+        LobbyCapabilityScope::LobbyReport,
+        LobbyCapabilityScope::LobbyPlay,
+        LobbyCapabilityScope::LobbyLeaveSelf,
+    ];
+    stored.add_capability(StoredCapabilityVerifier::new(
+        participant_capability.verifier,
+        participant_scopes.clone(),
+        lobby_id,
+        Some(request.player_id),
+        stored.network_generation,
+        participant_expires_at,
+    ));
+    let participant_capability_wire =
+        participant_capability.opaque(participant_scopes, participant_expires_at);
     let receipt = JoinCredentialReceipt::from(&credential);
     stored.credentials.insert(
         request.player_id,
@@ -1161,14 +1777,158 @@ async fn join_lobby(
         .await
         .map_err(|error| store_api_error(&error, dry_run))?;
 
+    let manifest_signing_key = state.manifest_signing_key(lobby_id).await?;
     Ok(sensitive_json_response(
         StatusCode::CREATED,
         &JoinLobbyResponse {
             join_credential: credential,
+            participant_capability: participant_capability_wire,
             lobby: stored.snapshot(),
+            session_generation: stored.session_generation,
+            manifest_public_key: SessionPublicKey::from_bytes(
+                manifest_signing_key.verifying_key().to_bytes(),
+            ),
             metadata: minted.metadata,
         },
     ))
+}
+
+async fn register_session_endpoint(
+    State(state): State<AppState>,
+    Path(lobby_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<RegisterSessionEndpointRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let lobby_id = secure_lobby_id(&lobby_id)?;
+    let request = parse_json(payload, false)?;
+    let player_id =
+        authorize_participant_scope(&state, lobby_id, &headers, LobbyCapabilityScope::LobbyPlay)
+            .await?;
+    let _lobby = state.lock_lobby(lobby_id).await;
+    let now = state.clock.now();
+    let stored = state
+        .store
+        .get(lobby_id)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    if request.network_generation != stored.network_generation
+        || request.roster_revision != stored.roster_revision
+        || !stored
+            .lobby
+            .roster
+            .iter()
+            .any(|player| player.player_id == player_id)
+        || !matches!(
+            stored.lobby.state,
+            LobbyState::Forming | LobbyState::Ready | LobbyState::Starting | LobbyState::InMatch
+        )
+        || !tailnet_address_is_valid(&request.tailnet_address)
+        || request.application_port == 0
+    {
+        return Err(lobby_not_found(false));
+    }
+    let secure_identity = match (request.session_public_key, request.key_proof) {
+        (Some(public_key), Some(proof)) => {
+            let address = request
+                .tailnet_address
+                .parse()
+                .map_err(|_| lobby_not_found(false))?;
+            let digest = canonical_keyreg_digest(
+                lobby_id,
+                player_id,
+                request.network_generation,
+                request.roster_revision,
+                address,
+                request.application_port,
+                public_key,
+            );
+            public_key.verify_digest(&digest, proof).map_err(|_| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "session_key_proof_invalid",
+                    "session public-key proof is invalid",
+                )
+            })?;
+            Some(public_key)
+        }
+        (None, None) if stored.dry_run => None,
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "session_identity_required",
+                "secure session public key and proof are required",
+            ));
+        }
+    };
+
+    {
+        let mut cache = state.session_endpoints.write().await;
+        let lobby_endpoints = cache.entry(lobby_id).or_default();
+        // Expired records are already excluded from every signed projection,
+        // so evict them here as well: a restarted or re-keyed client must never
+        // be permanently fenced out by a stale cached sequence while the
+        // server stays up. The strictly-increasing replay gate and the
+        // one-player-per-node claim check keep full force inside the
+        // retention window.
+        lobby_endpoints.retain(|_, existing| {
+            now.checked_duration_since(existing.received_at)
+                .is_some_and(|age| age <= SESSION_ENDPOINT_RETENTION_MS)
+        });
+        if lobby_endpoints
+            .get(&player_id)
+            .is_some_and(|existing| request.sequence <= existing.sequence)
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "endpoint_sequence_replayed",
+                "endpoint registration sequence must increase",
+            ));
+        }
+        if lobby_endpoints.values().any(|existing| {
+            existing.player_id != player_id
+                && (existing.tailnet_address == request.tailnet_address
+                    || request
+                        .node_key
+                        .is_some_and(|node| existing.node_key == Some(node)))
+        }) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "node_already_claimed",
+                "tailnet node identity is already bound to another player",
+            ));
+        }
+        lobby_endpoints.insert(
+            player_id,
+            SessionEndpointRecord {
+                player_id,
+                network_generation: request.network_generation,
+                roster_revision: request.roster_revision,
+                sequence: request.sequence,
+                tailnet_address: request.tailnet_address,
+                application_port: request.application_port,
+                session_public_key: secure_identity,
+                node_key: request.node_key,
+                received_at: now,
+            },
+        );
+    }
+
+    let response = RegisterSessionEndpointResponse {
+        lobby: stored.snapshot(),
+        session: session_projection(&state, &stored, now).await?,
+    };
+    Ok(sensitive_json_response(StatusCode::OK, &response))
+}
+
+fn tailnet_address_is_valid(value: &str) -> bool {
+    match value.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            let octets = address.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        Ok(IpAddr::V6(address)) => address.octets()[0] & 0xfe == 0xfc,
+        Err(_) => false,
+    }
 }
 
 async fn leave_lobby(
@@ -1179,12 +1939,16 @@ async fn leave_lobby(
 ) -> Result<Json<LeaveLobbyResponse>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.player_id {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let _legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyLeaveSelf,
+        Some(request.player_id),
+    )
+    .await?;
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
@@ -1231,8 +1995,17 @@ async fn leave_lobby(
         .lobby
         .roster
         .retain(|player| player.player_id != request.player_id);
+    stored.roster_revision = stored.roster_revision.saturating_add(1);
+    state
+        .session_endpoints
+        .write()
+        .await
+        .entry(lobby_id)
+        .and_modify(|endpoints| endpoints.clear());
     stored.measurements.clear();
+    stored.authenticated_reporters.clear();
     stored.pending_issuances.remove(&request.player_id);
+    stored.revoke_player_capabilities(request.player_id);
     stored
         .join_replays
         .retain(|_, replay| replay.player_id != request.player_id);
@@ -1271,12 +2044,16 @@ async fn submit_measurements(
 ) -> Result<Json<SubmitMeasurementsResponse>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.player_id {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyReport,
+        Some(request.player_id),
+    )
+    .await?;
 
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
@@ -1304,6 +2081,19 @@ async fn submit_measurements(
         )
         .dry_run(dry_run));
     }
+    if legacy.is_none()
+        && stored
+            .measurements
+            .get(&player_id)
+            .and_then(|sample| now.checked_duration_since(sample.measured_at))
+            .is_some_and(|age| age < 2_000)
+    {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "report_rate_limited",
+            "participant reports are accepted at most once every two seconds",
+        ));
+    }
     let sample = request
         .into_validated_sample(now, roster_size)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
@@ -1320,6 +2110,9 @@ async fn submit_measurements(
     player.route_summary = sample.route_summary;
     player.join_state = PlayerJoinState::Connected;
     stored.measurements.insert(player_id, sample);
+    if legacy.is_none() {
+        stored.authenticated_reporters.insert(player_id);
+    }
     refresh_idle_expiry(&mut stored, now);
     if stored.lobby.state == LobbyState::InMatch {
         let _ = migrate_silent_authority(&mut stored, now, dry_run)?;
@@ -1381,7 +2174,15 @@ async fn authority_handler(
 ) -> Result<Json<AuthorityEnvelope>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
+    let _legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyManage,
+        None,
+    )
+    .await?;
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
@@ -1426,12 +2227,17 @@ async fn start_lobby(
 ) -> Result<Json<StartLobbyResponse>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.creator_player_id {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyManage,
+        None,
+    )
+    .await?;
+    let actor = legacy.unwrap_or(request.creator_player_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
@@ -1498,6 +2304,17 @@ async fn start_lobby(
     }
     validate_start_roster(&stored.lobby.roster)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
+    if !dry_run {
+        validate_secure_start_roster(&stored.lobby.roster)
+            .map_err(|error| ApiError::validation(&error, dry_run))?;
+        if !session_projection(&state, &stored, now).await?.secure {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "session_identity_required",
+                "every roster member must register a fresh signed session identity",
+            ));
+        }
+    }
     if !all_measurements_fresh(&stored, now) {
         transition(&mut stored.lobby, LobbyState::Forming, dry_run)?;
         stored.lobby.authority = None;
@@ -1524,6 +2341,15 @@ async fn start_lobby(
     }
 
     stored.lobby.map_seed = Some(request.map_seed.unwrap_or_else(random_map_seed));
+    stored.session_generation = stored.session_generation.saturating_add(1).max(1);
+    // Session keys are per-generation. Never project pre-start registrations
+    // into the new signed replay domain.
+    state
+        .session_endpoints
+        .write()
+        .await
+        .entry(lobby_id)
+        .and_modify(BTreeMap::clear);
     transition(&mut stored.lobby, LobbyState::Starting, dry_run)?;
     stored.started_at = Some(now);
     stored.last_authority_heartbeat_at = None;
@@ -1551,12 +2377,17 @@ async fn authority_heartbeat(
 ) -> Result<Json<AuthorityHeartbeatResponse>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.player_id {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyPlay,
+        Some(request.player_id),
+    )
+    .await?;
+    let actor = legacy.unwrap_or(request.player_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
@@ -1623,12 +2454,17 @@ async fn submit_results(
 ) -> Result<Response, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
     let request = parse_json(payload, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
-    if actor != request.submitted_by {
-        return Err(actor_mismatch(dry_hint));
-    }
+    let legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyPlay,
+        Some(request.submitted_by),
+    )
+    .await?;
+    let actor = legacy.unwrap_or(request.submitted_by);
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
@@ -1715,14 +2551,23 @@ async fn delete_lobby(
 ) -> Result<Json<DestroyLobbyResponse>, ApiError> {
     let header_dry_run = parse_dry_run_header(&headers, state.config.force_dry_run)?;
     let dry_hint = state.config.force_dry_run || header_dry_run;
-    let lobby_id = parse_lobby_id(&lobby_id, dry_hint)?;
-    let actor = require_actor(&headers, dry_hint)?;
+    let lobby_id = secure_lobby_id(&lobby_id)?;
+    let legacy = authorize_scope(
+        &state,
+        lobby_id,
+        &headers,
+        LobbyCapabilityScope::LobbyDestroy,
+        None,
+    )
+    .await?;
     let _lobby = state.lock_lobby(lobby_id).await;
     let now = state.clock.now();
     let mut stored = load_maintained_lobby(&state, lobby_id, now, dry_hint).await?;
     let dry_run = mutation_dry_run(&stored, header_dry_run, state.config.force_dry_run)?;
     // Authorization is deliberately checked before destroyed replay or provider work.
-    ensure_creator(&stored, actor, dry_run)?;
+    if let Some(actor) = legacy {
+        ensure_creator(&stored, actor, dry_run)?;
+    }
 
     if stored.lobby.state == LobbyState::Destroyed && !stored.cleanup_pending {
         return Ok(Json(DestroyLobbyResponse {
@@ -1731,6 +2576,8 @@ async fn delete_lobby(
             metadata: metadata_for(dry_run),
         }));
     }
+    state.session_endpoints.write().await.remove(&lobby_id);
+    state.manifest_keys.write().await.remove(&lobby_id);
     if !matches!(
         stored.lobby.state,
         LobbyState::Closing | LobbyState::Failed | LobbyState::Expired | LobbyState::Destroyed
@@ -1763,6 +2610,207 @@ struct AuthorityEnvelope {
     authority: AuthorityResponse,
     #[serde(flatten)]
     metadata: ResponseMetadata,
+}
+
+async fn enforce_mutation_budget(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let now = state.clock.now();
+    let ip = verified_client_ip(headers);
+    let actor_bytes = headers.get(AUTHORIZATION_HEADER).map_or_else(
+        || {
+            headers
+                .get(ACTOR_HEADER)
+                .map_or(b"anonymous".as_slice(), |value| value.as_bytes())
+        },
+        |value| value.as_bytes(),
+    );
+    let actor_digest = sha256(actor_bytes);
+    let mut abuse = state.abuse.lock().await;
+    while abuse.events.front().is_some_and(|event| {
+        now.checked_duration_since(event.at)
+            .is_some_and(|age| age >= ABUSE_WINDOW_MS)
+    }) {
+        abuse.events.pop_front();
+    }
+    let ip_count = abuse.events.iter().filter(|event| event.ip == ip).count();
+    let actor_count = abuse
+        .events
+        .iter()
+        .filter(|event| event.actor_digest == actor_digest)
+        .count();
+    if abuse.events.len() >= MAX_MUTATIONS_GLOBAL_PER_MINUTE
+        || ip_count >= MAX_MUTATIONS_PER_IP_PER_MINUTE
+        || actor_count >= MAX_MUTATIONS_PER_ACTOR_PER_MINUTE
+    {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "request_rate_limited",
+            "request budget exceeded; retry later",
+        ));
+    }
+    abuse.events.push_back(AbuseEvent {
+        at: now,
+        ip,
+        actor_digest,
+    });
+    Ok(())
+}
+
+async fn enforce_route_budget(
+    state: &AppState,
+    headers: &HeaderMap,
+    create: bool,
+) -> Result<(), ApiError> {
+    let now = state.clock.now();
+    let ip = verified_client_ip(headers);
+    let actor_digest = sha256(
+        headers
+            .get(AUTHORIZATION_HEADER)
+            .or_else(|| headers.get(ACTOR_HEADER))
+            .map_or(b"anonymous".as_slice(), |value| value.as_bytes()),
+    );
+    let (window, ip_limit, actor_limit) = if create {
+        (10 * 60_000, 5, 5)
+    } else {
+        (60_000, 10, 10)
+    };
+    let mut abuse = state.abuse.lock().await;
+    let events = if create {
+        &mut abuse.create_events
+    } else {
+        &mut abuse.join_events
+    };
+    while events.front().is_some_and(|event| {
+        now.checked_duration_since(event.at)
+            .is_some_and(|age| age >= window)
+    }) {
+        events.pop_front();
+    }
+    if events.iter().filter(|event| event.ip == ip).count() >= ip_limit
+        || events
+            .iter()
+            .filter(|event| event.actor_digest == actor_digest)
+            .count()
+            >= actor_limit
+    {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "request_rate_limited",
+            "request budget exceeded; retry later",
+        ));
+    }
+    events.push_back(AbuseEvent {
+        at: now,
+        ip,
+        actor_digest,
+    });
+    Ok(())
+}
+
+fn verified_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get(VERIFIED_PEER_IP_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unattributed")
+        .to_owned()
+}
+
+fn real_creation_authorized(state: &AppState) -> bool {
+    state.config.real_mutations_enabled
+        && state.config.real_admission_enabled
+        && !state.config.allow_legacy_client_assertions
+        && !state.config.trust_forwarded_for
+        && state.config.bind_addr.ip().is_loopback()
+        && state.config.provisioning_mode == ProvisioningMode::TailnetPerLobby
+        && state.startup_reconciled.load(Ordering::Acquire)
+        && state
+            .local_rehearsal
+            .as_ref()
+            .is_some_and(|qualification| state.clock.now() < qualification.expires_at)
+        && state
+            .provider
+            .cached_capabilities()
+            .tailnet_per_lobby_available()
+}
+
+/// Admission predicate for any new real work (invitation issuance, invitation
+/// consumption, and enrollment-key minting). Cleanup deliberately does not use
+/// this predicate so operators can close admission while cleanup remains live.
+fn ensure_new_lobby_work_authorized(
+    state: &AppState,
+    stored: &StoredLobby,
+) -> Result<(), ApiError> {
+    if stored.dry_run
+        || real_creation_authorized(state)
+        || (state.config.allow_legacy_client_assertions
+            && state.config.test_only_allow_legacy_real_mutations)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "real_admission_closed",
+            "real lobby admission is closed",
+        )
+        .dry_run(false))
+    }
+}
+
+fn secure_lobby_id(value: &str) -> Result<LobbyId, ApiError> {
+    LobbyId::parse(value).map_err(|_| lobby_not_found(false))
+}
+
+/// Authorizes before state disclosure. Insecure asserted-player compatibility is
+/// available only behind an explicit development switch that conflicts with
+/// real admission. The returned player is the legacy actor, never a secure
+/// capability subject.
+async fn authorize_participant_scope(
+    state: &AppState,
+    lobby_id: LobbyId,
+    headers: &HeaderMap,
+    required: LobbyCapabilityScope,
+) -> Result<PlayerId, ApiError> {
+    enforce_mutation_budget(state, headers).await?;
+    if state.config.allow_legacy_client_assertions {
+        return require_actor(headers, state.config.force_dry_run);
+    }
+    let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+    let stored = state
+        .store
+        .get(lobby_id)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    stored
+        .authorize(&verifier, required, None, state.clock.now())
+        .flatten()
+        .ok_or_else(|| lobby_not_found(false))
+}
+
+async fn authorize_scope(
+    state: &AppState,
+    lobby_id: LobbyId,
+    headers: &HeaderMap,
+    required: LobbyCapabilityScope,
+    expected_player: Option<PlayerId>,
+) -> Result<Option<PlayerId>, ApiError> {
+    enforce_mutation_budget(state, headers).await?;
+    if state.config.allow_legacy_client_assertions {
+        let actor = require_actor(headers, state.config.force_dry_run)?;
+        if expected_player.is_some_and(|expected| expected != actor) {
+            return Err(actor_mismatch(state.config.force_dry_run));
+        }
+        return Ok(Some(actor));
+    }
+    let verifier = capability_from_headers(headers).ok_or_else(|| lobby_not_found(false))?;
+    let stored = state
+        .store
+        .get(lobby_id)
+        .await
+        .ok_or_else(|| lobby_not_found(false))?;
+    stored
+        .authorize(&verifier, required, expected_player, state.clock.now())
+        .ok_or_else(|| lobby_not_found(false))?;
+    Ok(None)
 }
 
 fn capability_verifier(token: &[u8]) -> [u8; 32] {
@@ -1851,6 +2899,7 @@ const fn observation_failure(error: &ProviderError) -> CachedObservationFailure 
         ProviderError::InsufficientScopes { .. } => CachedObservationFailure::PermissionDenied,
         ProviderError::IdentityMismatch => CachedObservationFailure::Conflict,
         ProviderError::ChildSecretUnavailable
+        | ProviderError::ChildPolicyGate { .. }
         | ProviderError::Upstream { .. }
         | ProviderError::Unavailable { .. } => CachedObservationFailure::SourceError,
     }
@@ -2038,16 +3087,14 @@ fn build_network_view(
         .iter()
         .filter(|(player_id, sample)| {
             roster_ids.contains(player_id)
+                && stored.authenticated_reporters.contains(player_id)
                 && now
                     .checked_duration_since(sample.measured_at)
                     .is_some_and(|age| age < INSPECTOR_REPORT_FRESHNESS_MS)
         })
         .map(|(_, sample)| sample)
         .collect();
-    // The current measurement route uses client-asserted player identifiers;
-    // it is not the generation/session-bound participant-report contract.
-    // Do not relabel those rows as authenticated fresh reporters.
-    let fresh_reporter_count = 0;
+    let fresh_reporter_count = u32::try_from(fresh_measurements.len()).map_err(|_| ())?;
     let (direct_count, peer_relay_count, derp_relay_count, fresh_directions) = fresh_measurements
         .iter()
         .try_fold((0_u32, 0_u32, 0_u32, 0_u32), |counts, sample| {
@@ -2273,6 +3320,12 @@ fn start_response(stored: &StoredLobby, dry_run: bool) -> Result<StartLobbyRespo
             .authority
             .clone()
             .ok_or_else(|| internal_error(dry_run))?,
+        input_hash: stored
+            .last_election
+            .as_ref()
+            .map(|election| election.input_hash)
+            .ok_or_else(|| internal_error(dry_run))?,
+        session_generation: stored.session_generation,
         metadata: metadata_for(dry_run),
     })
 }
@@ -2407,7 +3460,7 @@ fn random_map_seed() -> u64 {
 }
 
 fn lobby_tag(lobby_id: LobbyId) -> String {
-    format!("tag:spurfire-lobby-{lobby_id}")
+    dedicated_rider_tag(lobby_id)
 }
 
 fn metadata_for(dry_run: bool) -> ResponseMetadata {
@@ -2508,10 +3561,12 @@ fn refresh_idle_expiry(stored: &mut StoredLobby, now: UnixMillis) {
 }
 
 fn roster_changed(stored: &mut StoredLobby, dry_run: bool) -> Result<(), ApiError> {
+    stored.roster_revision = stored.roster_revision.saturating_add(1);
     if stored.lobby.state == LobbyState::Ready {
         transition(&mut stored.lobby, LobbyState::Forming, dry_run)?;
     }
     stored.measurements.clear();
+    stored.authenticated_reporters.clear();
     stored.lobby.authority = None;
     stored.last_election = None;
     Ok(())
@@ -2831,6 +3886,7 @@ async fn cleanup_resources(
     let dry_run = stored.dry_run;
     if stored.cleanup_requested_at.is_none() {
         stored.measurements.clear();
+        stored.authenticated_reporters.clear();
         for player in &mut stored.lobby.roster {
             player.route_summary = Default::default();
         }
@@ -2910,16 +3966,52 @@ fn finalize_lobby_cleanup(stored: &mut StoredLobby, now: UnixMillis, finalize: b
     }
 }
 
-async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby, now: UnixMillis) {
+async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby, _now: UnixMillis) {
     let Some(identity) = provider_identity(stored) else {
         stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
         stored.cleanup_pending = true;
         stored.lobby.state_reason = Some("provider_identity_missing_manual_remediation".to_owned());
         return;
     };
+    let Some(provider_id) = identity.provider_tailnet_id.clone() else {
+        stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+        stored.cleanup_pending = true;
+        return;
+    };
+    let lobby_id = stored.lobby.lobby_id;
+    let generation = stored.network_generation;
+
+    // Wall timestamps survive restart but cannot prove an interval. If the
+    // process-local monotonic anchor is unavailable or belongs to another
+    // generation, discard the first observation and collect a fresh pair.
+    if stored.first_absence_observed_at.is_some() {
+        let anchor = state
+            .absence_observation_starts
+            .read()
+            .await
+            .get(&lobby_id)
+            .copied();
+        match anchor {
+            Some((anchor_generation, started)) if anchor_generation == generation => {
+                if started.elapsed() < Duration::from_millis(CLEANUP_ABSENCE_MIN_SEPARATION_MS) {
+                    stored.cleanup_pending = true;
+                    return;
+                }
+            }
+            _ => {
+                clear_absence_proof(stored);
+                if state.store.replace(stored.clone()).await.is_err() {
+                    stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                    stored.lobby.state_reason = Some("absence_reset_persistence_failed".to_owned());
+                    return;
+                }
+            }
+        }
+    }
+
     let request = TailnetPresenceRequest {
-        lobby_id: stored.lobby.lobby_id,
-        network_generation: stored.network_generation,
+        lobby_id,
+        network_generation: generation,
         identity,
     };
     let present = tokio::time::timeout(
@@ -2929,49 +4021,86 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
     .await;
     match present {
         Ok(Ok(true)) => {
-            stored.first_absence_observed_at = None;
-            stored.cleanup_pending = true;
-        }
-        Ok(Ok(false)) => match stored.first_absence_observed_at {
-            None => {
-                stored.first_absence_observed_at = Some(now);
-                stored.cleanup_pending = true;
-            }
-            Some(first)
-                if now
-                    .checked_duration_since(first)
-                    .is_some_and(|age| age >= CLEANUP_ABSENCE_MIN_SEPARATION_MS) =>
-            {
-                // Absence evidence is complete; only now may the exact
-                // generation-bound vault tuple be erased. Failure remains
-                // fail-closed and retains the singleton lease.
-                match tokio::time::timeout(
-                    PROVIDER_OPERATION_TIMEOUT,
-                    state.provider.erase_child_secret(request),
-                )
+            clear_absence_proof(stored);
+            state
+                .absence_observation_starts
+                .write()
                 .await
-                {
-                    Ok(Ok(())) => {
-                        stored.child_secret_erased_at = Some(now);
-                        stored.absence_confirmed_at = Some(now);
-                        stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
-                        stored.cleanup_pending = false;
-                        stored.lobby.state_reason = None;
-                    }
-                    Ok(Err(error)) => {
-                        stored.cleanup_pending = true;
-                        stored.lobby.state_reason = Some(error.state_reason().to_owned());
-                    }
-                    Err(_) => {
-                        stored.cleanup_pending = true;
-                        stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
-                    }
+                .remove(&lobby_id);
+            stored.cleanup_pending = true;
+            if state.store.replace(stored.clone()).await.is_err() {
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason = Some("absence_reset_persistence_failed".to_owned());
+            }
+        }
+        Ok(Ok(false)) if stored.first_absence_observed_at.is_none() => {
+            // Capture the interval start after the successful provider response,
+            // then durably record observation identity before returning.
+            stored.first_absence_observed_at = Some(state.clock.now());
+            stored.absence_observation_generation = Some(generation);
+            stored.absence_observation_provider_id = Some(provider_id);
+            stored.absence_monotonic_verified = false;
+            stored.cleanup_pending = true;
+            state
+                .absence_observation_starts
+                .write()
+                .await
+                .insert(lobby_id, (generation, tokio::time::Instant::now()));
+            if state.store.replace(stored.clone()).await.is_err() {
+                clear_absence_proof(stored);
+                state
+                    .absence_observation_starts
+                    .write()
+                    .await
+                    .remove(&lobby_id);
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason =
+                    Some("absence_observation_persistence_failed".to_owned());
+            }
+        }
+        Ok(Ok(false)) => {
+            // Persist complete exact-tuple observation evidence before touching
+            // the vault. A crash can then retry only the idempotent verified
+            // erasure path, never infer evidence from mutable wall time.
+            stored.absence_confirmed_at = Some(state.clock.now());
+            stored.absence_observation_generation = Some(generation);
+            stored.absence_observation_provider_id = Some(provider_id);
+            stored.absence_monotonic_verified = true;
+            stored.cleanup_pending = true;
+            if state.store.replace(stored.clone()).await.is_err() {
+                stored.absence_monotonic_verified = false;
+                stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
+                stored.lobby.state_reason = Some("absence_proof_persistence_failed".to_owned());
+                return;
+            }
+            match tokio::time::timeout(
+                PROVIDER_OPERATION_TIMEOUT,
+                state.provider.erase_child_secret(request),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    let completed_at = state.clock.now();
+                    stored.child_secret_erased_at = Some(completed_at);
+                    stored.network_lifecycle = NetworkLifecycle::DedicatedAbsent;
+                    stored.cleanup_pending = false;
+                    stored.lobby.state_reason = None;
+                    state
+                        .absence_observation_starts
+                        .write()
+                        .await
+                        .remove(&lobby_id);
+                }
+                Ok(Err(error)) => {
+                    stored.cleanup_pending = true;
+                    stored.lobby.state_reason = Some(error.state_reason().to_owned());
+                }
+                Err(_) => {
+                    stored.cleanup_pending = true;
+                    stored.lobby.state_reason = Some("child_secret_erasure_pending".to_owned());
                 }
             }
-            Some(_) => {
-                stored.cleanup_pending = true;
-            }
-        },
+        }
         Ok(Err(ProviderError::IdentityMismatch)) => {
             stored.network_lifecycle = NetworkLifecycle::ManualRemediation;
             stored.cleanup_pending = true;
@@ -2979,11 +4108,17 @@ async fn reconcile_dedicated_absence(state: &AppState, stored: &mut StoredLobby,
                 Some("provider_identity_mismatch_manual_remediation".to_owned());
         }
         Ok(Err(_)) | Err(_) => {
-            // Preserve the last absence evidence without converting uncertainty
-            // into absence. The singleton lease remains held.
             stored.cleanup_pending = true;
         }
     }
+}
+
+fn clear_absence_proof(stored: &mut StoredLobby) {
+    stored.first_absence_observed_at = None;
+    stored.absence_confirmed_at = None;
+    stored.absence_observation_generation = None;
+    stored.absence_observation_provider_id = None;
+    stored.absence_monotonic_verified = false;
 }
 
 fn apply_cleanup_result(
@@ -3152,6 +4287,11 @@ fn provider_api_error(error: &ProviderError, dry_run: bool) -> ApiError {
             "manual_remediation_required",
             "provider credentials needed for this lobby are unavailable after restart",
         ),
+        ProviderError::ChildPolicyGate { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "child_policy_gate_failed",
+            "the dedicated network failed restrictive policy verification and is being cleaned",
+        ),
         ProviderError::InsufficientScopes { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_scopes_insufficient",
@@ -3187,6 +4327,8 @@ fn store_api_error(error: &crate::store::StoreError, dry_run: bool) -> ApiError 
             "real provider mutations are disabled by the independent safety switch",
         )
         .dry_run(dry_run),
+        crate::store::StoreError::InvalidCreateGrant
+        | crate::store::StoreError::InvalidRehearsalReceipt => lobby_not_found(false),
         crate::store::StoreError::RealLobbyCapacityReached => ApiError::new(
             StatusCode::CONFLICT,
             "real_lobby_capacity_reached",

@@ -2,7 +2,7 @@
 
 `spurfire-server` is the prototype HTTP control service. It creates lobby records, mints narrow Tailscale enrollment credentials, publishes deterministic authority elections, and coordinates teardown. Gameplay remains peer-to-peer; the service is not in the gameplay data path and, by D9, never joins a lobby tailnet.
 
-> **Activation status:** public real provisioning is closed. Safe groundwork adds an independent default-off real-mutation switch and a creator-capability network view, but legacy lobby routes still use client assertions, capability migration is incomplete, and child credentials remain process-local. The chart rejects enabling real mutations. The hosted public deployment is dry-run only. The accepted target contract and operator runbook are in [control-plane-network-view.md](control-plane-network-view.md).
+> **Activation status:** public real provisioning is closed. The integrated service defaults to capability authorization, one-use create grants/invitations, an encrypted recoverable child vault, startup reconciliation, exact cleanup proof, a restrictive generated child-policy/readback gate, and a selected-lobby endpoint/report surface. Legacy assertions are development-only and chart-forbidden. Setec/workload identity, gateway-persistent limits and alerts, a private operator listener, live restrictive-policy qualification, and separately authorized live lifecycle evidence remain open. The hosted public deployment is dry-run only. The accepted gates and runbook are in [control-plane-network-view.md](control-plane-network-view.md).
 
 ## Start safely
 
@@ -27,30 +27,32 @@ cargo run -p spurfire-server
 
 Do not use that command for a public deployment. Safe-groundwork revisions recognize `SPURFIRE_REAL_MUTATIONS_ENABLED`, default it to `0`, and reject real create/mint/delete without it independently of credentials and provisioning mode. Older revisions without that switch are unsuitable for any exposed real configuration. The shipped chart keeps the switch at `0` and deliberately rejects `true`; no current deployment is authorized to enable it.
 
-Current real startup performs bounded, read-only capability probes. Organization-tailnet listing is probed independently from shared-tailnet key/device/ACL scopes. Organization create/token/deletion has been live-proven in disposable lifecycles; child-scoped one-use key issuance is implemented and mock-tested but still needs live end-to-end verification. Shared-tailnet scopes remain blocked for the historical client. Public use remains dry-run until the complete activation checklist passes.
+Current real startup performs bounded, read-only capability probes. Organization-tailnet listing is probed independently from shared-tailnet key/device/ACL scopes. Organization create/token/deletion has been live-proven in disposable lifecycles. Restrictive child-policy write/readback and child-scoped one-use key issuance are implemented and mock/fault-tested, but neither was live-mutated in this workflow and both still need approved end-to-end verification. Shared-tailnet scopes remain blocked for the historical client. Public use remains dry-run until the complete activation checklist passes.
 
 ## Common headers
 
-Current migration surface:
+Secure/default surface:
 
 - `Content-Type: application/json` on JSON requests.
 - `Idempotency-Key: <opaque value>` on create, join, start, and results.
-- `X-Spurfire-Player-Id: <UUIDv4>` supplies the prototype actor identity on mutations. It must equal the body player/creator/submitter where applicable.
-- `X-Spurfire-Dry-Run: 1` makes a new create request simulated. It is rejected with `409 dry_run_mode_mismatch` if used to mutate an existing real lobby, so a simulation cannot alter live state.
+- `Authorization: Spurfire-Capability <token>` over TLS authorizes every exact-lobby read/mutation and one-use real create/join action.
+- `X-Spurfire-Player-Id: <UUIDv4>` on create binds the resulting creator subject; it is an identifier, never authentication.
+- `X-Spurfire-Dry-Run: 1` remains a development simulation hint and cannot alter a real lobby.
 
-Player identity is client-asserted and development-grade. These headers are not authentication. Before real activation, every lobby-specific read and mutation must instead require a scoped exact-lobby capability transported as `Authorization: Spurfire-Capability <token>` over TLS. Any player ID remains only an identifier that must match the capability subject.
+`SPURFIRE_ALLOW_LEGACY_CLIENT_ASSERTIONS=1` restores the older asserted-player development surface for dry-run only. Configuration rejects combining it with any real provider mutation, and the handler independently fails closed before provider work. The chart fixes it off.
 
 ## Current routes (migration surface)
 
 | Method and path | Behavior |
 |---|---|
 | `GET /healthz` | Process health and cached provisioning readiness. A blocked provider reports `degraded` without exposing probe bodies. |
-| `GET /v1/capabilities` | Cached booleans for token, organization-tailnet listing, and shared key/device/ACL access. Tailnet-per-lobby is `available` or `blocked_organization_access`; shared-tailnet is independently `available` or `blocked_scopes`. |
-| `POST /v1/lobbies` | Persists `PROVISIONING` before provider work. In tailnet-per-lobby mode it then creates one API-only child and keeps the one-time child OAuth pair only in memory. `max_players` defaults to 8 and is capped at 16. Same idempotency key/body/actor replays without a second create; a mismatch returns 409. |
+| `GET /v1/capabilities` | Cached provider evidence plus explicit `real_lobby_creation_authorized` and `real_lobby_join_authorized` product gates. Provider probes alone never open the client. Both product gates remain false in production until native zeroizing client handoff, authenticated coherent P2P, restrictive policy, persistent abuse controls, and live qualification are complete. |
+| `POST /v1/lobbies` | Persists `PROVISIONING` and acquires the real-lobby lease before provider work. In tailnet-per-lobby mode it creates one API-only child, encrypts the exact child OAuth tuple in the file vault, installs the generated same-rider-tag UDP/41643-only policy, and requires semantic readback before activation. Mismatch, 403, timeout, transport, or decode failure triggers exact child-scoped deletion and retains custody/lease until exact absence and CAS vault erasure are proven. `max_players` defaults to 8 and is capped at 16. Same idempotency key/body/actor replays without a second create; a mismatch returns 409. |
 | `GET /v1/lobbies/{lobby_id}` | Currently unauthenticated, secret-free snapshot, including roster, TTLs, authority summary, and aggregate `cleanup_pending`. Secret-free is not authorization-safe: it must not expose real lobbies. The maintained read path can also advance expiry/cleanup/provider work, so it is not the target inspector. It never returns the tailnet FQDN. |
-| `POST /v1/lobbies/{lobby_id}/join` | In `FORMING`/`READY`, validates wire major, rate limits mint attempts, and issues one ephemeral, preauthorized, non-reusable key with a 300-second expiry. Shared mode uses the lobby tag; child mode uses the child scope. The key appears only in the first 201 response; replay returns a receipt without key material. |
-| `POST /v1/lobbies/{lobby_id}/leave` | Idempotently removes the actor and revokes its unconsumed credential receipt. Per-player device deletion lacks a safe mapping; terminal shared cleanup uses the lobby tag, while terminal child cleanup deletes the child tailnet. |
-| `POST /v1/lobbies/{lobby_id}/measurements` | Last-write-wins integer connectivity report in `FORMING`, `READY`, or `IN_MATCH`. Unknown additive JSON fields are ignored. |
+| `POST /v1/lobbies/{lobby_id}/join` | Consumes a one-use invitation in `FORMING`/`READY`, validates wire major, rate limits mint attempts, and semantically re-reads the exact child policy before issuing one ephemeral, preauthorized, non-reusable, lobby-tagged key plus participant capability. A mismatch or unavailable readback deletes/queues cleanup instead of minting. Secrets appear only in the first 201 response; replay returns receipts only. |
+| `POST /v1/lobbies/{lobby_id}/leave` | `lobby.leave_self` removes only the capability-bound participant and clears the selected-lobby endpoint projection on roster revision. Per-player device deletion still lacks a safe provider mapping; terminal dedicated cleanup deletes the child tailnet. |
+| `POST /v1/lobbies/{lobby_id}/measurements` and `/network/reports` | `lobby.report` subject-bound, rate-limited last-write-wins connectivity input in `FORMING`, `READY`, or `IN_MATCH`. Unknown additive JSON fields are ignored. |
+| `POST /v1/lobbies/{lobby_id}/session/endpoint` | `lobby.play` registers one sequence/generation/roster-bound RustScale tailnet application endpoint. Rows are memory-only, expire from projection after 60 seconds, and are never rendered as ordinary roster fields. |
 | `GET /v1/lobbies/{lobby_id}/authority` | Returns `election_v1`, scores, winner, SHA-256 `input_hash`, and the exact canonical input (evaluation time, wire context, roster size, and player-sorted measurement rows) needed for peer recomputation. |
 | `POST /v1/lobbies/{lobby_id}/elect-authority` | Compatibility alias for the authority read/evaluation path. |
 | `POST /v1/lobbies/{lobby_id}/start` | Creator-only. Requires `READY`, at least two players, fresh measurements, a winner, compatible wire majors, and one authority formula. Fixes `map_seed` and enters `STARTING`. |
@@ -84,7 +86,7 @@ The selected view uses a complete provider-returned `tailnet_dns_name`/FQDN, suc
 
 ## State machine
 
-- **PROVISIONING** — persisted first. Shared mode evaluates cached key/device/ACL evidence. Tailnet-per-lobby performs the bounded organization create after persistence; success moves to `FORMING`, while denied or ambiguous work moves to `FAILED` with a safe machine reason.
+- **PROVISIONING** — persisted first. Shared mode evaluates cached key/device/ACL evidence. Tailnet-per-lobby performs the bounded organization create, encrypted exact-tuple custody, restrictive policy write, and semantic readback after persistence; only a verified match moves to `FORMING`. Policy mismatch/403/timeout fails closed with digest/status-only evidence and cleanup pending; ambiguous create remains manual remediation.
 - **FORMING** — accepts joins and measurements. It becomes `READY` once at least two roster members all have measurements fresher than 60 seconds. Ten minutes without join/leave/measurement activity causes `EXPIRED`.
 - **READY** — authority is published. A roster or measurement change returns to `FORMING`; stale measurements also return it to `FORMING` on the next read. Creator start enters `STARTING`.
 - **STARTING** — roster frozen and map seed fixed. The first authority heartbeat enters `IN_MATCH`; 120 seconds without one causes `FAILED`/`start_timeout`.
@@ -168,17 +170,28 @@ The redacted probes in [tailscale-api.md](tailscale-api.md) remain authoritative
 - read-only capability probes are conservative scope evidence, not production isolation proof;
 - safe per-player device deletion in shared mode still needs a trustworthy credential/device association. Leave revokes the key; terminal shared cleanup uses the lobby tag.
 
-The service fails closed for both modes. In particular, child OAuth material is intentionally process-local. After restart, any retained child-backed lobby becomes `FAILED`, sets `cleanup_pending`, and reports `child_secret_unavailable_manual_remediation` rather than trying the organization token or exposing an identifier. Production must replace this prototype vault with a dynamic encrypted secret manager and mutation-closed startup reconciliation across store, vault, singleton lease, and exact upstream stable IDs.
+The service fails closed for both modes. When real mutations are deliberately configured, child OAuth material is encrypted in the versioned child-vault file under an exact lobby/generation/stable-ID/FQDN tuple and recovered only after mutation-closed startup reconciliation. A missing/mismatched record becomes `MANUAL_REMEDIATION` and holds capacity rather than falling back to organization OAuth. Production still requires the approved setec/workload-identity, audit, backup/restore, and rotation posture.
 
-The current `PreparedNetwork`/durable record keeps the FQDN selector but discards the provider stable ID. Activation work must retain stable ID, canonical FQDN, and network generation as one non-secret identity tuple. Deletion refuses every mismatch and never selects by display name.
+The durable record retains stable provider ID, canonical FQDN, and network generation as one non-secret identity tuple. Deletion refuses every mismatch and never selects by display name.
+
+## Local rehearsal activation status
+
+Real local-rehearsal activation is intentionally disabled. The supervisor exits
+nonzero without spawning helpers, and the library constructor rejects activation
+before installing or consuming a receipt. This fail-closed posture remains until
+a single durable receipt fence, exact-HEAD worker attestation, persisted absolute
+deadline, cleanup-only restart authority, and supervisor-verifiable release proof
+are implemented together. The ordinary `spurfire-server` binary remains deny-all
+for real provider mutations. No caller-selected helper, inherited `TS_*` secret,
+or child exit status is accepted as rehearsal authority or cleanup evidence.
 
 ## Trust boundaries and production limits
 
 - Organization OAuth credentials, child OAuth pairs, and bearer tokens stay inside `spurfire-control`/`spurfire-server`; they are absent from public responses, durable records, logs, and diagnostic formatting.
-- A child OAuth pair is inserted into a provider-owned in-memory vault keyed by public `lobby_id` immediately after typed create decoding. Successful child-tailnet deletion evicts it; drop zeroizes secret allocations where practical.
+- A child OAuth pair is committed to authenticated encrypted custody under the exact identity tuple immediately after typed create decoding. Successful exact cleanup CAS-deletes and verifies the vault record; plaintext allocations are zeroized where practical.
 - The only client-visible secret is the first join response's short-lived auth key. Only its receipt ID and expiry are persisted.
 - Tailnet membership grants data-plane connectivity, not Tailscale API access. There is no arbitrary provider proxy route.
-- `player_id` and creator headers are client assertions, not public identity or authentication. Exact-lobby capabilities must replace them as authorization before real activation.
+- `player_id` and the create-time creator header are identifiers, not authentication. Exact-lobby capabilities authorize the default secure route surface; legacy assertions remain explicit development-only compatibility.
 - A tailnet FQDN and private tailnet address are topology metadata rather than credentials, but member/operator audience and retention rules still protect them. Provider stable IDs and reconciliation detail are operator-only.
 - Inspection facts distinguish control-authoritative, provider-observed, participant-reported, derived, stale, and unknown values. Provider `lastSeen` is not an online boolean; participant reports are not gameplay truth.
 - Result verification is intentionally shallow. Ranked co-signing, witnesses, or replay validation remain a blocking design question.

@@ -1,7 +1,11 @@
 use std::{env, fs, net::SocketAddr};
 
-use spurfire_net::{rustscale::RustScalePeer, PeerPayload, SessionState};
-use spurfire_protocol::{LobbyId, PlayerId};
+use ed25519_dalek::{Signer, SigningKey};
+use spurfire_net::{rustscale::RustScalePeer, PeerPayload, SecureSession, SessionState};
+use spurfire_protocol::{
+    canonical_manifest_digest, LobbyId, PlayerId, RosterManifest, RosterManifestEntry,
+    SessionPublicKey, SessionSignature,
+};
 use tokio::time::{sleep, Duration};
 use zeroize::Zeroizing;
 
@@ -37,11 +41,17 @@ fn argument(name: &str) -> Result<String, String> {
     Err(format!("required argument: {name}"))
 }
 
-fn read_key(path: &str) -> Result<Zeroizing<String>, String> {
-    let value = Zeroizing::new(
-        fs::read_to_string(path).map_err(|error| format!("read key file: {error}"))?,
-    );
-    let trimmed = Zeroizing::new(value.trim().to_owned());
+fn read_key(path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let value = Zeroizing::new(fs::read(path).map_err(|error| format!("read key file: {error}"))?);
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    let trimmed = Zeroizing::new(value[start..end].to_vec());
     if trimmed.is_empty() {
         return Err("auth key file was empty".into());
     }
@@ -59,10 +69,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lobby = LobbyId::parse("00000000-0000-4000-8000-000000000001")?;
     let player_a = PlayerId::parse("00000000-0000-4000-8000-000000000002")?;
     let player_b = PlayerId::parse("00000000-0000-4000-8000-000000000003")?;
-    let mut session_a = SessionState::new(lobby, player_a, player_a, 0);
-    let mut session_b = SessionState::new(lobby, player_b, player_a, 0);
-    session_a.add_peer(player_b, 0);
-    session_b.add_peer(player_a, 0);
+    let signing_a = SigningKey::from_bytes(&[1; 32]);
+    let signing_b = SigningKey::from_bytes(&[2; 32]);
+    let manifest_signing = SigningKey::from_bytes(&[9; 32]);
+    let manifest_public = SessionPublicKey::from_bytes(manifest_signing.verifying_key().to_bytes());
+    let manifest = RosterManifest {
+        lobby_id: lobby,
+        network_generation: 1,
+        session_generation: 1,
+        roster_revision: 1,
+        entries: vec![
+            RosterManifestEntry {
+                player_id: player_a,
+                session_public_key: SessionPublicKey::from_bytes(
+                    signing_a.verifying_key().to_bytes(),
+                ),
+                tailnet_address: a.tailnet_ip(),
+                application_port: a.local_addr().port(),
+                node_key: None,
+            },
+            RosterManifestEntry {
+                player_id: player_b,
+                session_public_key: SessionPublicKey::from_bytes(
+                    signing_b.verifying_key().to_bytes(),
+                ),
+                tailnet_address: b.tailnet_ip(),
+                application_port: b.local_addr().port(),
+                node_key: None,
+            },
+        ],
+    };
+    let manifest_signature = SessionSignature::from_bytes(
+        manifest_signing
+            .sign(&canonical_manifest_digest(manifest_public, &manifest))
+            .to_bytes(),
+    );
+    let mut state_a = SessionState::new(lobby, player_a, player_a, 0);
+    let mut state_b = SessionState::new(lobby, player_b, player_a, 0);
+    state_a.add_peer(player_b, 0);
+    state_b.add_peer(player_a, 0);
+    let mut session_a = SecureSession::new(
+        manifest.clone(),
+        manifest_public,
+        manifest_signature,
+        state_a,
+    )?;
+    let mut session_b = SecureSession::new(manifest, manifest_public, manifest_signature, state_b)?;
 
     let destination_b = SocketAddr::new(b.tailnet_ip(), b.local_addr().port());
     let hello = session_a.envelope(
@@ -70,10 +122,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PeerPayload::Hello {
             hostname: "spurfire-p2p-a".into(),
         },
-    );
+        &signing_a,
+    )?;
     a.send(&hello, destination_b).await?;
     let (received, source_a) = b.recv(Duration::from_secs(15)).await?;
-    if session_b.accept(&received, 1) != spurfire_net::AcceptOutcome::Accepted {
+    if session_b.accept_with_source(&received, source_a, b.node_key_for(source_a.ip()), 1)
+        != spurfire_net::AcceptOutcome::Accepted
+    {
         return Err("peer B rejected peer A hello".into());
     }
 
@@ -84,10 +139,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             steer_milli: 250,
             buttons: 1,
         },
-    );
+        &signing_b,
+    )?;
     b.send(&reply, source_a).await?;
-    let (received_reply, _) = a.recv(Duration::from_secs(15)).await?;
-    if session_a.accept(&received_reply, 2) != spurfire_net::AcceptOutcome::Accepted {
+    let (received_reply, source_b) = a.recv(Duration::from_secs(15)).await?;
+    let mut forged = received_reply.clone();
+    forged.sender = player_a;
+    if session_a.accept_with_source(&forged, source_b, a.node_key_for(source_b.ip()), 2)
+        == spurfire_net::AcceptOutcome::Accepted
+    {
+        return Err("forged sender was accepted".into());
+    }
+    if session_a.accept_with_source(&received_reply, source_b, a.node_key_for(source_b.ip()), 2)
+        != spurfire_net::AcceptOutcome::Accepted
+    {
         return Err("peer A rejected peer B gameplay frame".into());
     }
 

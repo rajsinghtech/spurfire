@@ -11,15 +11,21 @@ default = []
 rustscale = ["dep:rustscale-tsnet", "dep:rustscale-netstack", "dep:tempfile"]
 
 [dependencies]
+ed25519-dalek = "2"
 spurfire-protocol = { path = "../spurfire-protocol" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "8511e0b78074bf07b59d53cf1a2eb349cd0d2407", optional = true }
-rustscale-netstack = { git = "https://github.com/rajsinghtech/rustscale", rev = "8511e0b78074bf07b59d53cf1a2eb349cd0d2407", optional = true }
+rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "272ee212c7c339c3d028ea474554154bc28ae381", optional = true }
+rustscale-netstack = { git = "https://github.com/rajsinghtech/rustscale", rev = "272ee212c7c339c3d028ea474554154bc28ae381", optional = true }
 tempfile = { version = "3", optional = true }
 zeroize.workspace = true
+
+[[bin]]
+name = "spurfire-local-p2p-proof"
+path = "src/bin/local_p2p_proof.rs"
 
 [[bin]]
 name = "spurfire-p2p-smoke"

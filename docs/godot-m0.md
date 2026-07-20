@@ -69,7 +69,8 @@ Godot 4.7.1 generates `.uid` sidecars for recognized resources such as GDScript 
 - **Space / bottom face button:** jump.
 - **T / Start:** reset to spawn (`R` is reload after M1).
 - **Mouse / right stick:** orbit camera.
-- **Escape once:** release mouse capture. **Escape again:** quit the prototype. Left-click recaptures.
+- **Capture gate:** click `CLICK TO RIDE` to capture the mouse. **Escape:** releases capture and returns to the gate; click anywhere outside `QUIT` to recapture. Escape never quits.
+- **F3:** toggle the diagnostic movement panel and live mouse-delta readout.
 - **Mounted combat:** Mouse 1 fires, Mouse 2 aims, R reloads, and 4/5/6 select rifles; see `docs/combat-m1.md`.
 - **Dismount / Saddle Dive:** E dismounts normally below 8 m/s and launches M2 Saddle Dive while grounded at or above 8 m/s; there is no dedicated dive button.
 
@@ -83,7 +84,7 @@ The course uses a curated 208 KB subset of Kenney Nature Kit and Survival Kit pr
 
 ## M0 contract
 
-The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, lateral stepping, archetype attributes, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz.
+The native `HorseController` is a `CharacterBody3D` and owns the four-gait movement model, jump/coyote behavior, reset, lateral stepping, archetype attributes, rough terrain and slope response, and 10 Hz telemetry. Godot owns the graybox course, InputMap, camera, HUD, and smoke-test runner. The fixed physics rate is 60 Hz. Godot local physics interpolation is enabled for presentation only; the chase camera and rider pose sample render-time transforms and reset interpolation history across intentional teleports. This does not change native gameplay state or the 60 Hz authority clock.
 
 The measurable exit checks are:
 

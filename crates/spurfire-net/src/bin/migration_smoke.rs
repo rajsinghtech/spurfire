@@ -84,8 +84,16 @@ async fn close_best_effort(peer: &mut RustScalePeer) {
 async fn child_main() -> Result<(), Box<dyn std::error::Error>> {
     let node = arg("--node")?;
     let directory = PathBuf::from(arg("--dir")?);
-    let raw_key = Zeroizing::new(fs::read_to_string(arg("--key")?)?);
-    let key = Zeroizing::new(raw_key.trim().to_owned());
+    let raw_key = Zeroizing::new(fs::read(arg("--key")?)?);
+    let start = raw_key
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(raw_key.len());
+    let end = raw_key
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    let key = Zeroizing::new(raw_key[start..end].to_vec());
     let mut peer = RustScalePeer::connect(format!("spurfire-migrate-{node}"), key, 41_642).await?;
     let endpoint = SocketAddr::new(peer.tailnet_ip(), peer.local_addr().port());
     write_atomic(

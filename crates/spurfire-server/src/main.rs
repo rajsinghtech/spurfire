@@ -5,8 +5,8 @@ use std::{future::pending, net::SocketAddr, path::PathBuf, sync::Arc, time::Dura
 use clap::Parser;
 use spurfire_protocol::ProvisioningMode;
 use spurfire_server::{
-    build_router, AppState, Config, DryRunProvider, InMemoryStore, JsonFileStore, LobbyStore,
-    NetworkProvider, TailscaleProvider,
+    build_router, AppState, Config, DryRunProvider, EncryptedChildVault, InMemoryStore,
+    JsonFileStore, LobbyStore, NetworkProvider, TailscaleProvider,
 };
 
 #[derive(Debug, Parser)]
@@ -49,34 +49,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.real_mutations_enabled = false;
     }
 
-    let provider: Arc<dyn NetworkProvider> = if config.force_dry_run {
-        Arc::new(DryRunProvider::new())
-    } else {
-        Arc::new(TailscaleProvider::from_env(config.shared_tailnet.clone()).await?)
-    };
-    let capabilities = provider.refresh_capabilities().await;
     let store: Arc<dyn LobbyStore> = if config.force_dry_run {
         Arc::new(InMemoryStore::new())
     } else {
         Arc::new(JsonFileStore::open(config.state_path.clone()).await?)
     };
-    let state = AppState::new(config.clone(), store, provider);
+    let provider: Arc<dyn NetworkProvider> = if config.force_dry_run {
+        Arc::new(DryRunProvider::new())
+    } else if config.real_mutations_enabled {
+        let vault = Arc::new(
+            EncryptedChildVault::open(
+                config.child_vault_path.clone(),
+                &config.child_vault_key_path,
+            )
+            .await?,
+        );
+        Arc::new(
+            TailscaleProvider::from_env_with_vault(config.shared_tailnet.clone(), vault).await?,
+        )
+    } else {
+        Arc::new(TailscaleProvider::from_env(config.shared_tailnet.clone()).await?)
+    };
+    let _capabilities = provider.refresh_capabilities().await;
+    // The ordinary binary has no constructor path for rehearsal authority.
+    // Environment/config booleans cannot open a real provider mutation path.
+    let state = AppState::new_deny_all(config.clone(), store, provider);
+    let _reconciled = state.reconcile_startup().await;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let reaper = tokio::spawn(expiry_reaper(state.clone()));
 
     eprintln!(
-        "spurfire-server listening on {} (mode={:?}, dry_run={}, real_mutations_enabled={}, selected_mode_ready={})",
+        "spurfire-server listening on {} (mode={:?}, dry_run={}, effective_real_mutations=false, selected_mode_ready={})",
         config.bind_addr,
         config.provisioning_mode,
         config.force_dry_run,
-        config.real_mutations_enabled,
         config.force_dry_run
-            || (config.real_mutations_enabled
-                && capabilities.mode_available(config.provisioning_mode))
     );
-    let result = axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
     reaper.abort();
     result?;
     Ok(())

@@ -39,6 +39,7 @@ func _ready() -> void:
 		peer_session.route_updated.connect(_on_route_updated)
 	_demo_mode = OS.get_environment("SPURFIRE_P2P_DEMO") == "1"
 	if _demo_mode:
+		peer_session.set_insecure_demo_mode(true)
 		_start_demo.call_deferred()
 
 func _process(_delta: float) -> void:
@@ -54,8 +55,8 @@ func _process(_delta: float) -> void:
 func _start_demo() -> void:
 	_demo_node = OS.get_environment("SPURFIRE_P2P_DEMO_NODE").to_lower()
 	_demo_dir = OS.get_environment("SPURFIRE_P2P_DEMO_DIR")
-	var key_path := OS.get_environment("SPURFIRE_P2P_DEMO_KEY_FILE")
-	if _demo_node not in DEMO_NODES or _demo_dir.is_empty() or not FileAccess.file_exists(key_path):
+	var enrollment_file := OS.get_environment("SPURFIRE_P2P_DEMO_KEY_FILE")
+	if _demo_node not in DEMO_NODES or _demo_dir.is_empty() or not FileAccess.file_exists(enrollment_file):
 		push_error("P2P demo environment is incomplete")
 		return
 	if not peer_session.configure_session(
@@ -68,12 +69,9 @@ func _start_demo() -> void:
 		return
 	peer_session.connected.connect(_on_demo_connected)
 	peer_session.connection_failed.connect(_on_demo_failed)
-	var auth_key := FileAccess.get_file_as_string(key_path).strip_edges()
-	if not peer_session.connect_rustscale("spurfire-godot-%s" % _demo_node, auth_key, 41643):
+	if not peer_session.connect_demo_peer("spurfire-godot-%s" % _demo_node, 41643):
 		push_error("P2P demo RustScale worker did not start")
 		return
-	auth_key = ""
-	DirAccess.remove_absolute(key_path)
 	local_is_authority = _demo_node == "a"
 	local_horse.global_position.x = float(DEMO_NODES.find(_demo_node) - 1) * 8.0
 	DisplayServer.window_set_title("Spurfire P2P — Rider %s" % _demo_node.to_upper())
@@ -140,6 +138,7 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	if (_demo_mode or local_is_authority) and (simulation_tick % 2 == 0 or stance_changed):
 		packet = peer_session.make_rider_snapshot(
 			simulation_tick,
+			str(peer_session.get("local_player_id")),
 			local_rider.global_position,
 			local_rider.velocity,
 			rad_to_deg(local_rider.rotation.y),
@@ -173,7 +172,9 @@ func _send_to_all(packet: PackedByteArray) -> void:
 	elif not destination_ip.is_empty():
 		peer_session.send_packet(packet, destination_ip, destination_port)
 
-func _on_packet_received(packet: PackedByteArray, source_ip: String, source_port: int) -> void:
+func _on_packet_received(
+	packet: PackedByteArray, source_ip: String, source_port: int, _source_node_key: String
+) -> void:
 	var outcome := int(peer_session.accept_packet(packet, Time.get_ticks_msec()))
 	if outcome != 0:
 		if _demo_mode:

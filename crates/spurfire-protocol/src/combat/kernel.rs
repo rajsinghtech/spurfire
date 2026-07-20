@@ -509,6 +509,12 @@ impl CombatKernel {
         self.shot_index
     }
 
+    /// Last ammo-consuming accepted shot, if any.
+    #[must_use]
+    pub const fn last_accepted_tick(&self) -> Option<SimulationTick> {
+        self.last_accepted_tick
+    }
+
     /// Current recoil accumulator.
     #[must_use]
     pub const fn recoil(&self) -> RecoilState {
@@ -1306,9 +1312,22 @@ impl TargetRegistry {
         })
     }
 
-    /// Registers a stable target definition.
+    /// Registers a stable target definition at full spawn health.
     pub fn register(&mut self, definition: TargetDefinition) -> Result<(), TargetRegistryError> {
-        if definition.max_health == 0 {
+        self.restore(definition, definition.max_health)
+    }
+
+    /// Restores a stable target definition and authority-owned health.
+    ///
+    /// This is intended for a hash-checked migration checkpoint. Pose history is
+    /// deliberately empty until the successor records its first authoritative
+    /// simulation tick.
+    pub fn restore(
+        &mut self,
+        definition: TargetDefinition,
+        health: u16,
+    ) -> Result<(), TargetRegistryError> {
+        if definition.max_health == 0 || health > definition.max_health {
             return Err(TargetRegistryError::InvalidTarget);
         }
         if self.targets.contains_key(&definition.entity_id) {
@@ -1318,7 +1337,7 @@ impl TargetRegistry {
             definition.entity_id,
             TargetRecord {
                 definition,
-                health: definition.max_health,
+                health,
                 history: VecDeque::new(),
             },
         );
@@ -1730,6 +1749,51 @@ impl CombatAuthority {
                 true
             }
         }
+    }
+
+    /// Restore one bounded shooter checkpoint during an authenticated epoch handoff.
+    pub fn restore_shooter(
+        &mut self,
+        shooter_peer_id: PlayerId,
+        weapon_id: WeaponId,
+        ammo: WeaponAmmo,
+        last_command_tick: Option<SimulationTick>,
+        last_accepted_tick: Option<SimulationTick>,
+        shot_index: u64,
+    ) -> bool {
+        let Ok(mut kernel) =
+            CombatKernel::with_weapon(self.tick_rate, self.lobby_seed, shooter_peer_id, weapon_id)
+        else {
+            return false;
+        };
+        if !kernel.set_ammo(weapon_id, ammo)
+            || last_accepted_tick.is_some() != (shot_index > 0)
+            || (last_accepted_tick.is_some() && last_command_tick.is_none())
+            || last_command_tick.is_some_and(|command| {
+                last_accepted_tick.is_some_and(|accepted| accepted > command)
+            })
+        {
+            return false;
+        }
+        kernel.last_accepted_tick = last_accepted_tick;
+        kernel.last_advanced_tick = last_command_tick.or(last_accepted_tick).unwrap_or_default();
+        kernel.shot_index = shot_index;
+        self.shooters.insert(
+            shooter_peer_id,
+            AuthorityShooter {
+                kernel,
+                last_command_tick,
+            },
+        );
+        true
+    }
+
+    /// Last admitted command tick for checkpoint export.
+    #[must_use]
+    pub fn last_command_tick(&self, shooter_peer_id: PlayerId) -> Option<SimulationTick> {
+        self.shooters
+            .get(&shooter_peer_id)
+            .and_then(|state| state.last_command_tick)
     }
 
     /// Immutable shooter kernel for snapshots/tests.

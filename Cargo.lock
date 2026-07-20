@@ -910,6 +910,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2322,8 +2332,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-appc"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-deephash",
  "rustscale-tailcfg",
@@ -2334,21 +2344,21 @@ dependencies = [
 
 [[package]]
 name = "rustscale-art"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-atomicfile"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
 name = "rustscale-auditlog"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2365,8 +2375,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-bakedroots"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "base64",
  "rustls",
@@ -2375,8 +2385,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-c2n"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "rustscale-tailcfg",
@@ -2389,8 +2399,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-clientmetric"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "serde",
  "serde_json",
@@ -2398,8 +2408,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-clientupdate"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "flate2",
  "reqwest",
@@ -2415,8 +2425,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-conffile"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-ipn",
  "rustscale-tailcfg",
@@ -2427,8 +2437,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-controlclient"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "base64",
@@ -2462,13 +2472,13 @@ dependencies = [
 
 [[package]]
 name = "rustscale-controlknobs"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-deephash"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "chrono",
  "rand 0.8.7",
@@ -2480,8 +2490,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-derp"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "hex",
  "rustscale-envknob",
@@ -2501,8 +2511,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-disco"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "hex",
  "rustscale-key",
@@ -2511,8 +2521,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-dns"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustls",
  "rustscale-bakedroots",
@@ -2526,13 +2536,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "webpki-roots 0.26.11",
 ]
 
 [[package]]
 name = "rustscale-dnscache"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-netns",
  "rustscale-singleflight",
@@ -2543,8 +2554,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-dnsfallback"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rand 0.8.7",
  "rustls",
@@ -2562,16 +2573,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-dnsname"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "rustscale-drive"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -2586,18 +2597,18 @@ dependencies = [
 
 [[package]]
 name = "rustscale-envknob"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-feature"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-filter"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-deephash",
  "rustscale-flowtrack",
@@ -2609,16 +2620,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-flowtrack"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "rustscale-health"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "chrono",
  "serde",
@@ -2627,8 +2638,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-ipn"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-feature",
  "rustscale-health",
@@ -2641,8 +2652,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-ipnext"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "rustscale-feature",
@@ -2653,8 +2664,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-ipnstate"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "chrono",
  "rustscale-key",
@@ -2665,16 +2676,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-ipset"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-art",
 ]
 
 [[package]]
 name = "rustscale-key"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "base64",
  "crypto_box",
@@ -2687,21 +2698,21 @@ dependencies = [
 
 [[package]]
 name = "rustscale-ktimeout"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rustscale-limiter"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-logid"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "hex",
  "rand 0.8.7",
@@ -2713,8 +2724,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-logtail"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "chrono",
  "log",
@@ -2729,8 +2740,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-magicsock"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "bytes",
  "hex",
@@ -2757,8 +2768,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netcheck"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "crc32fast",
  "rand 0.8.7",
@@ -2773,8 +2784,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-neterror"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
  "thiserror 1.0.69",
@@ -2782,8 +2793,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netlog"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "chrono",
  "log",
@@ -2799,8 +2810,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netlogtype"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-tailcfg",
  "serde",
@@ -2809,8 +2820,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netmon"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "if-addrs",
  "libc",
@@ -2821,8 +2832,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netns"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "if-addrs",
  "libc",
@@ -2835,7 +2846,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-netstack"
-version = "0.1.3"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "bytes",
  "rustscale-key",
@@ -2849,13 +2861,13 @@ dependencies = [
 
 [[package]]
 name = "rustscale-packet"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-portlist"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-tailcfg",
  "tokio",
@@ -2863,8 +2875,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-portmapper"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "if-addrs",
  "rand 0.8.7",
@@ -2878,8 +2890,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-posture"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
  "log",
@@ -2893,16 +2905,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-proxymap"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "rustscale-routecheck"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2920,8 +2932,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-router"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "if-addrs",
  "rustscale-tsaddr",
@@ -2929,16 +2941,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-routetable"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rustscale-safesocket"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "hex",
  "libc",
@@ -2949,8 +2961,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-singleflight"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "futures-util",
  "tokio",
@@ -2958,8 +2970,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-sockstats"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "serde",
  "serde_json",
@@ -2968,8 +2980,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-syspolicy"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
  "serde",
@@ -2979,8 +2991,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tailcfg"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "base64",
  "chrono",
@@ -2995,16 +3007,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tcpinfo"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rustscale-tka"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "argon2",
  "base64",
@@ -3020,8 +3032,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tlsdial"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustls",
  "rustls-native-certs",
@@ -3037,16 +3049,16 @@ dependencies = [
 
 [[package]]
 name = "rustscale-traffic"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustscale-tailcfg",
 ]
 
 [[package]]
 name = "rustscale-tsaddr"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "if-addrs",
  "serde",
@@ -3056,13 +3068,13 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tsd"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 
 [[package]]
 name = "rustscale-tsdial"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "rustls",
  "rustscale-dnscache",
@@ -3080,8 +3092,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tshttpproxy"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "base64",
  "rustscale-netns",
@@ -3092,8 +3104,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tsnet"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "base64",
@@ -3172,8 +3184,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-tun"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "async-trait",
  "libc",
@@ -3183,8 +3195,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-udprelay"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "blake2",
  "rand 0.8.7",
@@ -3196,8 +3208,8 @@ dependencies = [
 
 [[package]]
 name = "rustscale-wg"
-version = "0.1.3"
-source = "git+https://github.com/rajsinghtech/rustscale?rev=8511e0b78074bf07b59d53cf1a2eb349cd0d2407#8511e0b78074bf07b59d53cf1a2eb349cd0d2407"
+version = "0.1.4"
+source = "git+https://github.com/rajsinghtech/rustscale?rev=272ee212c7c339c3d028ea474554154bc28ae381#272ee212c7c339c3d028ea474554154bc28ae381"
 dependencies = [
  "boringtun",
  "rustscale-key",
@@ -3469,6 +3481,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "zeroize",
@@ -3478,7 +3491,13 @@ dependencies = [
 name = "spurfire-gdext"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
  "godot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
  "spurfire-net",
  "spurfire-protocol",
  "tokio",
@@ -3489,10 +3508,12 @@ dependencies = [
 name = "spurfire-net"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "rustscale-netstack",
  "rustscale-tsnet",
  "serde",
  "serde_json",
+ "sha2",
  "spurfire-protocol",
  "tempfile",
  "thiserror 2.0.18",
@@ -3504,9 +3525,13 @@ dependencies = [
 name = "spurfire-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -3515,14 +3540,22 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chacha20poly1305",
  "clap",
  "dotenvy",
+ "ed25519-dalek",
+ "fs2",
+ "getrandom 0.2.17",
  "http-body-util",
+ "libc",
  "mockito",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "spurfire-control",
  "spurfire-protocol",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -3586,7 +3619,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4026,6 +4059,28 @@ checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"

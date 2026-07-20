@@ -83,6 +83,14 @@ Authorization: Bearer <redacted-child-token>
 
 A follow-up `GET /api/v2/organizations/-/tailnets` no longer contained the exact stored stable ID. Spurfire treats a delete-time 404 as idempotent success.
 
+## Restrictive child policy implementation (not live-verified)
+
+The child-scoped client now writes only the generated policy to the exact typed child FQDN at `POST /tailnet/{dnsName}/acl`, then reads `GET /tailnet/{dnsName}/acl` and compares normalized semantics. The generated policy owns one `tag:spurfire-lobby-<uuid>` tag and grants that tag access only to the same tag on `udp:41643`; ACL, SSH, node-attribute/Serve/Funnel, route/exit-node auto-approval, and policy-test sections are explicitly empty. Unknown or additional readback semantics fail closed.
+
+A matching readback is required before the child becomes active and is re-required immediately before every enrollment-key mint. Mismatch, 403, timeout, transport, and decode faults are mock-tested to perform best-effort exact child-scoped deletion, retain encrypted custody and the real-lobby lease until exact absence plus CAS erasure, and persist only a SHA-256 semantic digest and coarse status. Raw policy/provider bodies are discarded and never enter durable state or diagnostics. Dry-run performs none of these HTTP or vault operations.
+
+No credentialed policy write/readback was performed for this change. The provider's accepted syntax, child ACL scope, resulting enforcement, and Direct/DERP/Peer Relay gameplay behavior remain live-only gates.
+
 ## Earlier route probes, retained as negative evidence
 
 Earlier probes against guessed collection routes returned 404:
@@ -128,9 +136,10 @@ GET /api/v2/tailnet/-/acl
 | API-only child create | Verified | `POST /organizations/-/tailnets` with `{displayName}` created exactly one probe |
 | Child token exchange | Verified | Returned child OAuth pair minted a child-scoped token |
 | Child tailnet delete | Verified | `DELETE /tailnet/{dnsName}` with child token; stable ID absent afterward |
+| Child restrictive policy write/readback | Implemented/mock-fault-tested | No live policy mutation/readback was allowed in this workflow |
 | Child one-use auth-key mint | Implemented/mock-tested | No new live mutation was allowed in this implementation workflow |
 | Shared auth-key/device/ACL scopes | Blocked in historical probe | Required reads/mutation returned 403 |
 
 **API fact:** organization-tailnet creation is available and is independent of shared-tailnet key/device/ACL scopes. `/v1/capabilities` reports those dimensions separately.
 
-**Production-readiness verdict:** the verified create/token/delete lifecycle is enough for a guarded prototype, not production. The server currently keeps each one-time child OAuth pair only in a provider-owned in-memory vault keyed by public lobby ID. A restart deliberately fails closed with `child_secret_unavailable_manual_remediation`; durable state never contains the secret. Production requires an encrypted secret manager plus live end-to-end verification of child-scoped one-use key issuance and cleanup/reconciliation under failure.
+**Production-readiness verdict:** the verified create/token/delete lifecycle plus mock-tested policy/key paths are enough for a guarded prototype, not production. The integrated server uses an encrypted, exact-tuple, CAS-deleted file vault and a process-local child-client cache; non-secret lobby state contains only exact provider identity, policy digest/status, and cleanup evidence. Production still requires workload identity/setec, external audit/backup/rotation, approved orphan remediation, and separately authorized live end-to-end verification of restrictive policy enforcement, child-scoped one-use key issuance, and cleanup/reconciliation under failure.
