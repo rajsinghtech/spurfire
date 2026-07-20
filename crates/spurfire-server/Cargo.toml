@@ -10,6 +10,22 @@ license.workspace = true
 name = "spurfire-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "spurfire-alpha-launcher"
+path = "src/bin/spurfire-alpha-launcher.rs"
+
+[[bin]]
+name = "spurfire-alpha-worker"
+path = "src/bin/spurfire-alpha-worker.rs"
+
+[[bin]]
+name = "spurfire-provider-broker"
+path = "src/bin/spurfire-provider-broker.rs"
+
+[[bin]]
+name = "spurfire-owner-key"
+path = "src/bin/spurfire-owner-key.rs"
+
 [dependencies]
 async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
@@ -19,6 +35,12 @@ dotenvy.workspace = true
 ed25519-dalek = "2"
 getrandom = "0.2"
 fs2 = "0.4.3"
+hex = "0.4"
+hmac = "0.12"
+reqwest.workspace = true
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -32,6 +54,9 @@ zeroize.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [dev-dependencies]
 http-body-util = "0.1"

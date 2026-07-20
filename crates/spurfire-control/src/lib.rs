@@ -442,7 +442,7 @@ fn validate_rider_tag(tag: &str) -> Result<(), ControlError> {
 }
 
 /// Non-secret evidence that an exact normalized policy passed provider readback.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildPolicyEvidence {
     /// SHA-256 of normalized policy semantics.
     pub semantic_digest: String,

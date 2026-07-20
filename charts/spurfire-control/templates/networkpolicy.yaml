@@ -1,0 +1,69 @@
+{{- if .Values.protectedAlpha.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-runtime
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spurfire-control.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runtime
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spurfire-control.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: provider-broker
+      ports:
+        - { protocol: TCP, port: 9443 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-broker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spurfire-control.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provider-broker
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "spurfire-control.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: runtime
+      ports:
+        - { protocol: TCP, port: 9443 }
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 443 }
+    # Broker is the sole workload with external provider HTTPS egress.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }
+{{- end }}

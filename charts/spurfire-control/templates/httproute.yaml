@@ -16,6 +16,16 @@ spec:
     {{- toYaml .Values.httpRoute.hostnames | nindent 4 }}
   rules:
     - matches:
+        {{- if .Values.protectedAlpha.enabled }}
+        # Exact creation endpoint consumes the one-use launch code; all other
+        # public lobby paths remain confined to the signed literal lobby.
+        - path:
+            type: Exact
+            value: /v1/capabilities
+        - path:
+            type: Exact
+            value: /v1/lobbies
+        {{- end }}
         - path:
             type: {{ .Values.httpRoute.path.type }}
             value: {{ .Values.httpRoute.path.value | quote }}

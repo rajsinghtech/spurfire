@@ -11,6 +11,9 @@ pub mod clock;
 pub mod config;
 mod crypto;
 pub mod error;
+pub mod lease_authority;
+pub mod owner_key;
+pub mod protected_broker;
 pub mod provider;
 pub mod rehearsal;
 pub mod service;
@@ -21,6 +24,13 @@ pub mod vault;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigError};
 pub use error::ApiError;
+pub use lease_authority::{
+    KubernetesLeaseAuthority, LeaseBinding, LeaseError, LeaseSnapshot, ProtectedPhase,
+};
+pub use protected_broker::{
+    BrokerFence, BrokerProtocolError, BrokerServer, CleanupOnlyBrokerTransport,
+    MtlsBrokerProviderTransport,
+};
 pub use provider::{
     BrokerProvider, BrokerProviderTransport, ChildPolicyStatus, CleanupLobbyRequest,
     CleanupOutcome, CredentialCleanup, DryRunProvider, MintCredentialRequest, MintedCredential,
@@ -32,9 +42,9 @@ pub use rehearsal::{
     verify_local_rehearsal_receipt, verify_protected_alpha_receipt, LocalRehearsalClaims,
     LocalRehearsalQualification, LocalRehearsalReceipt, ProtectedAlphaClaims,
     ProtectedAlphaQualification, ProtectedAlphaReceipt, ProtectedAlphaVerificationContext,
-    RehearsalReceiptError, RehearsalVerificationContext, LOCAL_REHEARSAL_AUDIENCE,
-    PROTECTED_ALPHA_AUDIENCE, PROTECTED_ALPHA_PURPOSE, REHEARSAL_POLICY_PROFILE,
-    REVIEWED_SOURCE_SHA,
+    RehearsalReceiptError, RehearsalVerificationContext, ALPHA_CLEANUP_MS, ALPHA_PLAY_MS,
+    LOCAL_REHEARSAL_AUDIENCE, PROTECTED_ALPHA_AUDIENCE, PROTECTED_ALPHA_PURPOSE,
+    REHEARSAL_POLICY_PROFILE, REVIEWED_SOURCE_SHA,
 };
 pub use service::{
     build_local_rehearsal_router, build_protected_alpha_operator_router,

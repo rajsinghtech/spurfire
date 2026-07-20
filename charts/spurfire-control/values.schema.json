@@ -496,19 +496,31 @@
       "additionalProperties": false,
       "required": [
         "enabled",
+        "installationId",
         "authorizedLobbyId",
         "publicOrigin",
-        "internalSocket",
-        "receiptSecret",
+        "leaseName",
+        "runtimeImageDigest",
+        "brokerImageDigest",
+        "receiptSopsSecret",
         "receiptKey",
-        "credentialSecret",
+        "brokerCredentialSopsSecret",
         "credentialKey",
-        "vaultKeySecret",
-        "vaultKey"
+        "brokerVaultKeySopsSecret",
+        "vaultKey",
+        "runtimeTlsSecret",
+        "brokerTlsSecret",
+        "brokerMacSecret",
+        "publicConfigMap",
+        "brokerServicePort"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "installationId": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9_-]{16,128}$"
         },
         "authorizedLobbyId": {
           "type": "string",
@@ -518,11 +530,49 @@
           "type": "string",
           "pattern": "^$|^https://[^/]+$"
         },
-        "internalSocket": {
+        "leaseName": {
           "type": "string",
-          "pattern": "^/run/spurfire/[A-Za-z0-9._-]+$"
+          "const": "spurfire-protected-alpha"
         },
-        "receiptSecret": {
+        "runtimeImageDigest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        },
+        "brokerImageDigest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        },
+        "receiptSopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerCredentialSopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerVaultKeySopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "runtimeTlsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerTlsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerMacSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "publicConfigMap": {
           "type": "string",
           "maxLength": 253,
           "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
@@ -532,25 +582,19 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9._-]+$"
         },
-        "credentialSecret": {
-          "type": "string",
-          "maxLength": 253,
-          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
-        },
         "credentialKey": {
           "type": "string",
           "minLength": 1,
           "pattern": "^[A-Za-z0-9._-]+$"
         },
-        "vaultKeySecret": {
-          "type": "string",
-          "maxLength": 253,
-          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
-        },
         "vaultKey": {
           "type": "string",
           "minLength": 1,
           "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "brokerServicePort": {
+          "type": "integer",
+          "const": 9443
         }
       }
     }

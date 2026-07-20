@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use spurfire_control::{
     AuthKeyOpts, ChildPolicyEvidence, ChildTailnetPolicy, ChildTailscaleClient, ControlError,
     TailscaleClient,
@@ -24,7 +25,7 @@ use spurfire_protocol::{
 };
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(not(test))]
 const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,7 +33,7 @@ const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_secs(10);
 const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Provider request made while a lobby record is being prepared.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareLobbyRequest {
     /// Public lobby identifier.
     pub lobby_id: LobbyId,
@@ -45,7 +46,7 @@ pub struct PrepareLobbyRequest {
 }
 
 /// Exact non-secret provider identity captured from a typed response.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderNetworkIdentity {
     /// Stable organization tailnet ID. Dedicated mode always requires it.
     pub provider_tailnet_id: Option<String>,
@@ -79,7 +80,7 @@ impl fmt::Debug for ProviderNetworkIdentity {
 }
 
 /// Non-secret provider state retained with a lobby.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedNetwork {
     /// Tailnet selector needed by later provider calls.
     pub tailnet: String,
@@ -94,7 +95,7 @@ pub struct PreparedNetwork {
 }
 
 /// Request to mint one player credential.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MintCredentialRequest {
     /// Lobby receiving the player.
     pub lobby_id: LobbyId,
@@ -154,7 +155,7 @@ pub struct MintedCredential {
 }
 
 /// One non-secret auth-key receipt considered during cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialCleanup {
     /// Provider key identifier, never key material.
     pub credential_id: String,
@@ -163,7 +164,7 @@ pub struct CredentialCleanup {
 }
 
 /// Request for lobby resource cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupLobbyRequest {
     /// Lobby being cleaned.
     pub lobby_id: LobbyId,
@@ -188,7 +189,7 @@ pub struct CleanupLobbyRequest {
 }
 
 /// Cleanup outcome. Individual device identifiers are intentionally absent.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupOutcome {
     /// True when capability-dependent cleanup should be retried.
     pub cleanup_pending: bool,
@@ -205,7 +206,7 @@ pub struct CleanupOutcome {
 }
 
 /// Bounded read request for coarse provider enrollment metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserveNetworkRequest {
     /// Exact selected lobby.
     pub lobby_id: LobbyId,
@@ -224,14 +225,14 @@ pub struct ObserveNetworkRequest {
 }
 
 /// Coarse provider observation with no device identifiers, tags, or hostnames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDeviceObservation {
     /// Devices enrolled as of one successful scoped poll.
     pub enrolled_device_count: u32,
 }
 
 /// Exact stable-ID parent-organization presence check used only by cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailnetPresenceRequest {
     /// Exact lobby whose durable identity is being reconciled.
     pub lobby_id: LobbyId,
@@ -242,7 +243,7 @@ pub struct TailnetPresenceRequest {
 }
 
 /// Cached, non-secret capability verdict.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
     /// OAuth client-credentials exchange succeeded.
     pub oauth_token_ok: bool,
@@ -1074,6 +1075,27 @@ impl TailscaleProvider {
             .await
             .map_err(|error| map_control_error(error, "startup"))?;
         Ok(Self::new(client, shared_tailnet))
+    }
+
+    /// Broker-only constructor for SOPS-mounted credentials. Secret values are
+    /// accepted as owned zeroizing strings and never enter argv or environment.
+    pub fn from_mounted_credentials_with_vault(
+        api_base: String,
+        mut client_id: Zeroizing<String>,
+        mut client_secret: Zeroizing<String>,
+        shared_tailnet: impl Into<String>,
+        vault: Arc<EncryptedChildVault>,
+    ) -> Self {
+        let client = TailscaleClient::new(
+            api_base,
+            std::mem::take(&mut *client_id),
+            std::mem::take(&mut *client_secret),
+        );
+        client_id.zeroize();
+        client_secret.zeroize();
+        let mut provider = Self::new(client, shared_tailnet);
+        provider.durable_child_vault = Some(vault);
+        provider
     }
 
     /// Builds the production adapter with encrypted restart-recoverable child custody.

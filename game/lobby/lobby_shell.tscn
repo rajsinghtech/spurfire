@@ -125,15 +125,15 @@ layout_mode = 2
 max_length = 64
 placeholder_text = "Your name for this lobby"
 
-[node name="CreateGrantLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
+[node name="LaunchCodeLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2
-text = "ONE-USE ALPHA GRANT"
+text = "ONE-USE LAUNCH CODE"
 
-[node name="CreateGrant" type="NativeSecretInput" parent="Screens/Title/Card/Margin/VBox"]
+[node name="LaunchCode" type="NativeSecretInput" parent="Screens/Title/Card/Margin/VBox"]
 custom_minimum_size = Vector2(0, 42)
 layout_mode = 2
 focus_mode = 2
-tooltip_text = "Click, then type or explicitly paste the one-use grant. Native masked capture stores no Godot text."
+tooltip_text = "Click, then type or explicitly paste the one-use launch code. Native masked capture stores no Godot text."
 
 [node name="JoinCodeLabel" type="Label" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2

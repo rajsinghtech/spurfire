@@ -1,42 +1,39 @@
-# Protected Alpha execution plane
+# Protected hosted Alpha execution plane
 
-Protected Alpha is a separately deployed, one-lobby execution plane. It does not turn `spurfire-server` into a real-mode server. The ordinary binary permanently constructs `AppState::new_deny_all`; chart defaults remain credential-free dry run.
+Protected Alpha is a one-lobby, one-generation exception. It is not enabled by ordinary `spurfire-server`; that binary always uses `AppState::new_deny_all`. The Helm default remains credential-free dry-run and preserves the normal game/chart behavior.
 
-## Authority and activation
+## Immutable authority
 
-1. Create the durable state path at its final canonical location. Opening it creates a persistent random store instance ID. Record only the two SHA-256 values returned by the store challenge.
-2. Build the exact source SHA on the Linux deployment platform. Record signed worker, broker, provenance, artifact-set, and policy-profile digests.
-3. Issue an Ed25519 `spurfire-protected-alpha/v1` receipt binding those digests, the exact HTTPS origin, private listener, lobby ID, nonzero generation, store challenge, supervisor run/epoch, participant cap, and immutable receipt/final-I/O/absolute deadlines.
-4. Deliver receipt and signer material through protected local custody. Receipt plaintext is zeroized after verification; durable state retains hashes only.
-5. The protected constructor installs the receipt only when the already-open store challenge matches. Exact lobby reservation, generation, idempotency record, receipt consumption, immutable bindings, and the existing `real_lobby_lease` are committed by the single create transaction before provider I/O.
-6. Create through the private supervisor router, then install the exact-lobby public route. The Alpha public router has literal paths only and has no create, list, inspection, recovery, supervision, or broker route.
+A signed `spurfire-protected-alpha/v1` receipt binds the exact source revision, runtime and broker OCI `sha256:` digests, worker/broker executable hashes, provenance/artifact/policy digests, installation and state-store IDs, initial state hash, named Lease UID/resourceVersion, lobby/generation, supervisor run/epoch, two-player cap, public and broker listeners, launch-code verifier, 45-minute admission/play deadline, and following 15-minute cleanup deadline. Receipt installation and launch-code consumption occur in the same durable singleton-lobby reservation transaction. A consumed receipt recovers only cleanup authority.
 
-A consumed receipt is not admission authority after restart. `protected_alpha_recovery` returns only lobby/generation/run metadata while the matching lease remains held. Recovery is cleanup-only.
+The named Kubernetes `coordination.k8s.io/v1` Lease is the external anti-rollback CAS authority. Its annotation repeats installation ID, store ID, receipt digest, lobby/generation, supervisor epoch, state hash, phase, and both deadlines. Every mutating broker frame first checks the exact UID/resourceVersion/binding and performs a Kubernetes optimistic `PUT` CAS. A PVC copy or rollback has no resourceVersion authority and cannot reopen admission. Ambiguous tuples quarantine; `cleanup_only`, `released`, and `quarantined` phases cannot admit.
 
-## Credential custody
+RBAC grants `get/create/update/patch` only for `spurfire-protected-alpha`; it grants no `delete/list/watch` or arbitrary Lease access. The chart pre-creates and retains the Lease.
 
-Use an owner-only (`0700`) broker custody directory. The organization credential file must be regular, non-symlink, owned by the broker UID, and exactly `0400`. Keep the vault key in a different file/descriptor. The protected launcher opens with `O_NOFOLLOW`, passes only the descriptor to the broker, waits for authenticated custody confirmation, verifies the open/path inode pair, unlinks the source, and fsyncs the directory.
+## Process and pod boundaries
 
-The HTTP worker receives no `TS_*` values, credential file, vault key, or broker vault mount. It has only the non-secret state and authenticated Unix-socket transport. Broker IPC requests contain typed non-secret provider DTOs and are fenced by exact run, epoch, lobby, generation, identity, operation, sequence, challenge, policy digest, deadline, and fsynced ledger head.
+The runtime Deployment has one container. `spurfire-alpha-launcher` is PID 1, verifies the owner signature and fixed sibling inodes, opens the listener, and spawns `spurfire-alpha-worker` as a measured process-group sibling. The child gets only fixed inherited socket/listener descriptors; environment is cleared, unrelated FDs close, Linux parent-death signaling is set, and receipt bytes remain launcher-only. The launcher changes to cleanup at 45 minutes and destroys the protected process group at 60 minutes. It then starts only the credential-free dry-run/deny-all worker even if GitOps has not removed protected mode. Non-Linux activation exits 78.
 
-Never put OAuth values, child credentials, auth keys, IPC keys, vault keys, receipt bytes, or credential examples in Helm values, ConfigMaps, logs, state JSON, evidence manifests, or this repository.
+The provider broker is a separate one-replica/Recreate Deployment and private ClusterIP Service. There is no broker HTTPRoute or public Service. Pinned installation-CA mTLS authenticates both pods; every request also carries a per-run HMAC, strict sequence, fresh nonce, exact run/lobby/generation/epoch, operation, Lease UID/resourceVersion, and response binding. `CleanupOnlyBrokerTransport` has no prepare/mint methods. NetworkPolicies allow broker ingress only from runtime, and only broker has external provider HTTPS egress.
 
-## Deadline, crash, and quarantine rules
+Runtime receives no `TS_*` environment or provider/vault mount. Broker OAuth and vault-key files come from separate SOPS-managed Secret file mounts with mode `0400`. Credentials are never accepted in argv, environment, logs, or public protocol fields. Runtime gets only its broker client identity and per-run MAC file.
 
-New create, policy, mint, invitation, and admission work stops at the earliest signed or monotonic deadline. Cleanup remains enabled. Worker exit, timeout, supervisor restart, unknown/changed boot identity, wall-clock ambiguity, stale sequence/fence/CAS, provider uncertainty, partial pagination, and persistence/readback failure force cleanup-only or durable quarantine. Child creation without durable custody is manual remediation; it is not retried as another create.
+## Owner key workflow
 
-Cleanup order is fixed: persist delete intent; delete the exact stable-ID/FQDN/generation tuple; collect two fresh, uncached, terminal-cursor inventory observations at least five monotonic seconds apart; persist the proof; erase the exact vault version by CAS; fsync and reopen/read back the tombstone; release the existing lease; reload and verify `Released`; remove exact ingress. Observation one never survives supervisor restart.
+`spurfire-owner-key` is offline and macOS-only:
 
-## Quarantine response
+```text
+spurfire-owner-key init       # emits public key + key ID only
+spurfire-owner-key public     # emits public key + key ID only
+spurfire-owner-key sign < claims.json > receipt.json
+```
 
-1. Remove the exact-lobby HTTPRoute immediately; verify generic creation and a different lobby ID return 404/403.
-2. Do not delete, move, copy, edit, or restore only part of the state, ledger, head, or vault files.
-3. Preserve image/provenance digests, receipt hash, ledger head, store binding, stable provider ID/FQDN/generation, and coarse error class. Preserve no secret values.
-4. Inspect the complete parent inventory by stable provider ID. A timeout, repeated/malformed cursor, page/item limit, partial response, or display-name-only match is `Unknown`.
-5. Complete exact provider deletion and a fresh two-observation proof. Then perform vault CAS/readback and lease release. If exact identity or custody cannot be established, retain quarantine for manual provider remediation.
+It calls Security.framework through the `security-framework` crate. The Ed25519 seed is generated in memory and stored/retrieved as a Keychain generic-password byte value. There is no secret argv/stdout, `security -w`, plaintext file, or temporary plaintext. Any unsupported/failed Security API path prints `KEYCHAIN_BLOCKED` and exits 78. Replace the zero bootstrap public key in `crates/spurfire-server/src/owner_key.rs` with the emitted public key before building; the private seed never enters Git, CI, an image, or the cluster.
 
-## Objective GO and completion evidence
+## Launch and cleanup contract
 
-One immutable manifest for the deployed SHA must verify clean source; signed artifact/provenance digests; Linux tests; ordinary deny-all construction; default dry-run credential-free Helm render; path ownership/mode/no-follow checks; no prior lease/quarantine/orphan; exact receipt bindings; exact-lobby route rejection; complete pagination tests; and operator acknowledgement of this runbook.
+Raj or the automated creator enters the one-use launch code through the native `NativeSecretInput` launch-code field. Rust consumes it directly; GDScript never receives or persists secret text. Create is available only in the protected exact-lobby router and atomically consumes the receipt-bound verifier. Invitation Join remains a separate lobby-scoped, one-use capability.
 
-Completion additionally requires durable two-observation absence proof, vault CAS/readback receipt, released lease, reloaded `Released` ledger, and recorded ingress removal. Child create-to-custody host failure remains a documented manual-remediation window because the provider has no atomic create-and-custody primitive.
+Only one lobby/generation and two riders are accepted. Cleanup deletes by stable provider ID, completes every pagination cursor, observes exact absence twice with at least five monotonic seconds measured after the first response completes, erases the exact vault version by CAS and readback, then releases the Lease. Any missing page, identity mismatch, timeout, stale Lease, unknown provider outcome, vault mismatch, restart ambiguity, or incomplete proof remains cleanup-only/quarantined.
+
+Rendering these resources is not activation evidence. Do not deploy, access credentials, mutate a provider, or mark GO without a separately reviewed receipt, public-key update, SOPS mounts, signed image/provenance digests, NetworkPolicy/RBAC review, and credential-free rehearsal evidence.

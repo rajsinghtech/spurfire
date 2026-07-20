@@ -13,11 +13,12 @@ spec:
   selector:
     matchLabels:
       {{- include "spurfire-control.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runtime
   template:
     metadata:
       labels:
         {{- include "spurfire-control.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: control-plane
+        app.kubernetes.io/component: runtime
         app.kubernetes.io/part-of: spurfire
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
@@ -29,7 +30,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "spurfire-control.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      automountServiceAccountToken: {{ .Values.protectedAlpha.enabled }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -48,12 +49,12 @@ spec:
       {{- end }}
       containers:
         {{- if .Values.protectedAlpha.enabled }}
-        # Credential-free HTTP worker. It receives neither TS_* environment nor
-        # credential/vault mounts; only authenticated IPC crosses the socket.
-        - name: alpha-worker
-          image: {{ include "spurfire-control.image" . | quote }}
+        # PID1 is the measured launcher. The credential-free HTTP worker is a
+        # fixed sibling process, not a Kubernetes sidecar.
+        - name: alpha-runtime
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.runtimeImageDigest | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/usr/local/bin/spurfire-alpha-worker"]
+          command: ["/usr/local/bin/spurfire-alpha-launcher"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -62,26 +63,10 @@ spec:
             - { name: http, containerPort: 8080, protocol: TCP }
           volumeMounts:
             - { name: state, mountPath: /var/lib/spurfire }
-            - { name: broker-ipc, mountPath: /run/spurfire }
-            - { name: tmp, mountPath: /tmp }
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-        # Private supervisor/broker custody container. It has no TCP port and no
-        # Service/HTTPRoute. Credential and vault-key mounts do not exist in the worker.
-        - name: alpha-broker
-          image: {{ include "spurfire-control.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/usr/local/bin/spurfire-alpha-launcher"]
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
-          volumeMounts:
-            - { name: state, mountPath: /var/lib/spurfire }
-            - { name: broker-ipc, mountPath: /run/spurfire }
             - { name: alpha-receipt, mountPath: /run/alpha-receipt, readOnly: true }
-            - { name: alpha-credential, mountPath: /run/alpha-custody, readOnly: true }
-            - { name: alpha-vault-key, mountPath: /run/alpha-vault-key, readOnly: true }
+            - { name: runtime-tls, mountPath: /run/runtime-tls, readOnly: true }
+            - { name: broker-mac, mountPath: /run/broker-mac, readOnly: true }
+            - { name: alpha-config, mountPath: /run/alpha-config, readOnly: true }
             - { name: tmp, mountPath: /tmp }
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -168,19 +153,25 @@ spec:
           emptyDir:
             sizeLimit: 16Mi
         {{- if .Values.protectedAlpha.enabled }}
-        - name: broker-ipc
-          emptyDir: { sizeLimit: 1Mi }
         - name: alpha-receipt
           secret:
-            secretName: {{ .Values.protectedAlpha.receiptSecret | quote }}
+            secretName: {{ .Values.protectedAlpha.receiptSopsSecret | quote }}
             defaultMode: 0400
-        - name: alpha-credential
+            items:
+              - key: {{ .Values.protectedAlpha.receiptKey | quote }}
+                path: receipt.json
+                mode: 0400
+        - name: runtime-tls
           secret:
-            secretName: {{ .Values.protectedAlpha.credentialSecret | quote }}
+            secretName: {{ .Values.protectedAlpha.runtimeTlsSecret | quote }}
             defaultMode: 0400
-        - name: alpha-vault-key
+        - name: broker-mac
           secret:
-            secretName: {{ .Values.protectedAlpha.vaultKeySecret | quote }}
+            secretName: {{ .Values.protectedAlpha.brokerMacSecret | quote }}
+            defaultMode: 0400
+        - name: alpha-config
+          configMap:
+            name: {{ .Values.protectedAlpha.publicConfigMap | quote }}
             defaultMode: 0400
         {{- end }}
         {{ if .Values.childVault.existingSecret }}

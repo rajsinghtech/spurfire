@@ -687,6 +687,29 @@ impl AppState {
         cleaned
     }
 
+    /// Launcher-only transition at the immutable play deadline. This is not an
+    /// HTTP route and exists only on a receipt-qualified state. It closes the
+    /// exact lobby and starts cleanup while preserving retry state.
+    pub async fn begin_protected_cleanup(&self) -> Result<(), crate::store::StoreError> {
+        let Some(alpha) = self.protected_alpha.as_ref() else {
+            return Err(crate::store::StoreError::RehearsalDisabled);
+        };
+        let lobby_id = alpha.lobby_id;
+        let _lobby = self.lock_lobby(lobby_id).await;
+        let Some(mut stored) = self.store.get(lobby_id).await else {
+            return Ok(());
+        };
+        if !stored.dry_run && stored.network_generation == alpha.network_generation {
+            stored.lobby.state = LobbyState::Closing;
+            stored.cleanup_pending = true;
+            stored.network_lifecycle = NetworkLifecycle::CleanupRequested;
+            let now = self.clock.now();
+            let _ = cleanup_resources(self, &mut stored, now, true, true).await;
+            self.store.replace(stored).await?;
+        }
+        Ok(())
+    }
+
     /// Runs expiry cleanup against the configured clock.
     pub async fn cleanup_expired_now(&self) -> Vec<LobbyId> {
         self.cleanup_expired_at(self.clock.now()).await
@@ -807,9 +830,29 @@ pub fn build_protected_alpha_public_router(state: AppState) -> Router {
         .lobby_id;
     let base = format!("/v1/lobbies/{lobby_id}");
     Router::new()
-        .route(&base, get(get_lobby))
+        // The only create route in protected mode consumes the receipt-bound
+        // launch code and can create only the receipt's exact lobby ID.
+        .route("/v1/capabilities", get(get_capabilities))
+        .route("/v1/lobbies", post(create_lobby))
+        .route(&base, get(get_lobby).delete(delete_lobby))
+        .route(&format!("{base}/network"), get(get_lobby_network))
+        .route(&format!("{base}/invitations"), post(create_invitation))
         .route(&format!("{base}/join"), post(join_lobby))
         .route(&format!("{base}/leave"), post(leave_lobby))
+        .route(
+            &format!("{base}/session/endpoint"),
+            post(register_session_endpoint),
+        )
+        .route(&format!("{base}/measurements"), post(submit_measurements))
+        .route(
+            &format!("{base}/network/reports"),
+            post(submit_measurements),
+        )
+        .route(
+            &format!("{base}/elect-authority"),
+            post(elect_lobby_authority),
+        )
+        .route(&format!("{base}/authority"), get(get_lobby_authority))
         .route(&format!("{base}/start"), post(start_lobby))
         .route(&format!("{base}/heartbeat"), post(authority_heartbeat))
         .route(&format!("{base}/results"), post(submit_results))
@@ -984,9 +1027,7 @@ async fn create_lobby_impl(
     } else if legacy_real_test_mode {
         request.provisioning_mode
     } else {
-        if !real_creation_authorized(&state)
-            || local_operator
-                != (state.local_rehearsal.is_some() || state.protected_alpha.is_some())
+        if !real_creation_authorized(&state) || (state.local_rehearsal.is_some() && !local_operator)
         {
             return Err(ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1020,7 +1061,7 @@ async fn create_lobby_impl(
         Some(generated.verifier)
     } else if local_operator {
         Some(if let Some(alpha) = state.protected_alpha.as_ref() {
-            alpha.receipt_verifier
+            alpha.launch_code_sha256
         } else {
             state
                 .local_rehearsal
@@ -1031,16 +1072,16 @@ async fn create_lobby_impl(
     } else {
         Some(capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?)
     };
-    let lobby_id = if local_operator {
-        state
-            .protected_alpha
-            .as_ref()
-            .map(|value| value.lobby_id)
-            .or_else(|| state.local_rehearsal.as_ref().map(|value| value.lobby_id))
-            .unwrap_or_else(new_lobby_id)
-    } else {
-        new_lobby_id()
-    };
+    let lobby_id = state
+        .protected_alpha
+        .as_ref()
+        .map(|value| value.lobby_id)
+        .or_else(|| {
+            local_operator
+                .then(|| state.local_rehearsal.as_ref().map(|value| value.lobby_id))
+                .flatten()
+        })
+        .unwrap_or_else(new_lobby_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let absolute_ttl_ms = if effective_dry_run {
         state.config.dry_run_ttl_ms()
@@ -2815,7 +2856,7 @@ fn real_creation_authorized(state: &AppState) -> bool {
         && state.config.real_admission_enabled
         && !state.config.allow_legacy_client_assertions
         && !state.config.trust_forwarded_for
-        && state.config.bind_addr.ip().is_loopback()
+        && (state.config.bind_addr.ip().is_loopback() || state.protected_alpha.is_some())
         && state.config.provisioning_mode == ProvisioningMode::TailnetPerLobby
         && state.startup_reconciled.load(Ordering::Acquire)
         && (state

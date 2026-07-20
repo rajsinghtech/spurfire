@@ -5,14 +5,20 @@
 //! no-follow descriptors, clears ambient environment/FDs, and gives provider
 //! custody only to the broker role. The ordinary server does not import it.
 
+use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::{fs::File, path::Path, process::Child};
+#[cfg(target_os = "linux")]
 use std::{
-    fs::{File, OpenOptions},
     io,
-    path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
 };
 use thiserror::Error;
+
+use crate::{lease_authority::LeaseSnapshot, rehearsal::ProtectedAlphaQualification};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectedRole {
@@ -21,6 +27,7 @@ pub enum ProtectedRole {
 }
 
 impl ProtectedRole {
+    #[cfg(unix)]
     const fn file_name(self) -> &'static str {
         match self {
             Self::Worker => "spurfire-alpha-worker",
@@ -41,6 +48,50 @@ pub enum LauncherError {
     Spawn,
     #[error("worker inherited forbidden provider custody")]
     AmbientCredential,
+    #[error("sealed worker authority is malformed")]
+    MalformedAuthority,
+}
+
+/// Non-secret, receipt-reduced authority sent only over the launcher's sealed
+/// socketpair. Receipt bytes/signature never enter the worker.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedWorkerAuthority {
+    qualification: ProtectedAlphaQualification,
+    supervisor_run_id: String,
+    broker_address: String,
+    lease: LeaseSnapshot,
+}
+
+pub fn seal_worker_authority(
+    qualification: ProtectedAlphaQualification,
+    supervisor_run_id: String,
+    broker_address: String,
+    lease: LeaseSnapshot,
+) -> Result<Vec<u8>, LauncherError> {
+    if supervisor_run_id.len() < 16 || !broker_address.ends_with(":9443") {
+        return Err(LauncherError::MalformedAuthority);
+    }
+    serde_json::to_vec(&SealedWorkerAuthority {
+        qualification,
+        supervisor_run_id,
+        broker_address,
+        lease,
+    })
+    .map_err(|_| LauncherError::MalformedAuthority)
+}
+
+pub fn open_worker_authority(
+    bytes: &[u8],
+) -> Result<(ProtectedAlphaQualification, String, String, LeaseSnapshot), LauncherError> {
+    let authority: SealedWorkerAuthority =
+        serde_json::from_slice(bytes).map_err(|_| LauncherError::MalformedAuthority)?;
+    Ok((
+        authority.qualification,
+        authority.supervisor_run_id,
+        authority.broker_address,
+        authority.lease,
+    ))
 }
 
 /// Independently reject ambient provider/vault custody at worker startup.
@@ -70,6 +121,7 @@ where
 /// Verified open artifact. The path cannot be substituted after verification;
 /// Linux execution uses `/proc/self/fd/<fd>` for the same open inode.
 pub struct VerifiedArtifact {
+    #[cfg_attr(not(unix), allow(dead_code))]
     file: File,
     role: ProtectedRole,
 }
@@ -237,6 +289,7 @@ pub fn spawn_protected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn roles_are_fixed_and_not_caller_selected() {
         assert_eq!(ProtectedRole::Worker.file_name(), "spurfire-alpha-worker");

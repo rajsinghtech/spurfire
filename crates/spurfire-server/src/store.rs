@@ -550,14 +550,21 @@ struct StoredProtectedAlphaReceipt {
     receipt_id_digest: [u8; 32],
     lobby_id: LobbyId,
     network_generation: u64,
+    installation_id_digest: [u8; 32],
     store_instance_id_sha256: [u8; 32],
     canonical_state_path_sha256: [u8; 32],
+    initial_state_sha256: [u8; 32],
+    lease_uid_digest: [u8; 32],
+    lease_resource_version_digest: [u8; 32],
+    launch_code_sha256: [u8; 32],
     supervisor_run_id_digest: [u8; 32],
     initial_epoch: u64,
     expires_at: UnixMillis,
     final_io_deadline: UnixMillis,
     absolute_deadline: UnixMillis,
     participant_cap: u8,
+    runtime_image_digest: [u8; 32],
+    broker_image_digest: [u8; 32],
     worker_sha256: [u8; 32],
     broker_sha256: [u8; 32],
     provenance_sha256: [u8; 32],
@@ -575,14 +582,21 @@ impl From<&ProtectedAlphaQualification> for StoredProtectedAlphaReceipt {
             receipt_id_digest: value.receipt_id_digest,
             lobby_id: value.lobby_id,
             network_generation: value.network_generation,
+            installation_id_digest: value.installation_id_digest,
             store_instance_id_sha256: value.store_instance_id_sha256,
             canonical_state_path_sha256: value.canonical_state_path_sha256,
+            initial_state_sha256: value.initial_state_sha256,
+            lease_uid_digest: value.lease_uid_digest,
+            lease_resource_version_digest: value.lease_resource_version_digest,
+            launch_code_sha256: value.launch_code_sha256,
             supervisor_run_id_digest: value.supervisor_run_id_digest,
             initial_epoch: value.initial_epoch,
             expires_at: value.expires_at,
             final_io_deadline: value.final_io_deadline,
             absolute_deadline: value.absolute_deadline,
             participant_cap: value.participant_cap,
+            runtime_image_digest: value.runtime_image_digest,
+            broker_image_digest: value.broker_image_digest,
             worker_sha256: value.worker_sha256,
             broker_sha256: value.broker_sha256,
             provenance_sha256: value.provenance_sha256,
@@ -1315,7 +1329,7 @@ fn create_in_data(
                 || receipt.canonical_state_path_sha256 != bound_path
                 || lobby.lobby.provisioning_mode != ProvisioningMode::TailnetPerLobby
                 || lobby.lobby.max_players > receipt.participant_cap
-                || !constant_time_eq(&receipt.verifier, &candidate)
+                || !constant_time_eq(&receipt.launch_code_sha256, &candidate)
             {
                 return Err(StoreError::InvalidRehearsalReceipt);
             }
@@ -1982,14 +1996,21 @@ mod tests {
             receipt_id_digest: [22; 32],
             lobby_id,
             network_generation: 1,
+            installation_id_digest: [20; 32],
             store_instance_id_sha256: binding.instance_id_sha256,
             canonical_state_path_sha256: binding.canonical_state_path_sha256,
+            initial_state_sha256: [19; 32],
+            lease_uid_digest: [18; 32],
+            lease_resource_version_digest: [17; 32],
+            launch_code_sha256: [16; 32],
             supervisor_run_id_digest: [23; 32],
             initial_epoch: 1,
             expires_at: UnixMillis::new(1_000),
             final_io_deadline: UnixMillis::new(900),
             absolute_deadline: UnixMillis::new(950),
-            participant_cap: 8,
+            participant_cap: 2,
+            runtime_image_digest: [14; 32],
+            broker_image_digest: [15; 32],
             worker_sha256: [24; 32],
             broker_sha256: [25; 32],
             provenance_sha256: [26; 32],
@@ -2009,7 +2030,8 @@ mod tests {
             .install_protected_alpha_receipt(&qualification)
             .await
             .unwrap();
-        let record = real_record("00000000-0000-4000-8000-0000000000aa");
+        let mut record = real_record("00000000-0000-4000-8000-0000000000aa");
+        record.lobby.max_players = 2;
         let (a, b) = tokio::join!(
             store.create(
                 "alpha-a".into(),
@@ -2017,7 +2039,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(10),
                 record.clone(),
-                Some([21; 32]),
+                Some([16; 32]),
                 true
             ),
             store.create(
@@ -2026,7 +2048,7 @@ mod tests {
                 player_id(),
                 UnixMillis::new(10),
                 record,
-                Some([21; 32]),
+                Some([16; 32]),
                 true
             ),
         );

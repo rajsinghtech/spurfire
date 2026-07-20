@@ -45,15 +45,23 @@ childVault:
 # the ordinary dry-run container and has no environment activation switch.
 protectedAlpha:
   enabled: false
+  installationId: ""
   authorizedLobbyId: ""
   publicOrigin: ""
-  internalSocket: /run/spurfire/alpha.sock
-  receiptSecret: ""
+  leaseName: spurfire-protected-alpha
+  runtimeImageDigest: ""
+  brokerImageDigest: ""
+  receiptSopsSecret: ""
   receiptKey: receipt.json
-  credentialSecret: ""
+  brokerCredentialSopsSecret: ""
   credentialKey: organization-oauth.json
-  vaultKeySecret: ""
+  brokerVaultKeySopsSecret: ""
   vaultKey: vault.key
+  runtimeTlsSecret: ""
+  brokerTlsSecret: ""
+  brokerMacSecret: ""
+  publicConfigMap: ""
+  brokerServicePort: 9443
 
 # Cached one-lobby network-summary timing contract. Collection is performed by
 # background workers; an inspection GET must never trigger provider I/O.

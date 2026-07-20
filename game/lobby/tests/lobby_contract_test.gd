@@ -34,7 +34,7 @@ func _check_native_boundary(failures: Array[String]) -> void:
 	if session.has_method(StringName("connect_" + "rustscale")):
 		failures.append("legacy Godot secret-taking transport method remains exported")
 	for method in [
-		"configure_lobby_player", "probe_lobby_readiness", "capture_create_grant",
+		"configure_lobby_player", "probe_lobby_readiness", "capture_launch_code",
 		"capture_join_code", "submit_create", "submit_join", "auto_join_creator",
 		"copy_invitation_to_clipboard", "cancel_lobby_operations",
 	]:
@@ -110,7 +110,7 @@ func _check_secret_storage_contract(failures: Array[String]) -> void:
 	]:
 		if shell_source.contains(forbidden) or scene_source.contains(forbidden):
 			failures.append("Godot lobby boundary contains forbidden secret path")
-	if shell_source.contains("LineEdit = $Screens/Title/Card/Margin/VBox/CreateGrant"):
+	if shell_source.contains("LineEdit = $Screens/Title/Card/Margin/VBox/LaunchCode"):
 		failures.append("create grant still uses a Godot text control")
 	if scene_source.contains("name=\"ShareCode\""):
 		failures.append("share code is still rendered into a Godot control")
@@ -122,7 +122,7 @@ func _check_control_glue(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd").replace("\r\n", "\n")
 	for required in [
 		"submit_measurements", "_stop_peer_transport",
-		"api.capture_create_grant()", "api.capture_join_code()",
+		"api.capture_launch_code()", "api.capture_join_code()",
 		"and bool(session.get(\"secure\", false))",
 		"_try_register_endpoint(\"\", 0, true)",
 	]:

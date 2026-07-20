@@ -1600,9 +1600,8 @@ impl PeerSession {
     }
 
     #[func]
-    fn capture_create_grant(&self) {
-        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
-        {
+    fn capture_launch_code(&self) {
+        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/LaunchCode") {
             input.bind_mut().arm_capture();
         }
     }
@@ -1619,7 +1618,7 @@ impl PeerSession {
         let Some(name) = Self::clean_public_name(&display_name) else {
             return;
         };
-        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
+        let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/LaunchCode")
         else {
             return;
         };
@@ -1835,8 +1834,7 @@ impl PeerSession {
         self.creator_join_display = None;
         self.creator_join_lobby = None;
         self.shutdown();
-        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/CreateGrant")
-        {
+        if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/LaunchCode") {
             input.bind_mut().clear_capture();
         }
         if let Some(mut input) = self.secret_input("../Screens/Title/Card/Margin/VBox/JoinCode") {

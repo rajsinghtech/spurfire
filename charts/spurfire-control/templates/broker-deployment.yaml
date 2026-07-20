@@ -1,0 +1,106 @@
+{{- if .Values.protectedAlpha.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-broker
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provider-broker
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      {{- include "spurfire-control.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provider-broker
+  template:
+    metadata:
+      labels:
+        {{- include "spurfire-control.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: provider-broker
+        app.kubernetes.io/part-of: spurfire
+    spec:
+      serviceAccountName: {{ include "spurfire-control.fullname" . }}-broker
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provider-broker
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.brokerImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/spurfire-provider-broker"]
+          ports:
+            - { name: mtls, containerPort: 9443, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: broker-credential, mountPath: /run/alpha-custody, readOnly: true }
+            - { name: broker-vault-key, mountPath: /run/alpha-vault-key, readOnly: true }
+            - { name: broker-tls, mountPath: /run/broker-tls, readOnly: true }
+            - { name: broker-mac, mountPath: /run/broker-mac, readOnly: true }
+            - { name: alpha-config, mountPath: /run/alpha-config, readOnly: true }
+            - { name: broker-state, mountPath: /var/lib/spurfire }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: broker-credential
+          secret:
+            secretName: {{ .Values.protectedAlpha.brokerCredentialSopsSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.protectedAlpha.credentialKey | quote }}
+                path: organization-oauth.json
+                mode: 0400
+        - name: broker-vault-key
+          secret:
+            secretName: {{ .Values.protectedAlpha.brokerVaultKeySopsSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.protectedAlpha.vaultKey | quote }}
+                path: vault.key
+                mode: 0400
+        - name: broker-tls
+          secret:
+            secretName: {{ .Values.protectedAlpha.brokerTlsSecret | quote }}
+            defaultMode: 0400
+        - name: broker-mac
+          secret:
+            secretName: {{ .Values.protectedAlpha.brokerMacSecret | quote }}
+            defaultMode: 0400
+        - name: alpha-config
+          configMap:
+            name: {{ .Values.protectedAlpha.publicConfigMap | quote }}
+            defaultMode: 0400
+        - name: broker-state
+          persistentVolumeClaim:
+            claimName: {{ include "spurfire-control.fullname" . }}-broker
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-broker
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provider-broker
+  annotations:
+    alpha.spurfire.dev/private-only: "true"
+spec:
+  type: ClusterIP
+  ports:
+    - { name: mtls, port: {{ .Values.protectedAlpha.brokerServicePort }}, targetPort: mtls, protocol: TCP }
+  selector:
+    {{- include "spurfire-control.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: provider-broker
+{{- end }}

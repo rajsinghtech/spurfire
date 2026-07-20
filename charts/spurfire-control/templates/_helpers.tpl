@@ -73,9 +73,11 @@ app.kubernetes.io/part-of: spurfire
 {{- if .Values.config.dryRun -}}{{- fail "protectedAlpha.enabled and config.dryRun are mutually exclusive" -}}{{- end -}}
 {{- if ne .Values.config.provisioningMode "tailnet_per_lobby" -}}{{- fail "protectedAlpha requires tailnet_per_lobby" -}}{{- end -}}
 {{- if not .Values.persistence.enabled -}}{{- fail "protectedAlpha requires retained persistence" -}}{{- end -}}
-{{- if empty .Values.image.digest -}}{{- fail "protectedAlpha requires an immutable image digest" -}}{{- end -}}
-{{- if or (empty .Values.protectedAlpha.authorizedLobbyId) (empty .Values.protectedAlpha.publicOrigin) -}}{{- fail "protectedAlpha requires exact lobby and public origin bindings" -}}{{- end -}}
-{{- if or (empty .Values.protectedAlpha.receiptSecret) (empty .Values.protectedAlpha.credentialSecret) (empty .Values.protectedAlpha.vaultKeySecret) -}}{{- fail "protectedAlpha requires separate receipt, credential, and vault-key Secrets" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.runtimeImageDigest) (empty .Values.protectedAlpha.brokerImageDigest) -}}{{- fail "protectedAlpha requires immutable runtime and broker image digests" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.installationId) (empty .Values.protectedAlpha.authorizedLobbyId) (empty .Values.protectedAlpha.publicOrigin) -}}{{- fail "protectedAlpha requires installation, exact lobby and public origin bindings" -}}{{- end -}}
+{{- if ne (int .Values.config.maxPlayers) 2 -}}{{- fail "protectedAlpha requires an exact two-player cap" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.receiptSopsSecret) (empty .Values.protectedAlpha.brokerCredentialSopsSecret) (empty .Values.protectedAlpha.brokerVaultKeySopsSecret) -}}{{- fail "protectedAlpha requires separate SOPS-provisioned file mounts" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.runtimeTlsSecret) (empty .Values.protectedAlpha.brokerTlsSecret) (empty .Values.protectedAlpha.brokerMacSecret) (empty .Values.protectedAlpha.publicConfigMap) -}}{{- fail "protectedAlpha requires pinned mTLS, per-run MAC and public broker configuration mounts" -}}{{- end -}}
 {{- if or (not (empty .Values.tailscale.existingSecret)) (not (empty .Values.childVault.existingSecret)) -}}{{- fail "protectedAlpha credentials must use broker-only mounts, not ordinary server values" -}}{{- end -}}
 {{- end -}}
 {{- if .Values.config.allowLegacyClientAssertions -}}
