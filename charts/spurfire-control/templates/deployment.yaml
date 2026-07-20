@@ -13,23 +13,34 @@ spec:
   selector:
     matchLabels:
       {{- include "spurfire-control.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runtime
   template:
     metadata:
       labels:
         {{- include "spurfire-control.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: control-plane
+        app.kubernetes.io/component: runtime
         app.kubernetes.io/part-of: spurfire
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.protectedAlpha.enabled }}
+        alpha.spurfire.dev/runtime-image-digest: {{ .Values.protectedAlpha.runtimeImageDigest | quote }}
+        alpha.spurfire.dev/broker-image-digest: {{ .Values.protectedAlpha.brokerImageDigest | quote }}
+        alpha.spurfire.dev/source-sha: {{ .Values.protectedAlpha.sourceSha | quote }}
+        alpha.spurfire.dev/provenance-sha256: {{ .Values.protectedAlpha.provenanceSha256 | quote }}
+        alpha.spurfire.dev/artifact-set-sha256: {{ .Values.protectedAlpha.artifactSetSha256 | quote }}
+        alpha.spurfire.dev/policy-profile-sha256: {{ .Values.protectedAlpha.policyProfileSha256 | quote }}
+        alpha.spurfire.dev/public-origin: {{ .Values.protectedAlpha.publicOrigin | quote }}
+        alpha.spurfire.dev/internal-listener: {{ .Values.protectedAlpha.internalListener | quote }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "spurfire-control.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      automountServiceAccountToken: {{ .Values.protectedAlpha.enabled }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -47,6 +58,45 @@ spec:
       priorityClassName: {{ . | quote }}
       {{- end }}
       containers:
+        {{- if .Values.protectedAlpha.enabled }}
+        # PID1 is the measured launcher. The credential-free HTTP worker is a
+        # fixed sibling process, not a Kubernetes sidecar.
+        - name: alpha-runtime
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.runtimeImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/spurfire-alpha-launcher"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/spurfire }
+            - { name: alpha-receipt, mountPath: /run/alpha-receipt, readOnly: true }
+            - { name: runtime-tls, mountPath: /run/runtime-tls, readOnly: true }
+            - { name: broker-mac, mountPath: /run/broker-mac, readOnly: true }
+            - { name: alpha-config, mountPath: /run/alpha-config, readOnly: true }
+            - { name: alpha-pod-bindings, mountPath: /run/alpha-pod, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- else }}
         - name: spurfire-server
           image: {{ include "spurfire-control.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -116,6 +166,7 @@ spec:
               subPath: {{ .Values.childVault.key | quote }}
               readOnly: true
             {{ end }}
+        {{- end }}
       volumes:
         - name: state
           {{- if .Values.persistence.enabled }}
@@ -127,6 +178,56 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        {{- if .Values.protectedAlpha.enabled }}
+        - name: alpha-receipt
+          secret:
+            secretName: {{ .Values.protectedAlpha.receiptSopsSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.protectedAlpha.receiptKey | quote }}
+                path: receipt.json
+                mode: 0400
+        - name: runtime-tls
+          secret:
+            secretName: {{ .Values.protectedAlpha.runtimeTlsSecret | quote }}
+            defaultMode: 0400
+        - name: broker-mac
+          secret:
+            secretName: {{ .Values.protectedAlpha.brokerMacSecret | quote }}
+            defaultMode: 0400
+        - name: alpha-config
+          configMap:
+            name: {{ .Values.protectedAlpha.publicConfigMap | quote }}
+            defaultMode: 0400
+        - name: alpha-pod-bindings
+          downwardAPI:
+            defaultMode: 0400
+            items:
+              - path: runtime-image-digest
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/runtime-image-digest']"
+              - path: broker-image-digest
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/broker-image-digest']"
+              - path: source-sha
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/source-sha']"
+              - path: provenance-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/provenance-sha256']"
+              - path: artifact-set-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/artifact-set-sha256']"
+              - path: policy-profile-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/policy-profile-sha256']"
+              - path: public-origin
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/public-origin']"
+              - path: internal-listener
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/internal-listener']"
+        {{- end }}
         {{ if .Values.childVault.existingSecret }}
         - name: child-vault-key
           secret:

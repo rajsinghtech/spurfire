@@ -1,0 +1,75 @@
+{{- if .Values.protectedAlpha.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-broker
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+# The object is installed before workloads. No workload has delete/list/watch;
+# the credential-free runtime can only read, while the separately attested
+# credential-owning broker alone may perform exact compare-and-swap updates.
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: {{ .Values.protectedAlpha.leaseName | quote }}
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    alpha.spurfire.dev/installation-id: {{ .Values.protectedAlpha.installationId | quote }}
+spec:
+  holderIdentity: unclaimed
+  leaseDurationSeconds: 3600
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-lease-read
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ .Values.protectedAlpha.leaseName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-lease-cas
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ .Values.protectedAlpha.leaseName | quote }}]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-runtime-lease-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "spurfire-control.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "spurfire-control.fullname" . }}-lease-read
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-broker-lease-cas
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "spurfire-control.fullname" . }}-broker
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "spurfire-control.fullname" . }}-lease-cas
+{{- end }}

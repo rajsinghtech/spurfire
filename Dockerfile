@@ -20,7 +20,10 @@ RUN --mount=type=cache,id=spurfire-registry,target=/usr/local/cargo/registry,sha
     cargo build --release --locked -p spurfire-server \
     && mkdir -p /out \
     && cp /build/target/release/spurfire-server /out/spurfire-server \
-    && chmod 0755 /out/spurfire-server
+    && cp /build/target/release/spurfire-alpha-launcher /out/spurfire-alpha-launcher \
+    && cp /build/target/release/spurfire-alpha-worker /out/spurfire-alpha-worker \
+    && cp /build/target/release/spurfire-provider-broker /out/spurfire-provider-broker \
+    && chmod 0755 /out/spurfire-*
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
@@ -47,6 +50,9 @@ RUN apk add --no-cache ca-certificates \
     && chmod 0750 /var/lib/spurfire
 
 COPY --from=builder --chown=0:0 /out/spurfire-server /usr/local/bin/spurfire-server
+COPY --from=builder --chown=0:0 /out/spurfire-alpha-launcher /usr/local/bin/spurfire-alpha-launcher
+COPY --from=builder --chown=0:0 /out/spurfire-alpha-worker /usr/local/bin/spurfire-alpha-worker
+COPY --from=builder --chown=0:0 /out/spurfire-provider-broker /usr/local/bin/spurfire-provider-broker
 COPY --chown=0:0 LICENSE /usr/share/licenses/spurfire/LICENSE
 
 ENV SPURFIRE_BIND_ADDR=0.0.0.0:8080 \

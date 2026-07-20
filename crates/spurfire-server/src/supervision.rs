@@ -19,6 +19,8 @@ use spurfire_protocol::{LobbyId, UnixMillis};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::rehearsal::ProtectedAlphaQualification;
+
 const SCHEMA_VERSION: u8 = 1;
 const MAX_IPC_FRAME: usize = 16 * 1024;
 pub const MIN_ABSENCE_SEPARATION: Duration = Duration::from_secs(5);
@@ -104,6 +106,24 @@ pub struct SupervisorLedger {
     pub receipt_id_digest: [u8; 32],
     pub receipt_verifier: [u8; 32],
     pub worker_sha256: [u8; 32],
+    #[serde(default)]
+    pub broker_sha256: [u8; 32],
+    #[serde(default)]
+    pub provenance_sha256: [u8; 32],
+    #[serde(default)]
+    pub artifact_set_sha256: [u8; 32],
+    #[serde(default)]
+    pub store_instance_id_sha256: [u8; 32],
+    #[serde(default)]
+    pub canonical_state_path_sha256: [u8; 32],
+    #[serde(default)]
+    pub public_origin_digest: [u8; 32],
+    #[serde(default)]
+    pub internal_listener_digest: [u8; 32],
+    #[serde(default)]
+    pub receipt_expires_at: UnixMillis,
+    #[serde(default)]
+    pub protected_alpha: bool,
     pub policy_profile_digest: [u8; 32],
     pub absolute_deadline: UnixMillis,
     pub final_io_deadline: UnixMillis,
@@ -168,6 +188,15 @@ impl SupervisorLedger {
             receipt_id_digest,
             receipt_verifier,
             worker_sha256,
+            broker_sha256: [0; 32],
+            provenance_sha256: [0; 32],
+            artifact_set_sha256: [0; 32],
+            store_instance_id_sha256: [0; 32],
+            canonical_state_path_sha256: [0; 32],
+            public_origin_digest: [0; 32],
+            internal_listener_digest: [0; 32],
+            receipt_expires_at: UnixMillis::new(0),
+            protected_alpha: false,
             policy_profile_digest,
             absolute_deadline,
             final_io_deadline,
@@ -177,6 +206,40 @@ impl SupervisorLedger {
             transitions: Vec::new(),
         };
         ledger.push(Transition::Reserved)?;
+        Ok(ledger)
+    }
+
+    /// Constructs the sealed hosted-Alpha ledger directly from hash-only
+    /// verified authority. No caller-selected artifact or deadline enters.
+    pub fn new_protected_alpha(
+        fence: Fence,
+        qualification: &ProtectedAlphaQualification,
+    ) -> Result<Self, SupervisionError> {
+        if fence.lobby_id != qualification.lobby_id
+            || fence.generation != qualification.network_generation
+            || fence.epoch != qualification.initial_epoch
+        {
+            return Err(SupervisionError::StaleFence);
+        }
+        let mut ledger = Self::new(
+            fence,
+            qualification.receipt_id_digest,
+            qualification.receipt_verifier,
+            qualification.worker_sha256,
+            qualification.policy_profile_digest,
+            qualification.absolute_deadline,
+            qualification.final_io_deadline,
+        )?;
+        ledger.broker_sha256 = qualification.broker_sha256;
+        ledger.provenance_sha256 = qualification.provenance_sha256;
+        ledger.artifact_set_sha256 = qualification.artifact_set_sha256;
+        ledger.store_instance_id_sha256 = qualification.store_instance_id_sha256;
+        ledger.canonical_state_path_sha256 = qualification.canonical_state_path_sha256;
+        ledger.public_origin_digest = qualification.public_origin_digest;
+        ledger.internal_listener_digest = qualification.internal_listener_digest;
+        ledger.receipt_expires_at = qualification.expires_at;
+        ledger.protected_alpha = true;
+        ledger.validate()?;
         Ok(ledger)
     }
 
@@ -222,6 +285,18 @@ impl SupervisorLedger {
 
     pub fn validate(&self) -> Result<(), SupervisionError> {
         if self.schema_version != SCHEMA_VERSION || self.transitions.is_empty() {
+            return Err(SupervisionError::InvalidLedger);
+        }
+        if self.protected_alpha
+            && (self.broker_sha256 == [0; 32]
+                || self.provenance_sha256 == [0; 32]
+                || self.artifact_set_sha256 == [0; 32]
+                || self.store_instance_id_sha256 == [0; 32]
+                || self.canonical_state_path_sha256 == [0; 32]
+                || self.public_origin_digest == [0; 32]
+                || self.internal_listener_digest == [0; 32]
+                || self.receipt_expires_at < self.absolute_deadline)
+        {
             return Err(SupervisionError::InvalidLedger);
         }
         let mut previous = [0; 32];
@@ -283,6 +358,13 @@ impl SupervisorLedger {
             return Err(SupervisionError::IncompleteProof);
         }
         self.push(Transition::CleanupOnly)
+    }
+
+    #[must_use]
+    pub fn head_sha256(&self) -> [u8; 32] {
+        self.transitions
+            .last()
+            .map_or([0; 32], |entry| entry.entry_sha256)
     }
 
     pub fn check_fence(&self, fence: &Fence) -> Result<(), SupervisionError> {
@@ -549,6 +631,8 @@ fn sync_directory(_path: &Path) -> Result<(), SupervisionError> {
 pub struct BrokerRequest {
     pub sequence: u64,
     pub challenge_sha256: [u8; 32],
+    /// Exact fsynced ledger head observed before this operation was permitted.
+    pub ledger_head_sha256: [u8; 32],
     pub fence: Fence,
     pub operation: Operation,
     pub identity: Option<SupervisedIdentity>,
@@ -701,6 +785,7 @@ pub struct BrokerFenceGuard {
     fence: Fence,
     policy_profile_digest: [u8; 32],
     challenge_sha256: [u8; 32],
+    ledger_head_sha256: [u8; 32],
     identity: Option<SupervisedIdentity>,
     absolute_deadline: UnixMillis,
     final_io_deadline: UnixMillis,
@@ -717,6 +802,7 @@ impl BrokerFenceGuard {
             fence: ledger.fence.clone(),
             policy_profile_digest: ledger.policy_profile_digest,
             challenge_sha256,
+            ledger_head_sha256: ledger.head_sha256(),
             identity: ledger.identity.clone(),
             absolute_deadline: ledger.absolute_deadline,
             final_io_deadline: ledger.final_io_deadline,
@@ -740,6 +826,7 @@ impl BrokerFenceGuard {
         }
         if request.sequence != self.last_sequence.saturating_add(1)
             || request.challenge_sha256 != self.challenge_sha256
+            || request.ledger_head_sha256 != self.ledger_head_sha256
             || self.challenge_sha256 == [0; 32]
         {
             return Err(SupervisionError::PeerAuthentication);
@@ -1076,6 +1163,7 @@ mod tests {
         let request = BrokerRequest {
             sequence: 1,
             challenge_sha256: [7; 32],
+            ledger_head_sha256: [0; 32],
             fence: fixture().fence,
             operation: Operation::Delete,
             identity: None,
@@ -1129,6 +1217,7 @@ mod tests {
         let request = BrokerRequest {
             sequence: 1,
             challenge_sha256: [7; 32],
+            ledger_head_sha256: ledger.head_sha256(),
             fence: ledger.fence.clone(),
             operation: Operation::Create,
             identity: ledger.identity.clone(),
@@ -1155,6 +1244,7 @@ mod tests {
         let request = BrokerRequest {
             sequence: 1,
             challenge_sha256: [7; 32],
+            ledger_head_sha256: ledger.head_sha256(),
             fence: ledger.fence.clone(),
             operation: Operation::Create,
             identity: ledger.identity.clone(),
@@ -1171,6 +1261,12 @@ mod tests {
         wrong_challenge.challenge_sha256 = [8; 32];
         assert!(guard
             .authorize(&wrong_challenge, &[4; 32], UnixMillis::new(1))
+            .is_err());
+        let mut wrong_head = request.clone();
+        wrong_head.sequence = 2;
+        wrong_head.ledger_head_sha256[0] ^= 1;
+        assert!(guard
+            .authorize(&wrong_head, &[4; 32], UnixMillis::new(1))
             .is_err());
         let mut missing_identity = request.clone();
         missing_identity.sequence = 2;

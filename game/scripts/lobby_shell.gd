@@ -15,7 +15,7 @@ enum Screen { TITLE, WAITING, TEARDOWN, MATCH }
 @onready var waiting_screen: Control = $Screens/Waiting
 @onready var teardown_screen: Control = $Screens/Teardown
 @onready var name_edit: LineEdit = $Screens/Title/Card/Margin/VBox/Name
-@onready var create_grant_input: Control = $Screens/Title/Card/Margin/VBox/CreateGrant
+@onready var launch_code_input: Control = $Screens/Title/Card/Margin/VBox/LaunchCode
 @onready var join_code_input: Control = $Screens/Title/Card/Margin/VBox/JoinCode
 @onready var create_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Create
 @onready var join_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Join
@@ -128,7 +128,7 @@ func _connect_signals() -> void:
 func _on_readiness(create_authorized: bool, join_authorized: bool) -> void:
 	create_button.disabled = not create_authorized
 	join_button.disabled = not join_authorized
-	create_grant_input.mouse_filter = Control.MOUSE_FILTER_STOP if create_authorized else Control.MOUSE_FILTER_IGNORE
+	launch_code_input.mouse_filter = Control.MOUSE_FILTER_STOP if create_authorized else Control.MOUSE_FILTER_IGNORE
 	join_code_input.mouse_filter = Control.MOUSE_FILTER_STOP if join_authorized else Control.MOUSE_FILTER_IGNORE
 	if create_authorized or join_authorized:
 		title_status.text = "One private lobby is available"
@@ -137,7 +137,7 @@ func _on_readiness(create_authorized: bool, join_authorized: bool) -> void:
 
 func _on_create_pressed() -> void:
 	if SpurfireLobbyContract.clean_display_name(name_edit.text).is_empty():
-		title_status.text = "Enter your rider name and one-use alpha grant."
+		title_status.text = "Enter your rider name and one-use launch code."
 		return
 	_set_title_busy("Creating one private posse…")
 	api.submit_create(name_edit.text)
@@ -436,7 +436,7 @@ func _on_request_failed(operation: String, safe_message: String, _safe_code: Str
 	if _screen == Screen.TITLE:
 		title_status.text = safe_message
 		if operation == "create":
-			api.capture_create_grant()
+			api.capture_launch_code()
 		elif operation == "join":
 			api.capture_join_code()
 		api.probe_lobby_readiness()

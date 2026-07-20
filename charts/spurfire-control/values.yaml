@@ -41,6 +41,36 @@ childVault:
   key: vault.key
   mountPath: /var/run/secrets/spurfire/vault.key
 
+# Separate, receipt-gated execution plane. This mode is mutually exclusive with
+# the ordinary dry-run container and has no environment activation switch.
+protectedAlpha:
+  enabled: false
+  installationId: ""
+  authorizedLobbyId: ""
+  publicOrigin: ""
+  internalListener: ""
+  sourceSha: ""
+  provenanceSha256: ""
+  artifactSetSha256: ""
+  policyProfileSha256: ""
+  leaseName: spurfire-protected-alpha
+  runtimeImageDigest: ""
+  brokerImageDigest: ""
+  receiptSopsSecret: ""
+  receiptKey: receipt.json
+  brokerCredentialSopsSecret: ""
+  credentialKey: organization-oauth.json
+  brokerVaultKeySopsSecret: ""
+  vaultKey: vault.key
+  runtimeTlsSecret: ""
+  brokerTlsSecret: ""
+  brokerMacSecret: ""
+  publicConfigMap: ""
+  brokerServicePort: 9443
+  # Exact control-plane Service/external endpoint CIDRs. Required in protected
+  # mode because NetworkPolicy cannot select the kubernetes.default Service.
+  kubernetesApiServerCidrs: []
+
 # Cached one-lobby network-summary timing contract. Collection is performed by
 # background workers; an inspection GET must never trigger provider I/O.
 networkSummary:
@@ -109,5 +139,5 @@ tolerations: []
 affinity: {}
 topologySpreadConstraints: []
 priorityClassName: ""
-terminationGracePeriodSeconds: 30
+terminationGracePeriodSeconds: 900
 revisionHistoryLimit: 3

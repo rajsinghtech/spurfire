@@ -442,7 +442,7 @@ fn validate_rider_tag(tag: &str) -> Result<(), ControlError> {
 }
 
 /// Non-secret evidence that an exact normalized policy passed provider readback.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildPolicyEvidence {
     /// SHA-256 of normalized policy semantics.
     pub semantic_digest: String,
@@ -495,6 +495,78 @@ pub struct Device {
     pub last_seen: Option<String>,
 }
 
+/// One authoritative inventory page. `request_cursor` is the cursor used to
+/// obtain this response and `next_cursor=None` is the only terminal signal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InventoryPage<T> {
+    pub request_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub items: Vec<T>,
+}
+
+/// Inventory that can only be constructed after every cursor reaches a unique
+/// terminal page within fixed bounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompleteInventory<T> {
+    items: Vec<T>,
+}
+
+impl<T> CompleteInventory<T> {
+    #[must_use]
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+    #[must_use]
+    pub fn into_items(self) -> Vec<T> {
+        self.items
+    }
+}
+
+/// Validate a provider pagination transcript. Errors, timeouts and partial
+/// transcripts never produce this type and therefore cannot establish absence.
+pub fn collect_complete_inventory<T>(
+    pages: Vec<InventoryPage<T>>,
+    max_pages: usize,
+    max_items: usize,
+) -> Result<CompleteInventory<T>, ControlError> {
+    use std::collections::BTreeSet;
+    if pages.is_empty() || pages.len() > max_pages {
+        return Err(ControlError::IncompletePagination);
+    }
+    let mut expected = None;
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    let page_count = pages.len();
+    for (index, page) in pages.into_iter().enumerate() {
+        if page.request_cursor != expected {
+            return Err(ControlError::IncompletePagination);
+        }
+        if let Some(cursor) = page.request_cursor.as_ref() {
+            if cursor.is_empty()
+                || cursor.len() > 512
+                || cursor
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+                || !seen.insert(cursor.clone())
+            {
+                return Err(ControlError::IncompletePagination);
+            }
+        }
+        if items.len().saturating_add(page.items.len()) > max_items {
+            return Err(ControlError::IncompletePagination);
+        }
+        items.extend(page.items);
+        expected = page.next_cursor;
+        if expected.is_none() && index + 1 != page_count {
+            return Err(ControlError::IncompletePagination);
+        }
+    }
+    if expected.is_some() {
+        return Err(ControlError::IncompletePagination);
+    }
+    Ok(CompleteInventory { items })
+}
+
 /// Secret-safe control-plane failure.
 #[derive(Error)]
 pub enum ControlError {
@@ -512,6 +584,8 @@ pub enum ControlError {
     InvalidPolicy,
     #[error("child-tailnet policy readback did not match required semantics")]
     PolicyMismatch,
+    #[error("provider pagination was partial, malformed, repeated, or over limit")]
+    IncompletePagination,
     #[error("Tailscale transport failed; details redacted")]
     Reqwest(#[source] reqwest::Error),
     #[error("Tailscale JSON response was invalid; details redacted")]
@@ -549,6 +623,7 @@ impl fmt::Debug for ControlError {
             Self::InvalidProviderPath => formatter.write_str("InvalidProviderPath"),
             Self::InvalidPolicy => formatter.write_str("InvalidPolicy"),
             Self::PolicyMismatch => formatter.write_str("PolicyMismatch"),
+            Self::IncompletePagination => formatter.write_str("IncompletePagination"),
             Self::Reqwest(_) => formatter.write_str("Reqwest(<redacted>)"),
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
         }
@@ -845,17 +920,43 @@ impl TailscaleClient {
         &self,
     ) -> Result<Vec<OrganizationTailnet>, ControlError> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct ListResponse {
             tailnets: Vec<OrganizationTailnet>,
+            #[serde(default, alias = "next", alias = "nextCursor")]
+            next_page: Option<String>,
         }
 
-        let response = self
-            .session
-            .send(Method::GET, "/organizations/-/tailnets", None)
-            .await?;
-        Ok(OAuthSession::decode::<ListResponse>(response)
-            .await?
-            .tailnets)
+        const MAX_PAGES: usize = 32;
+        const MAX_ITEMS: usize = 4_096;
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut url = Url::parse(&format!(
+                "{}/organizations/-/tailnets",
+                self.session.api_base
+            ))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+            if let Some(value) = cursor.as_deref() {
+                url.query_pairs_mut().append_pair("cursor", value);
+            }
+            let response = self.session.send_url(Method::GET, url, None).await?;
+            let decoded = OAuthSession::decode::<ListResponse>(response).await?;
+            let next = decoded.next_page.filter(|value| !value.is_empty());
+            pages.push(InventoryPage {
+                request_cursor: cursor.clone(),
+                next_cursor: next.clone(),
+                items: decoded.tailnets,
+            });
+            if next.is_none() {
+                break;
+            }
+            if pages.len() >= MAX_PAGES {
+                return Err(ControlError::IncompletePagination);
+            }
+            cursor = next;
+        }
+        Ok(collect_complete_inventory(pages, MAX_PAGES, MAX_ITEMS)?.into_items())
     }
 
     /// Create one API-only child tailnet through the verified organization endpoint.
@@ -1238,6 +1339,46 @@ mod tests {
         assert_eq!(tailnets[0].display_name, "Spurfire Test");
         token.assert_async().await;
         list.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn organization_tailnet_absence_requires_terminal_page() {
+        let mut server = Server::new_async().await;
+        let token = token_mock(&mut server, 3600, 1).await;
+        let first = server
+            .mock("GET", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[],"nextPage":"page-2"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/organizations/-/tailnets")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "cursor".into(),
+                "page-2".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[{"id":"late","displayName":"Late"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(server.url(), "client", "secret");
+
+        let tailnets = client.list_organization_tailnets().await.unwrap();
+
+        assert_eq!(
+            tailnets
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["late"]
+        );
+        token.assert_async().await;
+        first.assert_async().await;
+        second.assert_async().await;
     }
 
     #[tokio::test]
@@ -1684,6 +1825,64 @@ mod tests {
             assert!(!output.contains(ID));
             assert!(!output.contains(SECRET));
             assert!(output.contains(REDACTED));
+        }
+    }
+
+    #[test]
+    fn complete_inventory_requires_terminal_unique_bounded_cursor_chain() {
+        let complete = collect_complete_inventory(
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("page-2".into()),
+                    items: vec!["other"],
+                },
+                InventoryPage {
+                    request_cursor: Some("page-2".into()),
+                    next_cursor: None,
+                    items: vec!["stable-id-present"],
+                },
+            ],
+            4,
+            8,
+        )
+        .unwrap();
+        assert_eq!(complete.items(), &["other", "stable-id-present"]);
+        for pages in [
+            vec![InventoryPage {
+                request_cursor: None,
+                next_cursor: Some("again".into()),
+                items: vec![1],
+            }],
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("again".into()),
+                    items: vec![1],
+                },
+                InventoryPage {
+                    request_cursor: Some("wrong".into()),
+                    next_cursor: None,
+                    items: vec![2],
+                },
+            ],
+            vec![
+                InventoryPage {
+                    request_cursor: None,
+                    next_cursor: Some("bad cursor".into()),
+                    items: vec![1],
+                },
+                InventoryPage {
+                    request_cursor: Some("bad cursor".into()),
+                    next_cursor: None,
+                    items: vec![2],
+                },
+            ],
+        ] {
+            assert!(matches!(
+                collect_complete_inventory(pages, 4, 8),
+                Err(ControlError::IncompletePagination)
+            ));
         }
     }
 

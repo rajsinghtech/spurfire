@@ -13,7 +13,8 @@
     "service",
     "httpRoute",
     "resources",
-    "childVault"
+    "childVault",
+    "protectedAlpha"
   ],
   "properties": {
     "nameOverride": {
@@ -458,7 +459,7 @@
     "terminationGracePeriodSeconds": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 300
+      "maximum": 900
     },
     "revisionHistoryLimit": {
       "type": "integer",
@@ -487,6 +488,147 @@
         "mountPath": {
           "type": "string",
           "const": "/var/run/secrets/spurfire/vault.key"
+        }
+      }
+    },
+    "protectedAlpha": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "installationId",
+        "authorizedLobbyId",
+        "publicOrigin",
+        "internalListener",
+        "sourceSha",
+        "provenanceSha256",
+        "artifactSetSha256",
+        "policyProfileSha256",
+        "leaseName",
+        "runtimeImageDigest",
+        "brokerImageDigest",
+        "receiptSopsSecret",
+        "receiptKey",
+        "brokerCredentialSopsSecret",
+        "credentialKey",
+        "brokerVaultKeySopsSecret",
+        "vaultKey",
+        "runtimeTlsSecret",
+        "brokerTlsSecret",
+        "brokerMacSecret",
+        "publicConfigMap",
+        "brokerServicePort",
+        "kubernetesApiServerCidrs"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "installationId": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9_-]{16,128}$"
+        },
+        "authorizedLobbyId": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "publicOrigin": {
+          "type": "string",
+          "pattern": "^$|^https://[^/]+$"
+        },
+        "internalListener": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9.-]+:9443$"
+        },
+        "sourceSha": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{40}$"
+        },
+        "provenanceSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
+        "artifactSetSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
+        "policyProfileSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
+        "leaseName": {
+          "type": "string",
+          "const": "spurfire-protected-alpha"
+        },
+        "runtimeImageDigest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        },
+        "brokerImageDigest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        },
+        "receiptSopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerCredentialSopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerVaultKeySopsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "runtimeTlsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerTlsSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "brokerMacSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "publicConfigMap": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "receiptKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "credentialKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "vaultKey": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "brokerServicePort": {
+          "type": "integer",
+          "const": 9443
+        },
+        "kubernetesApiServerCidrs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f:.]+/[0-9]{1,3}$"
+          }
         }
       }
     }
@@ -541,13 +683,6 @@
               }
             }
           },
-          "tailscale": {
-            "properties": {
-              "existingSecret": {
-                "minLength": 1
-              }
-            }
-          },
           "persistence": {
             "properties": {
               "enabled": {
@@ -571,34 +706,61 @@
         }
       },
       "then": {
-        "properties": {
-          "config": {
-            "properties": {
-              "dryRun": {
-                "const": true
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "properties": {
+                  "config": {
+                    "properties": {
+                      "dryRun": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
               },
-              "realMutationsEnabled": {
-                "const": false
-              },
-              "realAdmissionEnabled": {
-                "const": false
-              },
-              "allowLegacyClientAssertions": {
-                "const": false
+              {
+                "properties": {
+                  "protectedAlpha": {
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
               }
-            }
+            ]
           },
-          "httpRoute": {
+          {
             "properties": {
-              "parentRefs": {
-                "minItems": 1
+              "config": {
+                "properties": {
+                  "realMutationsEnabled": {
+                    "const": false
+                  },
+                  "realAdmissionEnabled": {
+                    "const": false
+                  },
+                  "allowLegacyClientAssertions": {
+                    "const": false
+                  }
+                }
               },
-              "hostnames": {
-                "minItems": 1
+              "httpRoute": {
+                "properties": {
+                  "parentRefs": {
+                    "minItems": 1
+                  },
+                  "hostnames": {
+                    "minItems": 1
+                  }
+                }
               }
             }
           }
-        }
+        ]
       }
     }
   ],

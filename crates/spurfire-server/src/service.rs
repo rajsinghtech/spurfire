@@ -58,7 +58,7 @@ use crate::{
         ObserveNetworkRequest, PrepareLobbyRequest, ProviderError, ProviderNetworkIdentity,
         TailnetPresenceRequest,
     },
-    rehearsal::LocalRehearsalQualification,
+    rehearsal::{LocalRehearsalQualification, ProtectedAlphaQualification},
     store::{
         apply_time_transitions, CreateStoreOutcome, LobbyStore, StoredAcceptedHeartbeat,
         StoredCapabilityVerifier, StoredCredential, StoredIssuanceReservation, StoredJoinAttempt,
@@ -245,7 +245,9 @@ pub struct AppState {
     provider_limit: Arc<Semaphore>,
     abuse: Arc<Mutex<AbuseState>>,
     startup_reconciled: Arc<AtomicBool>,
+    protected_cleanup: Arc<AtomicBool>,
     local_rehearsal: Option<Arc<LocalRehearsalQualification>>,
+    protected_alpha: Option<Arc<ProtectedAlphaQualification>>,
 }
 
 impl AppState {
@@ -271,7 +273,9 @@ impl AppState {
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
+            protected_cleanup: Arc::new(AtomicBool::new(false)),
             local_rehearsal: None,
+            protected_alpha: None,
         }
     }
 
@@ -299,6 +303,84 @@ impl AppState {
         _qualification: LocalRehearsalQualification,
     ) -> Result<Self, crate::store::StoreError> {
         Err(crate::store::StoreError::RehearsalDisabled)
+    }
+
+    /// Qualified constructor for the protected worker. There is no boolean or
+    /// environment path to this constructor: callers must present the opaque
+    /// result of exact signed-receipt verification. The receipt installation is
+    /// fsynced before the exact provider gate can be returned.
+    pub async fn new_protected_alpha(
+        mut config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+        qualification: ProtectedAlphaQualification,
+    ) -> Result<Self, crate::store::StoreError> {
+        let binding = store.store_binding().await;
+        if binding.instance_id_sha256 != qualification.store_instance_id_sha256
+            || binding.canonical_state_path_sha256 != qualification.canonical_state_path_sha256
+        {
+            return Err(crate::store::StoreError::InvalidRehearsalReceipt);
+        }
+        store
+            .install_protected_alpha_receipt(&qualification)
+            .await?;
+        config.force_dry_run = false;
+        config.real_mutations_enabled = true;
+        config.real_admission_enabled = true;
+        config.provisioning_mode = ProvisioningMode::TailnetPerLobby;
+        config.max_players = qualification.participant_cap;
+        config.allow_legacy_client_assertions = false;
+        config.test_only_allow_legacy_real_mutations = false;
+        let mut state = Self::new_deny_all(config, store, Arc::clone(&provider));
+        // Replace deny-all with an exact tuple gate. At no point does this path
+        // construct the legacy deployment-wide authorization wrapper.
+        state.provider = Arc::new(MutationGatedProvider::protected_alpha(
+            provider,
+            qualification.lobby_id,
+            qualification.network_generation,
+        ));
+        state.protected_alpha = Some(Arc::new(qualification));
+        Ok(state)
+    }
+
+    /// Reopens an already-consumed protected receipt for cleanup only. This
+    /// cannot install authority, enable admission, or change the exact tuple.
+    pub async fn new_protected_alpha_recovery(
+        mut config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+        qualification: ProtectedAlphaQualification,
+    ) -> Result<Self, crate::store::StoreError> {
+        let binding = store.store_binding().await;
+        let recovery = store
+            .protected_alpha_recovery()
+            .await
+            .ok_or(crate::store::StoreError::InvalidRehearsalReceipt)?;
+        if binding.instance_id_sha256 != qualification.store_instance_id_sha256
+            || binding.canonical_state_path_sha256 != qualification.canonical_state_path_sha256
+            || recovery.lobby_id != qualification.lobby_id
+            || recovery.network_generation != qualification.network_generation
+            || recovery.supervisor_run_id_digest != qualification.supervisor_run_id_digest
+            || recovery.initial_epoch != qualification.initial_epoch
+            || recovery.absolute_deadline != qualification.absolute_deadline
+        {
+            return Err(crate::store::StoreError::InvalidRehearsalReceipt);
+        }
+        config.force_dry_run = false;
+        config.real_mutations_enabled = true;
+        config.real_admission_enabled = false;
+        config.provisioning_mode = ProvisioningMode::TailnetPerLobby;
+        config.max_players = qualification.participant_cap;
+        config.allow_legacy_client_assertions = false;
+        config.test_only_allow_legacy_real_mutations = false;
+        let mut state = Self::new_deny_all(config, store, Arc::clone(&provider));
+        state.provider = Arc::new(MutationGatedProvider::protected_alpha(
+            provider,
+            qualification.lobby_id,
+            qualification.network_generation,
+        ));
+        state.protected_alpha = Some(Arc::new(qualification));
+        Ok(state)
     }
 
     /// Replaces the wall clock, normally for deterministic tests.
@@ -647,6 +729,30 @@ impl AppState {
         cleaned
     }
 
+    /// Launcher-only transition at the immutable play deadline. This is not an
+    /// HTTP route and exists only on a receipt-qualified state. It closes the
+    /// exact lobby and starts cleanup while preserving retry state.
+    pub async fn begin_protected_cleanup(&self) -> Result<(), crate::store::StoreError> {
+        let Some(alpha) = self.protected_alpha.as_ref() else {
+            return Err(crate::store::StoreError::RehearsalDisabled);
+        };
+        self.protected_cleanup.store(true, Ordering::Release);
+        let lobby_id = alpha.lobby_id;
+        let _lobby = self.lock_lobby(lobby_id).await;
+        let Some(mut stored) = self.store.get(lobby_id).await else {
+            return Ok(());
+        };
+        if !stored.dry_run && stored.network_generation == alpha.network_generation {
+            stored.lobby.state = LobbyState::Closing;
+            stored.cleanup_pending = true;
+            stored.network_lifecycle = NetworkLifecycle::CleanupRequested;
+            let now = self.clock.now();
+            let _ = cleanup_resources(self, &mut stored, now, true, true).await;
+            self.store.replace(stored).await?;
+        }
+        Ok(())
+    }
+
     /// Runs expiry cleanup against the configured clock.
     pub async fn cleanup_expired_now(&self) -> Vec<LobbyId> {
         self.cleanup_expired_at(self.clock.now()).await
@@ -744,6 +850,66 @@ pub fn build_local_rehearsal_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Private supervisor router. It exists only on the receipt-bound internal
+/// listener and is never merged into either ordinary or public Alpha routing.
+pub fn build_protected_alpha_operator_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/protected-alpha/internal/create",
+            post(create_local_rehearsal_lobby),
+        )
+        .fallback(not_found)
+        .layer(DefaultBodyLimit::max(64 * 1_024))
+        .with_state(state)
+}
+
+/// Exact-lobby public surface for the bounded Alpha. Literal routes ensure a
+/// second lobby ID and generic creation cannot fall through to worker handlers.
+pub fn build_protected_alpha_public_router(state: AppState) -> Router {
+    let lobby_id = state
+        .protected_alpha
+        .as_ref()
+        .expect("protected Alpha router requires qualified state")
+        .lobby_id;
+    let base = format!("/v1/lobbies/{lobby_id}");
+    Router::new()
+        // Probe becomes reachable only after receipt verification, broker
+        // construction and startup reconciliation have completed.
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(protected_readyz))
+        // The only create route in protected mode consumes the receipt-bound
+        // launch code and can create only the receipt's exact lobby ID.
+        .route("/v1/capabilities", get(get_capabilities))
+        .route("/v1/lobbies", post(create_lobby))
+        .route(&base, get(get_lobby).delete(delete_lobby))
+        .route(&format!("{base}/network"), get(get_lobby_network))
+        .route(&format!("{base}/invitations"), post(create_invitation))
+        .route(&format!("{base}/join"), post(join_lobby))
+        .route(&format!("{base}/leave"), post(leave_lobby))
+        .route(
+            &format!("{base}/session/endpoint"),
+            post(register_session_endpoint),
+        )
+        .route(&format!("{base}/measurements"), post(submit_measurements))
+        .route(
+            &format!("{base}/network/reports"),
+            post(submit_measurements),
+        )
+        .route(
+            &format!("{base}/elect-authority"),
+            post(elect_lobby_authority),
+        )
+        .route(&format!("{base}/authority"), get(get_lobby_authority))
+        .route(&format!("{base}/start"), post(start_lobby))
+        .route(&format!("{base}/heartbeat"), post(authority_heartbeat))
+        .route(&format!("{base}/results"), post(submit_results))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(64 * 1_024))
+        .layer(from_fn(capture_verified_peer_ip))
+        .with_state(state)
+}
+
 /// Alias that reads naturally in embedders.
 pub fn router(state: AppState) -> Router {
     build_router(state)
@@ -831,6 +997,20 @@ struct HealthResponse {
     provisioning_ready: bool,
 }
 
+async fn protected_readyz(State(state): State<AppState>) -> StatusCode {
+    if state.startup_reconciled.load(Ordering::Acquire)
+        && !state.protected_cleanup.load(Ordering::Acquire)
+        && state.protected_alpha.as_ref().is_some_and(|qualification| {
+            state.clock.now() < qualification.final_io_deadline
+                && state.clock.now() < qualification.absolute_deadline
+        })
+    {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
 async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
     let ready = state.config.force_dry_run || real_creation_authorized(&state);
     Json(HealthResponse {
@@ -908,7 +1088,8 @@ async fn create_lobby_impl(
     } else if legacy_real_test_mode {
         request.provisioning_mode
     } else {
-        if !real_creation_authorized(&state) || local_operator != state.local_rehearsal.is_some() {
+        if !real_creation_authorized(&state) || (state.local_rehearsal.is_some() && !local_operator)
+        {
             return Err(ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "real_admission_closed",
@@ -940,21 +1121,28 @@ async fn create_lobby_impl(
             .map_err(|error| store_api_error(&error, false))?;
         Some(generated.verifier)
     } else if local_operator {
-        Some(
+        Some(if let Some(alpha) = state.protected_alpha.as_ref() {
+            alpha.launch_code_sha256
+        } else {
             state
                 .local_rehearsal
                 .as_ref()
                 .ok_or_else(|| lobby_not_found(false))?
-                .receipt_verifier,
-        )
+                .receipt_verifier
+        })
     } else {
         Some(capability_from_headers(&headers).ok_or_else(|| lobby_not_found(false))?)
     };
     let lobby_id = state
-        .local_rehearsal
+        .protected_alpha
         .as_ref()
-        .filter(|_| local_operator)
-        .map_or_else(new_lobby_id, |qualification| qualification.lobby_id);
+        .map(|value| value.lobby_id)
+        .or_else(|| {
+            local_operator
+                .then(|| state.local_rehearsal.as_ref().map(|value| value.lobby_id))
+                .flatten()
+        })
+        .unwrap_or_else(new_lobby_id);
     let _lobby = state.lock_lobby(lobby_id).await;
     let absolute_ttl_ms = if effective_dry_run {
         state.config.dry_run_ttl_ms()
@@ -1003,7 +1191,7 @@ async fn create_lobby_impl(
     // Persist PROVISIONING/RESERVED and acquire the singleton real lease before
     // a child-tailnet mutation. Replay resolution occurs inside this same store
     // transaction before either the kill switch or quota is evaluated.
-    let stored = StoredLobby::new(
+    let mut stored = StoredLobby::new(
         lobby,
         actor,
         "provisioning.invalid",
@@ -1012,6 +1200,15 @@ async fn create_lobby_impl(
         idle_ttl_ms,
     )
     .with_creator_capability(capability_record);
+    if let Some(alpha) = state.protected_alpha.as_ref().filter(|_| local_operator) {
+        stored.network_generation = alpha.network_generation;
+        stored.lobby.ttl.absolute_expires_at = alpha.absolute_deadline;
+        stored.lobby.ttl.idle_expires_at = stored
+            .lobby
+            .ttl
+            .idle_expires_at
+            .min(alpha.absolute_deadline);
+    }
 
     let outcome = state
         .store
@@ -2720,13 +2917,18 @@ fn real_creation_authorized(state: &AppState) -> bool {
         && state.config.real_admission_enabled
         && !state.config.allow_legacy_client_assertions
         && !state.config.trust_forwarded_for
-        && state.config.bind_addr.ip().is_loopback()
+        && (state.config.bind_addr.ip().is_loopback() || state.protected_alpha.is_some())
         && state.config.provisioning_mode == ProvisioningMode::TailnetPerLobby
         && state.startup_reconciled.load(Ordering::Acquire)
-        && state
+        && (state
             .local_rehearsal
             .as_ref()
             .is_some_and(|qualification| state.clock.now() < qualification.expires_at)
+            || state.protected_alpha.as_ref().is_some_and(|qualification| {
+                state.clock.now() < qualification.expires_at
+                    && state.clock.now() < qualification.final_io_deadline
+                    && state.clock.now() < qualification.absolute_deadline
+            }))
         && state
             .provider
             .cached_capabilities()

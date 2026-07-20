@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use spurfire_control::{
     AuthKeyOpts, ChildPolicyEvidence, ChildTailnetPolicy, ChildTailscaleClient, ControlError,
     TailscaleClient,
@@ -24,7 +25,7 @@ use spurfire_protocol::{
 };
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(not(test))]
 const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,7 +33,7 @@ const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_secs(10);
 const CHILD_POLICY_GATE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Provider request made while a lobby record is being prepared.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareLobbyRequest {
     /// Public lobby identifier.
     pub lobby_id: LobbyId,
@@ -45,7 +46,7 @@ pub struct PrepareLobbyRequest {
 }
 
 /// Exact non-secret provider identity captured from a typed response.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderNetworkIdentity {
     /// Stable organization tailnet ID. Dedicated mode always requires it.
     pub provider_tailnet_id: Option<String>,
@@ -79,7 +80,7 @@ impl fmt::Debug for ProviderNetworkIdentity {
 }
 
 /// Non-secret provider state retained with a lobby.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedNetwork {
     /// Tailnet selector needed by later provider calls.
     pub tailnet: String,
@@ -94,7 +95,7 @@ pub struct PreparedNetwork {
 }
 
 /// Request to mint one player credential.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MintCredentialRequest {
     /// Lobby receiving the player.
     pub lobby_id: LobbyId,
@@ -154,7 +155,7 @@ pub struct MintedCredential {
 }
 
 /// One non-secret auth-key receipt considered during cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialCleanup {
     /// Provider key identifier, never key material.
     pub credential_id: String,
@@ -163,7 +164,7 @@ pub struct CredentialCleanup {
 }
 
 /// Request for lobby resource cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupLobbyRequest {
     /// Lobby being cleaned.
     pub lobby_id: LobbyId,
@@ -188,7 +189,7 @@ pub struct CleanupLobbyRequest {
 }
 
 /// Cleanup outcome. Individual device identifiers are intentionally absent.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupOutcome {
     /// True when capability-dependent cleanup should be retried.
     pub cleanup_pending: bool,
@@ -205,7 +206,7 @@ pub struct CleanupOutcome {
 }
 
 /// Bounded read request for coarse provider enrollment metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserveNetworkRequest {
     /// Exact selected lobby.
     pub lobby_id: LobbyId,
@@ -224,14 +225,14 @@ pub struct ObserveNetworkRequest {
 }
 
 /// Coarse provider observation with no device identifiers, tags, or hostnames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDeviceObservation {
     /// Devices enrolled as of one successful scoped poll.
     pub enrolled_device_count: u32,
 }
 
 /// Exact stable-ID parent-organization presence check used only by cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailnetPresenceRequest {
     /// Exact lobby whose durable identity is being reconciled.
     pub lobby_id: LobbyId,
@@ -242,7 +243,7 @@ pub struct TailnetPresenceRequest {
 }
 
 /// Cached, non-secret capability verdict.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
     /// OAuth client-credentials exchange succeeded.
     pub oauth_token_ok: bool,
@@ -553,6 +554,115 @@ pub trait NetworkProvider: Send + Sync {
     }
 }
 
+/// Credential-free transport implemented by authenticated broker IPC. Every
+/// method uses existing typed provider DTOs; OAuth and vault material are not
+/// representable on this boundary.
+#[async_trait]
+pub trait BrokerProviderTransport: Send + Sync {
+    fn cached_capabilities(&self) -> ProviderCapabilities;
+    async fn prepare(&self, request: PrepareLobbyRequest)
+        -> Result<PreparedNetwork, ProviderError>;
+    async fn mint(&self, request: MintCredentialRequest)
+        -> Result<MintedCredential, ProviderError>;
+    async fn cleanup(&self, request: CleanupLobbyRequest) -> Result<CleanupOutcome, ProviderError>;
+    async fn observe(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError>;
+    async fn present(&self, request: TailnetPresenceRequest) -> Result<bool, ProviderError>;
+    async fn erase(&self, request: TailnetPresenceRequest) -> Result<(), ProviderError>;
+}
+
+/// Worker-side `NetworkProvider` client. It is permanently bound to one lobby
+/// generation and contains no constructor accepting credentials, environment
+/// names, vault paths, tailnet selectors, or provider clients.
+pub struct BrokerProvider {
+    transport: Arc<dyn BrokerProviderTransport>,
+    lobby_id: LobbyId,
+    generation: u64,
+}
+
+impl BrokerProvider {
+    #[must_use]
+    pub fn new(
+        transport: Arc<dyn BrokerProviderTransport>,
+        lobby_id: LobbyId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            transport,
+            lobby_id,
+            generation,
+        }
+    }
+    fn exact(&self, lobby_id: LobbyId, generation: u64) -> Result<(), ProviderError> {
+        if lobby_id == self.lobby_id && generation == self.generation && generation != 0 {
+            Ok(())
+        } else {
+            Err(ProviderError::IdentityMismatch)
+        }
+    }
+}
+
+impl fmt::Debug for BrokerProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrokerProvider")
+            .field("lobby_id", &self.lobby_id)
+            .field("generation", &self.generation)
+            .field("transport", &"<authenticated-ipc>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl NetworkProvider for BrokerProvider {
+    fn cached_capabilities(&self) -> ProviderCapabilities {
+        self.transport.cached_capabilities()
+    }
+    async fn prepare_lobby(
+        &self,
+        request: PrepareLobbyRequest,
+    ) -> Result<PreparedNetwork, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.prepare(request).await
+    }
+    async fn mint_credential(
+        &self,
+        request: MintCredentialRequest,
+    ) -> Result<MintedCredential, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.mint(request).await
+    }
+    async fn cleanup_lobby(
+        &self,
+        request: CleanupLobbyRequest,
+    ) -> Result<CleanupOutcome, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.cleanup(request).await
+    }
+    async fn observe_network(
+        &self,
+        request: ObserveNetworkRequest,
+    ) -> Result<ProviderDeviceObservation, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.observe(request).await
+    }
+    async fn tailnet_present(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<bool, ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.present(request).await
+    }
+    async fn erase_child_secret(
+        &self,
+        request: TailnetPresenceRequest,
+    ) -> Result<(), ProviderError> {
+        self.exact(request.lobby_id, request.network_generation)?;
+        self.transport.erase(request).await
+    }
+}
+
 /// Central provider facade enforcing the deployment-wide mutation gate.
 ///
 /// Every provider mutation crosses this boundary. Read-only capability and
@@ -567,6 +677,7 @@ pub struct MutationGatedProvider {
 enum MutationAuthorization {
     DenyAll,
     DeploymentWide,
+    ProtectedAlpha { lobby_id: LobbyId, generation: u64 },
 }
 
 impl MutationGatedProvider {
@@ -593,11 +704,27 @@ impl MutationGatedProvider {
         }
     }
 
+    /// Exact one-lobby gate used only after protected receipt verification.
+    #[must_use]
+    pub fn protected_alpha(
+        inner: Arc<dyn NetworkProvider>,
+        lobby_id: LobbyId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            inner,
+            authorization: MutationAuthorization::ProtectedAlpha {
+                lobby_id,
+                generation,
+            },
+        }
+    }
+
     fn require_exact(
         &self,
         dry_run: bool,
-        _lobby_id: LobbyId,
-        _network_generation: u64,
+        lobby_id: LobbyId,
+        network_generation: u64,
         _new_work: bool,
     ) -> Result<(), ProviderError> {
         if dry_run {
@@ -605,7 +732,13 @@ impl MutationGatedProvider {
         }
         match self.authorization {
             MutationAuthorization::DeploymentWide => Ok(()),
-            MutationAuthorization::DenyAll => Err(ProviderError::RealMutationsDisabled),
+            MutationAuthorization::ProtectedAlpha {
+                lobby_id: exact,
+                generation,
+            } if lobby_id == exact && network_generation == generation => Ok(()),
+            MutationAuthorization::ProtectedAlpha { .. } | MutationAuthorization::DenyAll => {
+                Err(ProviderError::RealMutationsDisabled)
+            }
         }
     }
 }
@@ -942,6 +1075,27 @@ impl TailscaleProvider {
             .await
             .map_err(|error| map_control_error(error, "startup"))?;
         Ok(Self::new(client, shared_tailnet))
+    }
+
+    /// Broker-only constructor for SOPS-mounted credentials. Secret values are
+    /// accepted as owned zeroizing strings and never enter argv or environment.
+    pub fn from_mounted_credentials_with_vault(
+        api_base: String,
+        mut client_id: Zeroizing<String>,
+        mut client_secret: Zeroizing<String>,
+        shared_tailnet: impl Into<String>,
+        vault: Arc<EncryptedChildVault>,
+    ) -> Self {
+        let client = TailscaleClient::new(
+            api_base,
+            std::mem::take(&mut *client_id),
+            std::mem::take(&mut *client_secret),
+        );
+        client_id.zeroize();
+        client_secret.zeroize();
+        let mut provider = Self::new(client, shared_tailnet);
+        provider.durable_child_vault = Some(vault);
+        provider
     }
 
     /// Builds the production adapter with encrypted restart-recoverable child custody.
@@ -1765,9 +1919,10 @@ fn map_control_error(error: ControlError, operation: &'static str) -> ProviderEr
         | ControlError::InvalidProviderPath
         | ControlError::InvalidPolicy
         | ControlError::PolicyMismatch => ProviderError::IdentityMismatch,
-        ControlError::Env(_) | ControlError::Reqwest(_) | ControlError::Json(_) => {
-            ProviderError::Unavailable { operation }
-        }
+        ControlError::Env(_)
+        | ControlError::Reqwest(_)
+        | ControlError::Json(_)
+        | ControlError::IncompletePagination => ProviderError::Unavailable { operation },
     }
 }
 
@@ -1776,6 +1931,90 @@ mod tests {
     use mockito::{Matcher, Mock, Server};
 
     use super::*;
+
+    struct FakeBrokerTransport {
+        prepares: AtomicU64,
+    }
+
+    #[async_trait]
+    impl BrokerProviderTransport for FakeBrokerTransport {
+        fn cached_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::available()
+        }
+        async fn prepare(
+            &self,
+            _request: PrepareLobbyRequest,
+        ) -> Result<PreparedNetwork, ProviderError> {
+            self.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(dry_prepared_network())
+        }
+        async fn mint(
+            &self,
+            _request: MintCredentialRequest,
+        ) -> Result<MintedCredential, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_mint",
+            })
+        }
+        async fn cleanup(
+            &self,
+            _request: CleanupLobbyRequest,
+        ) -> Result<CleanupOutcome, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_cleanup",
+            })
+        }
+        async fn observe(
+            &self,
+            _request: ObserveNetworkRequest,
+        ) -> Result<ProviderDeviceObservation, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_observe",
+            })
+        }
+        async fn present(&self, _request: TailnetPresenceRequest) -> Result<bool, ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_present",
+            })
+        }
+        async fn erase(&self, _request: TailnetPresenceRequest) -> Result<(), ProviderError> {
+            Err(ProviderError::Unavailable {
+                operation: "fake_erase",
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_provider_is_credential_free_and_exact_fence_bound() {
+        let lobby_id = LobbyId::parse("00000000-0000-4000-8000-0000000000bc").unwrap();
+        let transport = Arc::new(FakeBrokerTransport {
+            prepares: AtomicU64::new(0),
+        });
+        let provider = BrokerProvider::new(transport.clone(), lobby_id, 9);
+        assert!(provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 8,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .is_err());
+        assert_eq!(transport.prepares.load(Ordering::SeqCst), 0);
+        assert!(provider
+            .prepare_lobby(PrepareLobbyRequest {
+                lobby_id,
+                network_generation: 9,
+                mode: ProvisioningMode::TailnetPerLobby,
+                dry_run: false,
+            })
+            .await
+            .is_ok());
+        assert_eq!(transport.prepares.load(Ordering::SeqCst), 1);
+        let debug = format!("{provider:?}");
+        assert!(!debug.contains("TS_CLIENT"));
+        assert!(!debug.contains("secret"));
+    }
 
     fn policy_readback(lobby_id: LobbyId) -> String {
         let tag = dedicated_rider_tag(lobby_id);
