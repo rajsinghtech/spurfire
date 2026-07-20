@@ -245,6 +245,7 @@ pub struct AppState {
     provider_limit: Arc<Semaphore>,
     abuse: Arc<Mutex<AbuseState>>,
     startup_reconciled: Arc<AtomicBool>,
+    protected_cleanup: Arc<AtomicBool>,
     local_rehearsal: Option<Arc<LocalRehearsalQualification>>,
     protected_alpha: Option<Arc<ProtectedAlphaQualification>>,
 }
@@ -272,6 +273,7 @@ impl AppState {
             provider_limit: Arc::new(Semaphore::new(MAX_PROVIDER_CONCURRENCY)),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
+            protected_cleanup: Arc::new(AtomicBool::new(false)),
             local_rehearsal: None,
             protected_alpha: None,
         }
@@ -332,6 +334,46 @@ impl AppState {
         let mut state = Self::new_deny_all(config, store, Arc::clone(&provider));
         // Replace deny-all with an exact tuple gate. At no point does this path
         // construct the legacy deployment-wide authorization wrapper.
+        state.provider = Arc::new(MutationGatedProvider::protected_alpha(
+            provider,
+            qualification.lobby_id,
+            qualification.network_generation,
+        ));
+        state.protected_alpha = Some(Arc::new(qualification));
+        Ok(state)
+    }
+
+    /// Reopens an already-consumed protected receipt for cleanup only. This
+    /// cannot install authority, enable admission, or change the exact tuple.
+    pub async fn new_protected_alpha_recovery(
+        mut config: Config,
+        store: Arc<dyn LobbyStore>,
+        provider: Arc<dyn NetworkProvider>,
+        qualification: ProtectedAlphaQualification,
+    ) -> Result<Self, crate::store::StoreError> {
+        let binding = store.store_binding().await;
+        let recovery = store
+            .protected_alpha_recovery()
+            .await
+            .ok_or(crate::store::StoreError::InvalidRehearsalReceipt)?;
+        if binding.instance_id_sha256 != qualification.store_instance_id_sha256
+            || binding.canonical_state_path_sha256 != qualification.canonical_state_path_sha256
+            || recovery.lobby_id != qualification.lobby_id
+            || recovery.network_generation != qualification.network_generation
+            || recovery.supervisor_run_id_digest != qualification.supervisor_run_id_digest
+            || recovery.initial_epoch != qualification.initial_epoch
+            || recovery.absolute_deadline != qualification.absolute_deadline
+        {
+            return Err(crate::store::StoreError::InvalidRehearsalReceipt);
+        }
+        config.force_dry_run = false;
+        config.real_mutations_enabled = true;
+        config.real_admission_enabled = false;
+        config.provisioning_mode = ProvisioningMode::TailnetPerLobby;
+        config.max_players = qualification.participant_cap;
+        config.allow_legacy_client_assertions = false;
+        config.test_only_allow_legacy_real_mutations = false;
+        let mut state = Self::new_deny_all(config, store, Arc::clone(&provider));
         state.provider = Arc::new(MutationGatedProvider::protected_alpha(
             provider,
             qualification.lobby_id,
@@ -694,6 +736,7 @@ impl AppState {
         let Some(alpha) = self.protected_alpha.as_ref() else {
             return Err(crate::store::StoreError::RehearsalDisabled);
         };
+        self.protected_cleanup.store(true, Ordering::Release);
         let lobby_id = alpha.lobby_id;
         let _lobby = self.lock_lobby(lobby_id).await;
         let Some(mut stored) = self.store.get(lobby_id).await else {
@@ -830,6 +873,10 @@ pub fn build_protected_alpha_public_router(state: AppState) -> Router {
         .lobby_id;
     let base = format!("/v1/lobbies/{lobby_id}");
     Router::new()
+        // Probe becomes reachable only after receipt verification, broker
+        // construction and startup reconciliation have completed.
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(protected_readyz))
         // The only create route in protected mode consumes the receipt-bound
         // launch code and can create only the receipt's exact lobby ID.
         .route("/v1/capabilities", get(get_capabilities))
@@ -948,6 +995,20 @@ impl From<LobbyResponse> for AnonymousDryLobbyResponse {
 struct HealthResponse {
     status: &'static str,
     provisioning_ready: bool,
+}
+
+async fn protected_readyz(State(state): State<AppState>) -> StatusCode {
+    if state.startup_reconciled.load(Ordering::Acquire)
+        && !state.protected_cleanup.load(Ordering::Acquire)
+        && state.protected_alpha.as_ref().is_some_and(|qualification| {
+            state.clock.now() < qualification.final_io_deadline
+                && state.clock.now() < qualification.absolute_deadline
+        })
+    {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {

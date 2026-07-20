@@ -55,6 +55,7 @@ pub(crate) const CONTROL_ORIGIN: &str = PRODUCTION_CONTROL_ORIGIN;
 ))]
 pub(crate) const CONTROL_ORIGIN: &str = REHEARSAL_CONTROL_ORIGIN;
 const MAX_BODY: usize = 65_536;
+const NATIVE_MAX_PLAYERS: u8 = 2;
 const SAFE_ERROR: &str = "Lobby unavailable or invite code invalid. Check the code and try again.";
 const JOIN_PREFIX: &[u8] = b"SPURFIRE1:";
 const WIRE_VERSION: &str = "1.2";
@@ -401,7 +402,9 @@ impl LobbyClientState {
         };
         let body = json!({
             "display_name": format!("{display_name}'s Posse"),
-            "max_players": 8
+            // Protected Alpha is intentionally capped at exactly two riders.
+            // The ordinary service also accepts this lower explicit capacity.
+            "max_players": NATIVE_MAX_PLAYERS
         })
         .to_string();
         self.spawn(
@@ -1404,6 +1407,7 @@ mod tests {
     #[test]
     fn declared_and_streamed_limits_are_exact() {
         assert_eq!(MAX_BODY, 65_536);
+        assert_eq!(NATIVE_MAX_PLAYERS, 2);
         let mut bounded = Zeroizing::new(Vec::with_capacity(MAX_BODY));
         bounded.extend(std::iter::repeat_n(0_u8, MAX_BODY));
         assert_eq!(bounded.len(), MAX_BODY);

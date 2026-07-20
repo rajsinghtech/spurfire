@@ -39,12 +39,13 @@ pub use provider::{
     ProviderNetworkIdentity, SecretString, TailnetPresenceRequest, TailscaleProvider,
 };
 pub use rehearsal::{
-    verify_local_rehearsal_receipt, verify_protected_alpha_receipt, LocalRehearsalClaims,
-    LocalRehearsalQualification, LocalRehearsalReceipt, ProtectedAlphaClaims,
-    ProtectedAlphaQualification, ProtectedAlphaReceipt, ProtectedAlphaVerificationContext,
-    RehearsalReceiptError, RehearsalVerificationContext, ALPHA_CLEANUP_MS, ALPHA_PLAY_MS,
-    LOCAL_REHEARSAL_AUDIENCE, PROTECTED_ALPHA_AUDIENCE, PROTECTED_ALPHA_PURPOSE,
-    REHEARSAL_POLICY_PROFILE, REVIEWED_SOURCE_SHA,
+    verify_local_rehearsal_receipt, verify_protected_alpha_receipt,
+    verify_protected_alpha_recovery_receipt, LocalRehearsalClaims, LocalRehearsalQualification,
+    LocalRehearsalReceipt, ProtectedAlphaClaims, ProtectedAlphaQualification,
+    ProtectedAlphaReceipt, ProtectedAlphaVerificationContext, RehearsalReceiptError,
+    RehearsalVerificationContext, ALPHA_CLEANUP_MS, ALPHA_PLAY_MS, LOCAL_REHEARSAL_AUDIENCE,
+    PROTECTED_ALPHA_AUDIENCE, PROTECTED_ALPHA_PURPOSE, REHEARSAL_POLICY_PROFILE,
+    REVIEWED_SOURCE_SHA,
 };
 pub use service::{
     build_local_rehearsal_router, build_protected_alpha_operator_router,

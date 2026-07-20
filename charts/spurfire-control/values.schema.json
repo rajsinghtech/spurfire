@@ -459,7 +459,7 @@
     "terminationGracePeriodSeconds": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 300
+      "maximum": 900
     },
     "revisionHistoryLimit": {
       "type": "integer",
@@ -499,6 +499,11 @@
         "installationId",
         "authorizedLobbyId",
         "publicOrigin",
+        "internalListener",
+        "sourceSha",
+        "provenanceSha256",
+        "artifactSetSha256",
+        "policyProfileSha256",
         "leaseName",
         "runtimeImageDigest",
         "brokerImageDigest",
@@ -512,7 +517,8 @@
         "brokerTlsSecret",
         "brokerMacSecret",
         "publicConfigMap",
-        "brokerServicePort"
+        "brokerServicePort",
+        "kubernetesApiServerCidrs"
       ],
       "properties": {
         "enabled": {
@@ -529,6 +535,26 @@
         "publicOrigin": {
           "type": "string",
           "pattern": "^$|^https://[^/]+$"
+        },
+        "internalListener": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9.-]+:9443$"
+        },
+        "sourceSha": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{40}$"
+        },
+        "provenanceSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
+        "artifactSetSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
+        "policyProfileSha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
         },
         "leaseName": {
           "type": "string",
@@ -595,6 +621,14 @@
         "brokerServicePort": {
           "type": "integer",
           "const": 9443
+        },
+        "kubernetesApiServerCidrs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f:.]+/[0-9]{1,3}$"
+          }
         }
       }
     }

@@ -920,17 +920,43 @@ impl TailscaleClient {
         &self,
     ) -> Result<Vec<OrganizationTailnet>, ControlError> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct ListResponse {
             tailnets: Vec<OrganizationTailnet>,
+            #[serde(default, alias = "next", alias = "nextCursor")]
+            next_page: Option<String>,
         }
 
-        let response = self
-            .session
-            .send(Method::GET, "/organizations/-/tailnets", None)
-            .await?;
-        Ok(OAuthSession::decode::<ListResponse>(response)
-            .await?
-            .tailnets)
+        const MAX_PAGES: usize = 32;
+        const MAX_ITEMS: usize = 4_096;
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut url = Url::parse(&format!(
+                "{}/organizations/-/tailnets",
+                self.session.api_base
+            ))
+            .map_err(|_| ControlError::InvalidProviderPath)?;
+            if let Some(value) = cursor.as_deref() {
+                url.query_pairs_mut().append_pair("cursor", value);
+            }
+            let response = self.session.send_url(Method::GET, url, None).await?;
+            let decoded = OAuthSession::decode::<ListResponse>(response).await?;
+            let next = decoded.next_page.filter(|value| !value.is_empty());
+            pages.push(InventoryPage {
+                request_cursor: cursor.clone(),
+                next_cursor: next.clone(),
+                items: decoded.tailnets,
+            });
+            if next.is_none() {
+                break;
+            }
+            if pages.len() >= MAX_PAGES {
+                return Err(ControlError::IncompletePagination);
+            }
+            cursor = next;
+        }
+        Ok(collect_complete_inventory(pages, MAX_PAGES, MAX_ITEMS)?.into_items())
     }
 
     /// Create one API-only child tailnet through the verified organization endpoint.
@@ -1313,6 +1339,46 @@ mod tests {
         assert_eq!(tailnets[0].display_name, "Spurfire Test");
         token.assert_async().await;
         list.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn organization_tailnet_absence_requires_terminal_page() {
+        let mut server = Server::new_async().await;
+        let token = token_mock(&mut server, 3600, 1).await;
+        let first = server
+            .mock("GET", "/organizations/-/tailnets")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[],"nextPage":"page-2"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/organizations/-/tailnets")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "cursor".into(),
+                "page-2".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tailnets":[{"id":"late","displayName":"Late"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = TailscaleClient::new(server.url(), "client", "secret");
+
+        let tailnets = client.list_organization_tailnets().await.unwrap();
+
+        assert_eq!(
+            tailnets
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["late"]
+        );
+        token.assert_async().await;
+        first.assert_async().await;
+        second.assert_async().await;
     }
 
     #[tokio::test]

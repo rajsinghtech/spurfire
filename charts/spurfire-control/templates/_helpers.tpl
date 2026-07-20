@@ -74,10 +74,13 @@ app.kubernetes.io/part-of: spurfire
 {{- if ne .Values.config.provisioningMode "tailnet_per_lobby" -}}{{- fail "protectedAlpha requires tailnet_per_lobby" -}}{{- end -}}
 {{- if not .Values.persistence.enabled -}}{{- fail "protectedAlpha requires retained persistence" -}}{{- end -}}
 {{- if or (empty .Values.protectedAlpha.runtimeImageDigest) (empty .Values.protectedAlpha.brokerImageDigest) -}}{{- fail "protectedAlpha requires immutable runtime and broker image digests" -}}{{- end -}}
-{{- if or (empty .Values.protectedAlpha.installationId) (empty .Values.protectedAlpha.authorizedLobbyId) (empty .Values.protectedAlpha.publicOrigin) -}}{{- fail "protectedAlpha requires installation, exact lobby and public origin bindings" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.installationId) (empty .Values.protectedAlpha.authorizedLobbyId) (empty .Values.protectedAlpha.publicOrigin) (empty .Values.protectedAlpha.internalListener) -}}{{- fail "protectedAlpha requires installation, exact lobby, public origin and internal listener bindings" -}}{{- end -}}
+{{- if or (empty .Values.protectedAlpha.sourceSha) (empty .Values.protectedAlpha.provenanceSha256) (empty .Values.protectedAlpha.artifactSetSha256) (empty .Values.protectedAlpha.policyProfileSha256) -}}{{- fail "protectedAlpha requires independent source, provenance, artifact-set and policy bindings" -}}{{- end -}}
 {{- if ne (int .Values.config.maxPlayers) 2 -}}{{- fail "protectedAlpha requires an exact two-player cap" -}}{{- end -}}
 {{- if or (empty .Values.protectedAlpha.receiptSopsSecret) (empty .Values.protectedAlpha.brokerCredentialSopsSecret) (empty .Values.protectedAlpha.brokerVaultKeySopsSecret) -}}{{- fail "protectedAlpha requires separate SOPS-provisioned file mounts" -}}{{- end -}}
 {{- if or (empty .Values.protectedAlpha.runtimeTlsSecret) (empty .Values.protectedAlpha.brokerTlsSecret) (empty .Values.protectedAlpha.brokerMacSecret) (empty .Values.protectedAlpha.publicConfigMap) -}}{{- fail "protectedAlpha requires pinned mTLS, per-run MAC and public broker configuration mounts" -}}{{- end -}}
+{{- if empty .Values.protectedAlpha.kubernetesApiServerCidrs -}}{{- fail "protectedAlpha requires exact kubernetesApiServerCidrs for portable Lease API egress" -}}{{- end -}}
+{{- if lt (int .Values.terminationGracePeriodSeconds) 900 -}}{{- fail "protectedAlpha requires at least 900 seconds for bounded signal cleanup" -}}{{- end -}}
 {{- if or (not (empty .Values.tailscale.existingSecret)) (not (empty .Values.childVault.existingSecret)) -}}{{- fail "protectedAlpha credentials must use broker-only mounts, not ordinary server values" -}}{{- end -}}
 {{- end -}}
 {{- if .Values.config.allowLegacyClientAssertions -}}

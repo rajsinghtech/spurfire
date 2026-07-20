@@ -2,7 +2,7 @@
 
 By default this chart deploys one ordinary `spurfire-server` control-plane process. Gameplay remains peer-to-peer: the workload owns provider resource lifecycle, but it does not join lobby tailnets, run a Tailscale/RustScale node, relay gameplay, or act as a gameplay witness.
 
-The mutually exclusive `protectedAlpha` profile renders a one-container runtime (PID1 launcher plus measured worker process) and a separate private provider-broker pod/ClusterIP. It requires separate pinned runtime/broker digests, retained state, the named anti-rollback Lease, exact lobby/origin, pinned mTLS, and SOPS-provisioned mode-`0400` file mounts. It creates no public broker route. See [`docs/protected-alpha.md`](../../docs/protected-alpha.md).
+The mutually exclusive `protectedAlpha` profile renders a one-container runtime (PID1 launcher plus measured worker process) and a separate private provider-broker pod/ClusterIP. It requires separate pinned runtime/broker digests, source/provenance/artifact/policy bindings, retained state, the named anti-rollback Lease, exact lobby/origin/listener, exact Kubernetes API-server CIDRs, pinned mTLS, and SOPS-provisioned mode-`0400` file mounts. It creates no public broker route. See [`docs/protected-alpha.md`](../../docs/protected-alpha.md).
 
 ## Install safely
 
@@ -70,4 +70,4 @@ See [`docs/deployment.md`](../../docs/deployment.md) for artifact tags, signatur
 
 ## Alpha safety configuration contract
 
-`protectedAlpha.enabled=true` is mutually exclusive with dry run and requires dedicated-tailnet mode, two-player cap, retained runtime and broker stores, immutable runtime/broker image digests, exact installation/lobby/origin, and separately named SOPS, TLS, and per-run MAC mounts. The runtime has no provider credential environment or mounts. Only the private broker pod receives organization credential and vault-key mounts; its ClusterIP is selected only by runtime and has no HTTPRoute. The exact route must be removed after durable `Released` evidence. Rendering this profile is not the GO decision; the immutable evidence gate in `docs/protected-alpha.md` remains mandatory.
+`protectedAlpha.enabled=true` is mutually exclusive with dry run and requires dedicated-tailnet mode, two-player cap, retained runtime and broker stores, immutable runtime/broker image and supply-chain bindings, exact installation/lobby/origin/listener/API-server CIDRs, at least 900 seconds of termination grace, and separately named SOPS, TLS, and per-run MAC mounts. The runtime has no provider credential environment or mounts. Only the private broker pod receives organization credential and vault-key mounts; its ClusterIP is selected only by runtime and has no HTTPRoute. The exact route must be removed after durable `Released` evidence. Rendering this profile is not the GO decision; the immutable evidence gate in `docs/protected-alpha.md` remains mandatory.

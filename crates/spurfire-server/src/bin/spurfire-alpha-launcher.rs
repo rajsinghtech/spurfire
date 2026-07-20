@@ -1,6 +1,15 @@
 //! Protected Linux PID1 launcher with fixed measured sibling supervision.
 
 #[cfg(target_os = "linux")]
+static TERMINATE_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+extern "C" fn request_termination(_: libc::c_int) {
+    TERMINATE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     if let Err(message) = run() {
         eprintln!("protected Alpha launcher failed closed: {message}");
@@ -17,8 +26,9 @@ fn run() -> Result<(), &'static str> {
             open_fixed_sibling, seal_worker_authority, spawn_protected, ProtectedRole,
         },
         owner_key::{verifying_key, OWNER_KEY_ID},
-        verify_protected_alpha_receipt, JsonFileStore, KubernetesLeaseAuthority, LobbyStore,
-        ProtectedAlphaReceipt, ProtectedAlphaVerificationContext, ALPHA_CLEANUP_MS, ALPHA_PLAY_MS,
+        verify_protected_alpha_receipt, verify_protected_alpha_recovery_receipt, JsonFileStore,
+        KubernetesLeaseAuthority, LobbyStore, ProtectedAlphaReceipt,
+        ProtectedAlphaVerificationContext, ProtectedPhase, ALPHA_CLEANUP_MS, ALPHA_PLAY_MS,
     };
     use std::{
         collections::BTreeMap,
@@ -26,7 +36,8 @@ fn run() -> Result<(), &'static str> {
         io::Write,
         net::TcpListener,
         os::fd::OwnedFd,
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        sync::atomic::Ordering,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -66,8 +77,8 @@ fn run() -> Result<(), &'static str> {
     let broker_digest = decode(&receipt.claims.broker_sha256)?;
     let worker = open_fixed_sibling(ProtectedRole::Worker, worker_digest)
         .map_err(|_| "worker measurement failed")?;
-    let _broker = open_fixed_sibling(ProtectedRole::Broker, broker_digest)
-        .map_err(|_| "broker measurement failed")?;
+    // The credential-owning broker independently measures its own executable;
+    // measuring a runtime-image sibling here would attest the wrong process.
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -77,6 +88,7 @@ fn run() -> Result<(), &'static str> {
         .block_on(JsonFileStore::open("/var/lib/spurfire/server-state.json"))
         .map_err(|_| "state store unavailable")?;
     let binding = runtime.block_on(store.store_binding());
+    let cleanup_recovery = runtime.block_on(store.protected_alpha_recovery()).is_some();
     let namespace =
         std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
             .map_err(|_| "namespace unavailable")?;
@@ -93,6 +105,11 @@ fn run() -> Result<(), &'static str> {
     let state_bytes =
         std::fs::read("/var/lib/spurfire/server-state.json").map_err(|_| "state unavailable")?;
     let state_sha256: [u8; 32] = Sha256::digest(&state_bytes).into();
+    let pod_binding = |name: &str| -> Result<String, &'static str> {
+        std::fs::read_to_string(format!("/run/alpha-pod/{name}"))
+            .map(|value| value.trim().to_owned())
+            .map_err(|_| "deployment binding unavailable")
+    };
     let context = ProtectedAlphaVerificationContext {
         now: UnixMillis::new(
             SystemTime::now()
@@ -102,42 +119,65 @@ fn run() -> Result<(), &'static str> {
                 .try_into()
                 .map_err(|_| "clock unavailable")?,
         ),
-        source_sha: receipt.claims.source_sha.clone(),
-        runtime_image_digest: receipt.claims.runtime_image_digest.clone(),
-        broker_image_digest: receipt.claims.broker_image_digest.clone(),
+        source_sha: pod_binding("source-sha")?,
+        runtime_image_digest: pod_binding("runtime-image-digest")?,
+        broker_image_digest: pod_binding("broker-image-digest")?,
         worker_sha256: worker_digest,
         broker_sha256: broker_digest,
-        provenance_sha256: decode(&receipt.claims.provenance_sha256)?,
-        artifact_set_sha256: decode(&receipt.claims.artifact_set_sha256)?,
-        policy_profile_sha256: decode(&receipt.claims.policy_profile_sha256)?,
-        public_origin: receipt.claims.public_origin.clone(),
-        internal_listener: receipt.claims.internal_listener.clone(),
+        provenance_sha256: decode(&pod_binding("provenance-sha256")?)?,
+        artifact_set_sha256: decode(&pod_binding("artifact-set-sha256")?)?,
+        policy_profile_sha256: decode(&pod_binding("policy-profile-sha256")?)?,
+        public_origin: pod_binding("public-origin")?,
+        internal_listener: pod_binding("internal-listener")?,
         installation_id: lease.binding.installation_id.clone(),
         store_instance_id_sha256: binding.instance_id_sha256,
         canonical_state_path_sha256: binding.canonical_state_path_sha256,
-        initial_state_sha256: state_sha256,
+        initial_state_sha256: if cleanup_recovery {
+            decode(&receipt.claims.initial_state_sha256)?
+        } else {
+            state_sha256
+        },
         lease_uid: lease.uid.clone(),
-        lease_resource_version: lease.resource_version.clone(),
+        lease_resource_version: if cleanup_recovery {
+            receipt.claims.lease_resource_version.clone()
+        } else {
+            lease.resource_version.clone()
+        },
         launch_code_sha256: decode(&receipt.claims.launch_code_sha256)?,
     };
-    let qualification = verify_protected_alpha_receipt(
-        &mut receipt_bytes,
-        &BTreeMap::from([(
-            OWNER_KEY_ID.to_owned(),
-            verifying_key().map_err(|_| "compiled owner key invalid")?,
-        )]),
-        &context,
-    )
+    let keys = BTreeMap::from([(
+        OWNER_KEY_ID.to_owned(),
+        verifying_key().map_err(|_| "compiled owner key invalid")?,
+    )]);
+    let qualification = if cleanup_recovery {
+        verify_protected_alpha_recovery_receipt(&mut receipt_bytes, &keys, &context)
+    } else {
+        verify_protected_alpha_receipt(&mut receipt_bytes, &keys, &context)
+    }
     .map_err(|_| "receipt rejected")?;
-    if lease.binding.state_store_id_sha256 != binding.instance_id_sha256
-        || lease.binding.receipt_digest != qualification.receipt_digest()
-        || lease.binding.lobby_id != qualification.lobby_id()
-        || lease.binding.generation != qualification.generation()
-        || lease.binding.supervisor_epoch != qualification.initial_epoch()
-        || lease.binding.state_sha256 != state_sha256
-    {
+    let immutable_lease_matches = lease.binding.installation_id == receipt.claims.installation_id
+        && lease.binding.state_store_id_sha256 == binding.instance_id_sha256
+        && lease.binding.receipt_digest == qualification.receipt_digest()
+        && lease.binding.lobby_id == qualification.lobby_id()
+        && lease.binding.generation == qualification.generation()
+        && lease.binding.admission_play_deadline == qualification.final_io_deadline()
+        && lease.binding.cleanup_deadline == qualification.absolute_deadline();
+    let phase_matches = if cleanup_recovery {
+        lease.binding.supervisor_epoch >= qualification.initial_epoch()
+            && matches!(
+                lease.binding.phase,
+                ProtectedPhase::Admission | ProtectedPhase::CleanupOnly
+            )
+    } else {
+        lease.binding.supervisor_epoch == qualification.initial_epoch()
+            && lease.binding.state_sha256 == state_sha256
+            && lease.binding.phase == ProtectedPhase::Admission
+    };
+    if !immutable_lease_matches || !phase_matches {
         return Err("Lease binding mismatch");
     }
+    let final_io_deadline = qualification.final_io_deadline().as_millis();
+    let absolute_deadline = qualification.absolute_deadline().as_millis();
     let sealed = Zeroizing::new(
         seal_worker_authority(
             qualification,
@@ -169,7 +209,25 @@ fn run() -> Result<(), &'static str> {
         )
         .and_then(|()| launcher_control.write_all(&sealed))
         .map_err(|_| "authority transfer failed")?;
-    let started = Instant::now();
+    // PID1 must turn Kubernetes termination into cleanup, rather than relying
+    // on PDEATHSIG to kill the only process capable of requesting it.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_termination as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            request_termination as *const () as libc::sighandler_t,
+        );
+    }
+    let wall_now = || -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |value| {
+                value.as_millis().try_into().unwrap_or(u64::MAX)
+            })
+    };
     let mut cleanup_sent = false;
     loop {
         if child
@@ -193,13 +251,17 @@ fn run() -> Result<(), &'static str> {
             let _ = deny.wait();
             return Err("credential-free worker exited");
         }
-        if !cleanup_sent && started.elapsed() >= Duration::from_millis(ALPHA_PLAY_MS) {
+        if !cleanup_sent
+            && (cleanup_recovery
+                || TERMINATE_REQUESTED.load(Ordering::SeqCst)
+                || wall_now() >= final_io_deadline)
+        {
             launcher_control
                 .write_all(b"C")
                 .map_err(|_| "cleanup transition failed")?;
             cleanup_sent = true;
         }
-        if started.elapsed() >= Duration::from_millis(ALPHA_PLAY_MS + ALPHA_CLEANUP_MS) {
+        if wall_now() >= absolute_deadline {
             let process_group = -(i32::try_from(child.id()).map_err(|_| "worker pid invalid")?);
             unsafe {
                 libc::kill(process_group, libc::SIGKILL);

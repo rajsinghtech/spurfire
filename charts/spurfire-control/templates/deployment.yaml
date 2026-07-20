@@ -25,6 +25,16 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.protectedAlpha.enabled }}
+        alpha.spurfire.dev/runtime-image-digest: {{ .Values.protectedAlpha.runtimeImageDigest | quote }}
+        alpha.spurfire.dev/broker-image-digest: {{ .Values.protectedAlpha.brokerImageDigest | quote }}
+        alpha.spurfire.dev/source-sha: {{ .Values.protectedAlpha.sourceSha | quote }}
+        alpha.spurfire.dev/provenance-sha256: {{ .Values.protectedAlpha.provenanceSha256 | quote }}
+        alpha.spurfire.dev/artifact-set-sha256: {{ .Values.protectedAlpha.artifactSetSha256 | quote }}
+        alpha.spurfire.dev/policy-profile-sha256: {{ .Values.protectedAlpha.policyProfileSha256 | quote }}
+        alpha.spurfire.dev/public-origin: {{ .Values.protectedAlpha.publicOrigin | quote }}
+        alpha.spurfire.dev/internal-listener: {{ .Values.protectedAlpha.internalListener | quote }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -67,7 +77,23 @@ spec:
             - { name: runtime-tls, mountPath: /run/runtime-tls, readOnly: true }
             - { name: broker-mac, mountPath: /run/broker-mac, readOnly: true }
             - { name: alpha-config, mountPath: /run/alpha-config, readOnly: true }
+            - { name: alpha-pod-bindings, mountPath: /run/alpha-pod, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
         {{- else }}
@@ -173,6 +199,34 @@ spec:
           configMap:
             name: {{ .Values.protectedAlpha.publicConfigMap | quote }}
             defaultMode: 0400
+        - name: alpha-pod-bindings
+          downwardAPI:
+            defaultMode: 0400
+            items:
+              - path: runtime-image-digest
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/runtime-image-digest']"
+              - path: broker-image-digest
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/broker-image-digest']"
+              - path: source-sha
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/source-sha']"
+              - path: provenance-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/provenance-sha256']"
+              - path: artifact-set-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/artifact-set-sha256']"
+              - path: policy-profile-sha256
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/policy-profile-sha256']"
+              - path: public-origin
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/public-origin']"
+              - path: internal-listener
+                fieldRef:
+                  fieldPath: "metadata.annotations['alpha.spurfire.dev/internal-listener']"
         {{- end }}
         {{ if .Values.childVault.existingSecret }}
         - name: child-vault-key

@@ -7,7 +7,9 @@ metadata:
     {{- include "spurfire-control.labels" . | nindent 4 }}
 automountServiceAccountToken: true
 ---
-# The object is installed before workloads. No workload has delete/list/watch.
+# The object is installed before workloads. No workload has delete/list/watch;
+# the credential-free runtime can only read, while the separately attested
+# credential-owning broker alone may perform exact compare-and-swap updates.
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
@@ -24,6 +26,18 @@ spec:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  name: {{ include "spurfire-control.fullname" . }}-lease-read
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ .Values.protectedAlpha.leaseName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   name: {{ include "spurfire-control.fullname" . }}-lease-cas
   labels:
     {{- include "spurfire-control.labels" . | nindent 4 }}
@@ -31,12 +45,12 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: [{{ .Values.protectedAlpha.leaseName | quote }}]
-    verbs: ["get", "create", "update", "patch"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "spurfire-control.fullname" . }}-runtime-lease-cas
+  name: {{ include "spurfire-control.fullname" . }}-runtime-lease-read
 subjects:
   - kind: ServiceAccount
     name: {{ include "spurfire-control.serviceAccountName" . }}
@@ -44,7 +58,7 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "spurfire-control.fullname" . }}-lease-cas
+  name: {{ include "spurfire-control.fullname" . }}-lease-read
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

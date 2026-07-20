@@ -7,8 +7,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use spurfire_server::{
         alpha_execution::{open_worker_authority, reject_worker_credential_environment},
         build_protected_alpha_public_router, build_router, AppState, BrokerFence, BrokerProvider,
-        Config, DryRunProvider, InMemoryStore, JsonFileStore, LobbyStore,
-        MtlsBrokerProviderTransport, NetworkProvider,
+        BrokerProviderTransport, CleanupOnlyBrokerTransport, Config, DryRunProvider, InMemoryStore,
+        JsonFileStore, LobbyStore, MtlsBrokerProviderTransport, NetworkProvider,
     };
     use std::{
         io::{ErrorKind, Read},
@@ -84,8 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fence,
         lease,
     )?);
+    let cleanup_transport = CleanupOnlyBrokerTransport(Arc::clone(&transport));
+    let broker_transport: Arc<dyn BrokerProviderTransport> = transport.clone();
     let provider: Arc<dyn NetworkProvider> = Arc::new(BrokerProvider::new(
-        transport,
+        broker_transport,
         qualification.lobby_id(),
         qualification.generation(),
     ));
@@ -100,9 +102,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store: Arc<dyn LobbyStore> = Arc::new(JsonFileStore::open(&config.state_path).await?);
     let protected_lobby_id = qualification.lobby_id();
     let cleanup_store = Arc::clone(&store);
-    let state = AppState::new_protected_alpha(config, store, provider, qualification).await?;
+    let recovering = store.protected_alpha_recovery().await.is_some();
+    let state = if recovering {
+        AppState::new_protected_alpha_recovery(config, store, provider, qualification).await?
+    } else {
+        AppState::new_protected_alpha(config, store, provider, qualification).await?
+    };
     if !state.reconcile_startup().await {
         return Err("protected startup reconciliation failed".into());
+    }
+    if recovering {
+        state.begin_protected_cleanup().await?;
     }
     control.set_nonblocking(true)?;
     let mut cleanup_signal = tokio::net::UnixStream::from_std(control)?;
@@ -116,11 +126,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if cleanup_store
                     .get(protected_lobby_id)
                     .await
-                    .is_some_and(|lobby| {
+                    .is_none_or(|lobby| {
                         let snapshot = lobby.snapshot();
                         snapshot.state == spurfire_protocol::LobbyState::Destroyed
                             && !snapshot.cleanup_pending
                     })
+                    && cleanup_transport.release_lease().await.is_ok()
                 {
                     std::process::exit(0);
                 }

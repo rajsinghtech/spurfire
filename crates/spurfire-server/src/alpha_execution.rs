@@ -10,12 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::fs::OpenOptions;
-use std::{fs::File, path::Path, process::Child};
+#[cfg(unix)]
+use std::io;
 #[cfg(target_os = "linux")]
-use std::{
-    io,
-    process::{Command, Stdio},
-};
+use std::process::{Command, Stdio};
+use std::{fs::File, path::Path, process::Child};
 use thiserror::Error;
 
 use crate::{lease_authority::LeaseSnapshot, rehearsal::ProtectedAlphaQualification};
@@ -121,7 +120,7 @@ where
 /// Verified open artifact. The path cannot be substituted after verification;
 /// Linux execution uses `/proc/self/fd/<fd>` for the same open inode.
 pub struct VerifiedArtifact {
-    #[cfg_attr(not(unix), allow(dead_code))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     file: File,
     role: ProtectedRole,
 }
@@ -145,8 +144,11 @@ pub fn open_fixed_sibling(
     let parent = current.parent().ok_or(LauncherError::UnsafePath)?;
     let parent_meta = std::fs::symlink_metadata(parent).map_err(|_| LauncherError::UnsafePath)?;
     let uid = rustix::process::getuid().as_raw();
+    // Container artifacts are installed root:root and executed by UID 10001.
+    // Accept either root or the runtime UID as owner, but never an artifact
+    // directory writable by the runtime's group/other identities.
     if parent_meta.file_type().is_symlink()
-        || parent_meta.uid() != uid
+        || (parent_meta.uid() != 0 && parent_meta.uid() != uid)
         || parent_meta.permissions().mode() & 0o022 != 0
     {
         return Err(LauncherError::UnsafePath);
@@ -158,7 +160,10 @@ pub fn open_fixed_sibling(
         .open(&path)
         .map_err(|_| LauncherError::UnsafePath)?;
     let meta = file.metadata().map_err(|_| LauncherError::UnsafePath)?;
-    if !meta.is_file() || meta.uid() != uid || meta.permissions().mode() & 0o022 != 0 {
+    if !meta.is_file()
+        || (meta.uid() != 0 && meta.uid() != uid)
+        || meta.permissions().mode() & 0o022 != 0
+    {
         return Err(LauncherError::UnsafePath);
     }
     let mut reader = &file;

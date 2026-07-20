@@ -20,13 +20,18 @@ spec:
               app.kubernetes.io/component: provider-broker
       ports:
         - { protocol: TCP, port: 9443 }
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    # DNS is commonly node-local rather than a kube-system pod. Port-only DNS
+    # is portable; TLS still pins every resolved application peer.
+    - ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # Services are virtual IPs and managed API servers may be external, so pod
+    # selectors cannot describe this mandatory destination.
+    - to:
+        {{- range .Values.protectedAlpha.kubernetesApiServerCidrs }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+      ports:
         - { protocol: TCP, port: 443 }
 ---
 apiVersion: networking.k8s.io/v1
@@ -48,13 +53,14 @@ spec:
       ports:
         - { protocol: TCP, port: 9443 }
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    - ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    - to:
+        {{- range .Values.protectedAlpha.kubernetesApiServerCidrs }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+      ports:
         - { protocol: TCP, port: 443 }
     # Broker is the sole workload with external provider HTTPS egress.
     - to:

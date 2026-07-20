@@ -260,7 +260,20 @@ pub fn verify_protected_alpha_receipt(
     trusted_keys: &BTreeMap<String, VerifyingKey>,
     context: &ProtectedAlphaVerificationContext,
 ) -> Result<ProtectedAlphaQualification, RehearsalReceiptError> {
-    let result = verify_protected_alpha_inner(receipt_bytes, trusted_keys, context);
+    let result = verify_protected_alpha_inner(receipt_bytes, trusted_keys, context, false);
+    receipt_bytes.zeroize();
+    result
+}
+
+/// Verifies the same owner-signed bindings for cleanup-only restart. Receipt
+/// issuance expiry and the play deadline intentionally do not revoke cleanup;
+/// the signed absolute deadline remains an immutable upper bound.
+pub fn verify_protected_alpha_recovery_receipt(
+    receipt_bytes: &mut [u8],
+    trusted_keys: &BTreeMap<String, VerifyingKey>,
+    context: &ProtectedAlphaVerificationContext,
+) -> Result<ProtectedAlphaQualification, RehearsalReceiptError> {
+    let result = verify_protected_alpha_inner(receipt_bytes, trusted_keys, context, true);
     receipt_bytes.zeroize();
     result
 }
@@ -269,6 +282,7 @@ fn verify_protected_alpha_inner(
     receipt_bytes: &[u8],
     trusted_keys: &BTreeMap<String, VerifyingKey>,
     context: &ProtectedAlphaVerificationContext,
+    cleanup_recovery: bool,
 ) -> Result<ProtectedAlphaQualification, RehearsalReceiptError> {
     let receipt: ProtectedAlphaReceipt =
         serde_json::from_slice(receipt_bytes).map_err(|_| RehearsalReceiptError::Malformed)?;
@@ -287,10 +301,11 @@ fn verify_protected_alpha_inner(
         .checked_duration_since(claims.issued_at)
         .ok_or(RehearsalReceiptError::InvalidLifetime)?;
     if context.now < claims.issued_at
-        || context.now >= claims.expires_at
+        || (!cleanup_recovery && context.now >= claims.expires_at)
         || lifetime == 0
         || lifetime > MAX_RECEIPT_LIFETIME.as_millis() as u64
-        || claims.final_io_deadline <= context.now
+        || (!cleanup_recovery && claims.final_io_deadline <= context.now)
+        || (cleanup_recovery && claims.absolute_deadline <= context.now)
         || claims.final_io_deadline != claims.issued_at.saturating_add(ALPHA_PLAY_MS)
         || claims.absolute_deadline != claims.final_io_deadline.saturating_add(ALPHA_CLEANUP_MS)
     {
@@ -677,6 +692,21 @@ mod tests {
             assert!(verify_protected_alpha_receipt(&mut bytes, &keys, &changed).is_err());
             assert!(bytes.iter().all(|byte| *byte == 0));
         }
+    }
+
+    #[test]
+    fn protected_alpha_recovery_survives_play_and_issuance_expiry_only_until_absolute_deadline() {
+        let (receipt, keys, mut context) = alpha_fixture(2_000_000);
+        context.now = receipt.claims.final_io_deadline.saturating_add(1);
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        assert!(verify_protected_alpha_receipt(&mut bytes, &keys, &context).is_err());
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        assert!(verify_protected_alpha_recovery_receipt(&mut bytes, &keys, &context).is_ok());
+        assert!(bytes.iter().all(|byte| *byte == 0));
+
+        context.now = receipt.claims.absolute_deadline;
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        assert!(verify_protected_alpha_recovery_receipt(&mut bytes, &keys, &context).is_err());
     }
 
     #[test]
