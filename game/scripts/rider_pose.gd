@@ -15,6 +15,8 @@ var _remount_from := Transform3D.IDENTITY
 var _remount_elapsed := -1.0
 var _visual_velocity := Vector3.ZERO
 var _has_rider_raw := false
+var _yaw_tick := -1
+var _yaw_step_spent := 0.0
 var _cape: MeshInstance3D
 var _hat: Node3D
 
@@ -54,6 +56,7 @@ func _process(delta: float) -> void:
 			top_level = false
 			transform = Transform3D.IDENTITY
 			_remount_elapsed = -1.0
+			_reset_yaw_limiter()
 			reset_physics_interpolation()
 		_last_global = global_transform
 		return
@@ -93,15 +96,41 @@ func _process(delta: float) -> void:
 			-PI,
 			PI
 		)
-		var max_step := deg_to_rad(maximum_yaw_degrees_per_second) * delta
-		rotation.y = rotate_toward(rotation.y, wanted_local_yaw, max_step)
+		_apply_limited_yaw(wanted_local_yaw, delta)
 	else:
-		rotation.y = rotate_toward(
-			rotation.y,
-			0.0,
-			deg_to_rad(maximum_yaw_degrees_per_second) * delta
-		)
+		_apply_limited_yaw(0.0, delta)
 	_last_global = global_transform
+
+func _apply_limited_yaw(wanted_local_yaw: float, delta: float) -> void:
+	var tick := Engine.get_physics_frames()
+	if tick != _yaw_tick:
+		_yaw_tick = tick
+		_yaw_step_spent = 0.0
+	var tick_budget := (
+		deg_to_rad(maximum_yaw_degrees_per_second)
+		/ maxf(float(Engine.physics_ticks_per_second), 1.0)
+	)
+	var applied := limited_yaw_change(
+		rotation.y,
+		wanted_local_yaw,
+		delta,
+		maximum_yaw_degrees_per_second,
+		tick_budget - _yaw_step_spent
+	)
+	rotation.y = wrapf(rotation.y + applied, -PI, PI)
+	_yaw_step_spent += absf(applied)
+
+static func limited_yaw_change(
+	current_yaw: float,
+	wanted_yaw: float,
+	delta: float,
+	maximum_degrees_per_second: float,
+	tick_budget_remaining: float
+) -> float:
+	var frame_budget := deg_to_rad(maxf(maximum_degrees_per_second, 0.0)) * maxf(delta, 0.0)
+	var step := minf(frame_budget, maxf(tick_budget_remaining, 0.0))
+	var shortest_arc := wrapf(wanted_yaw - current_yaw, -PI, PI)
+	return clampf(shortest_arc, -step, step)
 
 func _build_frontier_silhouette() -> void:
 	var cream := StandardMaterial3D.new()
@@ -141,6 +170,7 @@ func _build_frontier_silhouette() -> void:
 
 func reset_pose_interpolation() -> void:
 	_remount_elapsed = -1.0
+	_reset_yaw_limiter()
 	top_level = false
 	transform = Transform3D.IDENTITY
 	_last_global = global_transform
@@ -148,6 +178,10 @@ func reset_pose_interpolation() -> void:
 		_last_rider_raw = rider.global_transform
 		_has_rider_raw = true
 	reset_physics_interpolation()
+
+func _reset_yaw_limiter() -> void:
+	_yaw_tick = -1
+	_yaw_step_spent = 0.0
 
 func _is_teleport(raw_rider: Transform3D) -> bool:
 	if not _has_rider_raw:
@@ -170,6 +204,7 @@ func _on_stance_changed(_previous_id: int, current_id: int, _tick: int, _dive_id
 	if current_id == 1:
 		_remount_from = _last_global
 		_remount_elapsed = 0.0
+		_reset_yaw_limiter()
 		top_level = true
 		global_transform = _remount_from
 		reset_physics_interpolation()
