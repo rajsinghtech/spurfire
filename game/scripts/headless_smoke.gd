@@ -480,6 +480,14 @@ func _check_peer_session(failures: Array[String]) -> void:
 	]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks M2 multiplayer method %s" % method)
+	for method in [
+		"activate_m3_wire", "is_m3_wire_active", "make_m3_actor_input",
+		"make_m3_actor_snapshot", "make_m3_actor_loadout", "m3_checkpoint_json",
+		"poll_m3_migration", "advance_m3_actor", "record_m3_horse_pose",
+		"resolve_m3_shot_command",
+	]:
+		if not peer_session.has_method(method):
+			failures.append("PeerSession lacks M3 multiplayer method %s" % method)
 	peer_session.call("set_insecure_demo_mode", true)
 	var configured := bool(peer_session.call(
 		"configure_session",
@@ -522,6 +530,68 @@ func _check_peer_session(failures: Array[String]) -> void:
 		var reserved_buttons := peer_session.call("make_rider_input", 4, 0, 0, 4) as PackedByteArray
 		if not reserved_buttons.is_empty():
 			failures.append("PeerSession accepted nonzero reserved rider-input bits")
+		if not bool(peer_session.call(
+			"configure_session",
+			"00000000-0000-4000-8000-000000000001",
+			"00000000-0000-4000-8000-000000000002",
+			"00000000-0000-4000-8000-000000000002",
+			0
+		)):
+			failures.append("PeerSession could not reset before M3 activation")
+		var loadouts := JSON.stringify([{
+			"player_id": "00000000-0000-4000-8000-000000000002",
+			"horse_class": "courser",
+			"weapon_id": "dustwalker",
+		}])
+		if not bool(peer_session.call("activate_m3_wire", loadouts)):
+			failures.append("PeerSession rejected an exact M3 roster/loadout graph")
+		elif not bool(peer_session.call("is_m3_wire_active")):
+			failures.append("PeerSession did not report atomic M3 wire activation")
+		elif bool(peer_session.call("activate_m3_wire", loadouts)):
+			failures.append("PeerSession allowed M3 loadout reconfiguration")
+		var actor_tick := peer_session.call(
+			"advance_m3_actor",
+			"00000000-0000-4000-8000-000000000002", 10, Vector2.ZERO,
+			false, false, false, false, Vector3.ZERO, Vector3.ZERO, false
+		) as Dictionary
+		if not bool(actor_tick.get("advanced", false)):
+			failures.append("PeerSession did not advance its private composed M3 actor")
+		elif not bool(peer_session.call(
+			"record_authority_rider_snapshot",
+			"00000000-0000-4000-8000-000000000002", 10,
+			Vector3(0, 1, 0), Vector3.ZERO, Vector3.ZERO, PackedInt64Array([1, -1])
+		)):
+			failures.append("PeerSession did not record the M3 rider rewind pose")
+		elif not bool(peer_session.call(
+			"record_m3_horse_pose",
+			"00000000-0000-4000-8000-000000000002", 10,
+			Vector3(0, 1, -2), Vector3(0, 0, -1), Vector3(0, 2, -3)
+		)):
+			failures.append("PeerSession did not record the M3 horse rewind pose")
+		var combat_checkpoint := JSON.stringify({
+			"source_epoch": 1,
+			"tick": 10,
+			"riders": [{
+				"rider_player_id": "00000000-0000-4000-8000-000000000002",
+				"position_mm": [0, 0, 0],
+				"velocity_mmps": [0, 0, 0],
+				"yaw_millidegrees": 0,
+				"stance": 1,
+				"health": 100,
+				"weapon_id": 0,
+				"ammo_magazine": 30,
+				"ammo_reserve": 120,
+				"last_input_tick": 10,
+				"last_shot_tick": null,
+				"last_command_tick": null,
+				"shot_index": 0,
+			}],
+			"resolved_shots": [],
+		})
+		if str(peer_session.call("m3_checkpoint_json", combat_checkpoint)).is_empty():
+			failures.append("PeerSession could not bind combat and private M3 checkpoint state")
+		if not (peer_session.call("make_rider_input", 11, 0, 0, 0) as PackedByteArray).is_empty():
+			failures.append("PeerSession emitted legacy wire input after M3 activation")
 	peer_session.free()
 
 func _check_m3_gameplay_controller(failures: Array[String]) -> void:

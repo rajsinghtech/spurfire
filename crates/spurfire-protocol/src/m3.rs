@@ -1234,6 +1234,20 @@ pub struct ActorGameplayCheckpointV2 {
     actor: ActorGameplayKernel,
 }
 
+impl ActorGameplayCheckpointV2 {
+    /// Exact shared actor tick captured by the migration row.
+    #[must_use]
+    pub const fn current_tick(&self) -> Option<SimulationTick> {
+        self.actor.current_tick
+    }
+
+    /// Derived mounted/on-foot mode for cross-plane checkpoint validation.
+    #[must_use]
+    pub fn mode(&self) -> ActorM3Mode {
+        self.actor.mode()
+    }
+}
+
 #[derive(Deserialize)]
 struct RawActorGameplayCheckpointV2 {
     #[serde(rename = "v", alias = "wire_version")]

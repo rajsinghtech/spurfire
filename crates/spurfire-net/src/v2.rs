@@ -516,6 +516,19 @@ impl M3SecureSession {
         current_node_key: Option<NodeKey>,
         now_ms: u64,
     ) -> AcceptOutcome {
+        self.accept_with_source_validated(envelope, source, current_node_key, now_ms, |_| true)
+    }
+
+    /// Secure receive gate with a final application checkpoint preflight.
+    /// The callback runs before replay, authority, or installed state mutates.
+    pub fn accept_with_source_validated(
+        &mut self,
+        envelope: &M3EnvelopeV2,
+        source: SocketAddr,
+        current_node_key: Option<NodeKey>,
+        now_ms: u64,
+        mut checkpoint_is_installable: impl FnMut(&M3MatchCheckpointV2) -> bool,
+    ) -> AcceptOutcome {
         if envelope.wire_version != M3_WIRE_VERSION {
             return AcceptOutcome::InvalidPayloadRole;
         }
@@ -565,10 +578,15 @@ impl M3SecureSession {
         if validate_payload(&envelope.payload).is_err() {
             return AcceptOutcome::InvalidPayloadSubject;
         }
-        self.accept_authenticated(envelope, now_ms)
+        self.accept_authenticated(envelope, now_ms, &mut checkpoint_is_installable)
     }
 
-    fn accept_authenticated(&mut self, envelope: &M3EnvelopeV2, now_ms: u64) -> AcceptOutcome {
+    fn accept_authenticated(
+        &mut self,
+        envelope: &M3EnvelopeV2,
+        now_ms: u64,
+        checkpoint_is_installable: &mut impl FnMut(&M3MatchCheckpointV2) -> bool,
+    ) -> AcceptOutcome {
         if envelope.lobby_id != self.state.lobby_id {
             return AcceptOutcome::WrongLobby;
         }
@@ -579,7 +597,7 @@ impl M3SecureSession {
             return AcceptOutcome::UnknownSender;
         }
         if matches!(envelope.payload, M3PeerPayloadV2::MigrationFragment { .. }) {
-            return self.accept_migration_fragment(envelope, now_ms);
+            return self.accept_migration_fragment(envelope, now_ms, checkpoint_is_installable);
         }
         let authority_claim = matches!(envelope.payload, M3PeerPayloadV2::Authority { .. });
         if envelope.authority_epoch != self.state.authority_epoch && !authority_claim {
@@ -666,7 +684,12 @@ impl M3SecureSession {
         AcceptOutcome::Accepted
     }
 
-    fn accept_migration_fragment(&mut self, envelope: &M3EnvelopeV2, now_ms: u64) -> AcceptOutcome {
+    fn accept_migration_fragment(
+        &mut self,
+        envelope: &M3EnvelopeV2,
+        now_ms: u64,
+        checkpoint_is_installable: &mut impl FnMut(&M3MatchCheckpointV2) -> bool,
+    ) -> AcceptOutcome {
         let M3PeerPayloadV2::MigrationFragment {
             authority,
             epoch,
@@ -744,6 +767,9 @@ impl M3SecureSession {
                 .state
                 .authority_claim_is_coherent(envelope.sender, authority, epoch, now_ms)
         {
+            return AcceptOutcome::InvalidCheckpoint;
+        }
+        if !checkpoint_is_installable(&checkpoint) {
             return AcceptOutcome::InvalidCheckpoint;
         }
         let sequences = pending
@@ -1140,7 +1166,8 @@ mod tests {
     use super::*;
     use crate::{MatchCheckpoint, RiderCheckpoint};
     use spurfire_protocol::{
-        M3AuthorityBank, RiderStance, RosterHash, RosterManifestEntry, SessionSignature,
+        ActorM3TickInput, M3AuthorityBank, OnFootTickInput, QuantizedOrigin, RiderStance,
+        RosterHash, RosterManifestEntry, SessionSignature,
     };
 
     fn lobby() -> LobbyId {
@@ -1201,6 +1228,28 @@ mod tests {
                 EntityId(22 + u64::try_from(index).unwrap()),
                 HorseVitalityClass::Courser,
             ));
+        }
+        let tick = SimulationTick::new(10);
+        for player_id in players.iter().copied() {
+            gameplay
+                .advance_actor(
+                    player_id,
+                    ActorM3TickInput {
+                        tick,
+                        on_foot: OnFootTickInput {
+                            tick,
+                            move_direction: None,
+                            sprint_pressed: false,
+                            crouch_pressed: false,
+                            reload_active: false,
+                        },
+                        interact_pressed: false,
+                        rider_position: QuantizedOrigin::default(),
+                        return_horse_position: QuantizedOrigin::default(),
+                        return_horse_moving: false,
+                    },
+                )
+                .unwrap();
         }
         M3MatchCheckpointV2 {
             wire_version: M3_WIRE_VERSION,
@@ -1536,5 +1585,30 @@ mod tests {
         assert_eq!(receiver.installed_checkpoint(), Some(&checkpoint));
         assert_eq!(receiver.take_installed_checkpoint(), Some(checkpoint));
         assert!(receiver.installed_checkpoint().is_none());
+
+        let mut rejected = secure_session(player(3));
+        assert_eq!(
+            rejected.accept_with_source(&heartbeat, source(2), None, 2_999),
+            AcceptOutcome::Accepted
+        );
+        for envelope in &envelopes[..envelopes.len() - 1] {
+            assert_eq!(
+                rejected.accept_with_source_validated(envelope, source(2), None, 3_000, |_| false,),
+                AcceptOutcome::PendingMigration
+            );
+        }
+        assert_eq!(
+            rejected.accept_with_source_validated(
+                envelopes.last().unwrap(),
+                source(2),
+                None,
+                3_000,
+                |_| false,
+            ),
+            AcceptOutcome::InvalidCheckpoint
+        );
+        assert_eq!(rejected.state().authority(), player(1));
+        assert_eq!(rejected.state().authority_epoch(), 1);
+        assert!(rejected.installed_checkpoint().is_none());
     }
 }

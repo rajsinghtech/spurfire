@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     canonical_envelope_digest, canonical_manifest_digest, LobbyId, M3AuthorityCheckpointV2,
     NodeKey, PlayerId, RiderStance, RosterHash, RosterManifest, SessionBinding,
-    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult, WeaponId,
-    WireVersion, CURRENT_WIRE_VERSION, M3_WIRE_VERSION,
+    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
+    SimulationTick, WeaponId, WireVersion, CURRENT_WIRE_VERSION, M3_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -158,18 +158,36 @@ impl M3MatchCheckpointV2 {
             || !self.combat.is_bounded_and_canonical()
             || self.gameplay.actors().is_empty()
             || self.gameplay.actors().len() != self.combat.riders.len()
+            || self
+                .gameplay
+                .actors()
+                .iter()
+                .any(|row| row.actor.current_tick() != Some(SimulationTick::new(self.combat.tick)))
         {
             return false;
         }
         self.combat
             .riders
             .iter()
-            .map(|rider| rider.rider_player_id)
-            .eq(self
-                .gameplay
-                .actors()
-                .iter()
-                .map(|actor| actor.rider_player_id))
+            .zip(self.gameplay.actors())
+            .all(|(rider, actor)| {
+                rider.rider_player_id == actor.rider_player_id
+                    && match actor.actor.mode() {
+                        spurfire_protocol::ActorM3Mode::Mounted => matches!(
+                            rider.stance,
+                            RiderStance::Mounted
+                                | RiderStance::MountedAirborne
+                                | RiderStance::SaddleDiveAirborne
+                                | RiderStance::LandingProne
+                                | RiderStance::LandingRecovery
+                        ),
+                        spurfire_protocol::ActorM3Mode::SpookStunned
+                        | spurfire_protocol::ActorM3Mode::OnFoot
+                        | spurfire_protocol::ActorM3Mode::ReturningHorse => {
+                            rider.stance == RiderStance::OnFootStanding
+                        }
+                    }
+            })
     }
 }
 
@@ -988,7 +1006,10 @@ pub fn canonical_payload_bytes(payload: &PeerPayload) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spurfire_protocol::{EntityId, HorseVitalityClass, M3AuthorityBank};
+    use spurfire_protocol::{
+        ActorM3TickInput, EntityId, HorseVitalityClass, M3AuthorityBank, OnFootTickInput,
+        QuantizedOrigin,
+    };
 
     fn lobby() -> LobbyId {
         LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap()
@@ -1018,6 +1039,28 @@ mod tests {
         let mut gameplay = M3AuthorityBank::new(3);
         assert!(gameplay.register_actor(player(1), EntityId(201), HorseVitalityClass::Courser,));
         assert!(gameplay.register_actor(player(2), EntityId(202), HorseVitalityClass::Warhorse,));
+        let tick = SimulationTick::new(10);
+        for player_id in [player(1), player(2)] {
+            gameplay
+                .advance_actor(
+                    player_id,
+                    ActorM3TickInput {
+                        tick,
+                        on_foot: OnFootTickInput {
+                            tick,
+                            move_direction: None,
+                            sprint_pressed: false,
+                            crouch_pressed: false,
+                            reload_active: false,
+                        },
+                        interact_pressed: false,
+                        rider_position: QuantizedOrigin::default(),
+                        return_horse_position: QuantizedOrigin::default(),
+                        return_horse_moving: false,
+                    },
+                )
+                .unwrap();
+        }
         let rider = |rider_player_id| RiderCheckpoint {
             rider_player_id,
             position_mm: [0; 3],
@@ -1056,6 +1099,12 @@ mod tests {
         let mut wrong_order = checkpoint.clone();
         wrong_order.combat.riders.swap(0, 1);
         assert!(!wrong_order.is_bounded_and_canonical());
+        let mut wrong_tick = checkpoint.clone();
+        wrong_tick.combat.tick = 11;
+        assert!(!wrong_tick.is_bounded_and_canonical());
+        let mut wrong_stance = checkpoint.clone();
+        wrong_stance.combat.riders[0].stance = RiderStance::Unknown(0);
+        assert!(!wrong_stance.is_bounded_and_canonical());
         let mut zero_sequence = checkpoint;
         zero_sequence.next_horse_damage_sequence = 0;
         assert!(!zero_sequence.is_bounded_and_canonical());

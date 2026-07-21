@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use spurfire_protocol::NodeKey;
 
-use crate::{decode, encode, CodecError, Envelope};
+use crate::{decode, encode, CodecError, Envelope, MAX_DATAGRAM_BYTES};
 
 #[derive(Debug, Error)]
 pub enum RustScaleTransportError {
@@ -144,8 +144,21 @@ impl RustScalePeer {
         destination: SocketAddr,
     ) -> Result<(), RustScaleTransportError> {
         let bytes = encode(envelope)?;
+        self.send_datagram(&bytes, destination).await
+    }
+
+    /// Carries one already validated Spurfire wire datagram without imposing
+    /// a wire-major interpretation at the transport layer.
+    pub async fn send_datagram(
+        &self,
+        bytes: &[u8],
+        destination: SocketAddr,
+    ) -> Result<(), RustScaleTransportError> {
+        if bytes.len() > MAX_DATAGRAM_BYTES {
+            return Err(CodecError::TooLarge.into());
+        }
         self.socket
-            .send_to(&bytes, destination)
+            .send_to(bytes, destination)
             .await
             .map_err(|error| RustScaleTransportError::Netstack(error.to_string()))
     }
@@ -154,11 +167,23 @@ impl RustScalePeer {
         &mut self,
         wait: Duration,
     ) -> Result<(Envelope, SocketAddr), RustScaleTransportError> {
+        let (bytes, source) = self.recv_datagram(wait).await?;
+        Ok((decode(&bytes)?, source))
+    }
+
+    /// Receives one bounded opaque datagram for the active application codec.
+    pub async fn recv_datagram(
+        &mut self,
+        wait: Duration,
+    ) -> Result<(Vec<u8>, SocketAddr), RustScaleTransportError> {
         let (bytes, source) = timeout(wait, self.socket.recv_from())
             .await
             .map_err(|_| RustScaleTransportError::Timeout)?
             .map_err(|error| RustScaleTransportError::Netstack(error.to_string()))?;
-        Ok((decode(&bytes)?, source))
+        if bytes.len() > MAX_DATAGRAM_BYTES {
+            return Err(CodecError::TooLarge.into());
+        }
+        Ok((bytes.to_vec(), source))
     }
 
     /// Close the embedded node. RustScale may ask the caller to retry while

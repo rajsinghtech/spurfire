@@ -193,10 +193,14 @@ bounded loadouts, mounted/on-foot input, complete actor/horse snapshots, hash-bo
 migration fragments, and fixed-layout signing bytes without changing the active 1.2 transport.
 `M3SecureSession` now applies exact-roster signatures, endpoint identity, replay/role checks, and
 atomic out-of-order checkpoint assembly; composed combat restoration validates the complete
-rider/horse target graph before installation. M3 remains incomplete until the
+rider/horse target graph before installation. `PeerSession` can now atomically activate that v2
+owner from an exact roster/loadout graph, keeps the RustScale worker wire-opaque, advances and
+rewinds rider/horse state through `M3CombatAuthority`, and preflights combined migration state
+before authority mutation. Wire 1.2 remains the default until the live lobby flow selects v2. M3
+remains incomplete until the
 paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
-scene adapter, remote horse presentation, atomic `PeerSession` wire-v2 activation, and playtest
-instrumentation consume this state end to end.
+scene activation, remote horse presentation, and playtest instrumentation consume this state end
+to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

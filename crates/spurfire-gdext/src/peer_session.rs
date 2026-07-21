@@ -13,16 +13,22 @@ use godot::classes::{INode, Node};
 use godot::prelude::*;
 use sha2::{Digest, Sha256};
 use spurfire_net::{
-    decode, encode, rustscale::RustScalePeer, AcceptOutcome, MatchCheckpoint, PeerPayload,
-    SecureSession, SessionState,
+    decode, encode,
+    rustscale::RustScalePeer,
+    v2::{
+        decode_m3, encode_m3, fragment_m3_checkpoint, M3ActorInput, M3ActorLoadout,
+        M3ActorSnapshot, M3PeerPayloadV2, M3SecureSession,
+    },
+    AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, CombatAuthority, CombatGait, DiveId, EntityId, LobbyId,
-    LobbySessionProjection, NodeKey, PlayerId, QuantizedOrigin,
-    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
-    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
-    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
-    WeaponId,
+    canonical_keyreg_digest, ActorM3TickInput, CombatAuthority, CombatGait, DiveId, EntityId,
+    HorseVitalityClass, LobbyId, LobbySessionProjection, M3AuthorityBank, M3AuthorityShot,
+    M3CombatAuthority, M3HorseTargetPose, NodeKey, OnFootTickInput, PlayerId, QuantizedDirection,
+    QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
+    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
+    ShotResult, SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId,
+    WeaponAmmo, WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -50,6 +56,25 @@ fn rider_entity_id(player_id: PlayerId) -> EntityId {
             .try_into()
             .expect("SHA-256 prefix is eight bytes"),
     ))
+}
+
+fn horse_entity_id(player_id: PlayerId) -> EntityId {
+    let mut digest = Sha256::new();
+    digest.update(b"spurfire:m3:horse:");
+    digest.update(player_id.as_bytes());
+    let digest = digest.finalize();
+    EntityId(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct M3LoadoutConfiguration {
+    player_id: PlayerId,
+    horse_class: HorseVitalityClass,
+    weapon_id: WeaponId,
 }
 
 fn snapshot_dive_id(stance: RiderStance, raw_dive_id: i64) -> Option<Option<DiveId>> {
@@ -145,6 +170,33 @@ fn resolve_authority_shot(
     )
 }
 
+fn resolve_m3_authority_shot(
+    authority: &mut M3CombatAuthority,
+    history: &BTreeMap<PlayerId, VecDeque<CombatRiderSnapshot>>,
+    command: &ShotCommand,
+    authority_tick: SimulationTick,
+) -> Option<M3AuthorityShot> {
+    let rider = history
+        .get(&command.shooter_peer_id)?
+        .iter()
+        .find(|snapshot| snapshot.tick == command.tick)
+        .copied()?;
+    authority.resolve_shot(command, authority_tick, rider).ok()
+}
+
+fn quantized_planar_input(value: Vector2) -> Option<QuantizedDirection> {
+    if !value.is_finite() || value.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    let normalized = value.normalized();
+    Some(QuantizedDirection::new(
+        (normalized.x * DIRECTION_UNITS as f32).round() as i32,
+        0,
+        (normalized.y * DIRECTION_UNITS as f32).round() as i32,
+    ))
+    .filter(|direction| direction.is_normalized())
+}
+
 async fn close_peer(peer: &mut RustScalePeer) -> Result<(), String> {
     let mut last = None;
     for _ in 0..4 {
@@ -175,13 +227,8 @@ async fn handle_command(
             packet,
             destination,
         } => {
-            match decode(&packet) {
-                Ok(envelope) => {
-                    if let Err(error) = peer.send(&envelope, destination).await {
-                        events.send(WorkerEvent::Failed(error.to_string()));
-                    }
-                }
-                Err(error) => events.send(WorkerEvent::Failed(error.to_string())),
+            if let Err(error) = peer.send_datagram(&packet, destination).await {
+                events.send(WorkerEvent::Failed(error.to_string()));
             }
             false
         }
@@ -320,20 +367,15 @@ fn run_worker(
                         Err(tokio_mpsc::error::TryRecvError::Empty) => break,
                     }
                 }
-                match peer.recv(Duration::from_millis(5)).await {
-                    Ok((envelope, source)) => match encode(&envelope) {
-                        Ok(packet) => {
-                            let node_key = peer.node_key_for(source.ip());
-                            events.send(WorkerEvent::Packet {
-                                packet,
-                                source,
-                                node_key,
-                            });
-                        }
-                        Err(error) => {
-                            events.send(WorkerEvent::Failed(error.to_string()));
-                        }
-                    },
+                match peer.recv_datagram(Duration::from_millis(5)).await {
+                    Ok((packet, source)) => {
+                        let node_key = peer.node_key_for(source.ip());
+                        events.send(WorkerEvent::Packet {
+                            packet,
+                            source,
+                            node_key,
+                        });
+                    }
                     Err(spurfire_net::rustscale::RustScaleTransportError::Timeout) => {}
                     Err(error) => {
                         events.send(WorkerEvent::Failed(error.to_string()));
@@ -371,6 +413,8 @@ pub struct PeerSession {
     authority_epoch: i64,
     session: Option<SessionState>,
     secure_session: Option<SecureSession>,
+    m3_wire_active: bool,
+    m3_secure_session: Option<M3SecureSession>,
     session_key: Option<Zeroizing<[u8; 32]>>,
     session_key_generation: u64,
     pinned_manifest_key: Option<(u64, SessionPublicKey)>,
@@ -384,6 +428,7 @@ pub struct PeerSession {
     combat_targets: Option<TargetRegistry>,
     authority_rider_history: BTreeMap<PlayerId, VecDeque<CombatRiderSnapshot>>,
     combat_receipts: BTreeSet<(u64, PlayerId, u64)>,
+    m3_combat_authority: Option<M3CombatAuthority>,
     lobby_client: LobbyClientState,
     creator_join_display: Option<String>,
     creator_join_lobby: Option<String>,
@@ -614,6 +659,7 @@ impl PeerSession {
         self.insecure_demo_mode = enabled;
         if !enabled {
             self.secure_session = None;
+            self.m3_secure_session = None;
         }
     }
 
@@ -633,6 +679,7 @@ impl PeerSession {
         self.session_key = Some(seed);
         self.session_key_generation = session_generation;
         self.secure_session = None;
+        self.m3_secure_session = None;
         true
     }
 
@@ -707,7 +754,10 @@ impl PeerSession {
             return false;
         };
         if let Some((generation, pinned)) = self.pinned_manifest_key {
-            if key != pinned && session_generation <= generation && self.secure_session.is_some() {
+            if key != pinned
+                && session_generation <= generation
+                && (self.secure_session.is_some() || self.m3_secure_session.is_some())
+            {
                 return false;
             }
         }
@@ -793,27 +843,38 @@ impl PeerSession {
         }) {
             return false;
         }
-        let state = if let Some(existing) = &self.secure_session {
-            if existing.roster_hash() == manifest.hash() {
-                existing.state().clone()
-            } else {
-                let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
-                for player in &self.allowed_players {
-                    state.add_peer(*player, now_ms);
-                }
-                state
-            }
+        if self.m3_wire_active && self.m3_combat_authority.is_none() {
+            return false;
+        }
+        let existing_state = if self.m3_wire_active {
+            self.m3_secure_session.as_ref().and_then(|existing| {
+                (existing.roster_hash() == manifest.hash()).then(|| existing.state().clone())
+            })
         } else {
+            self.secure_session.as_ref().and_then(|existing| {
+                (existing.roster_hash() == manifest.hash()).then(|| existing.state().clone())
+            })
+        };
+        let state = existing_state.unwrap_or_else(|| {
             let mut state = SessionState::new(lobby_id, local_player, authority, now_ms);
             for player in &self.allowed_players {
                 state.add_peer(*player, now_ms);
             }
             state
-        };
-        let Ok(secure) = SecureSession::new(manifest, pinned_key, signature, state) else {
-            return false;
-        };
-        self.secure_session = Some(secure);
+        });
+        if self.m3_wire_active {
+            let Ok(secure) = M3SecureSession::new(manifest, pinned_key, signature, state) else {
+                return false;
+            };
+            self.m3_secure_session = Some(secure);
+            self.secure_session = None;
+        } else {
+            let Ok(secure) = SecureSession::new(manifest, pinned_key, signature, state) else {
+                return false;
+            };
+            self.secure_session = Some(secure);
+            self.m3_secure_session = None;
+        }
         true
     }
 
@@ -910,6 +971,8 @@ impl PeerSession {
         }
         self.session = Some(session);
         self.secure_session = None;
+        self.m3_wire_active = false;
+        self.m3_secure_session = None;
         self.allowed_players = allowed_players;
         self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
@@ -929,6 +992,7 @@ impl PeerSession {
         self.combat_targets = Some(combat_targets);
         self.authority_rider_history.clear();
         self.combat_receipts.clear();
+        self.m3_combat_authority = None;
         let signal_player = self.local_player_id.clone();
         let signal_epoch = self.authority_epoch;
         self.signals()
@@ -937,10 +1001,78 @@ impl PeerSession {
         true
     }
 
+    /// Atomically replaces the wire-1.2 gameplay owner with the complete M3
+    /// actor/combat graph. This must happen before secure manifest binding.
+    #[func]
+    fn activate_m3_wire(&mut self, loadouts_json: GString) -> bool {
+        if self.session.is_none()
+            || self.m3_wire_active
+            || self.secure_session.is_some()
+            || self.m3_secure_session.is_some()
+            || self.allowed_players.is_empty()
+        {
+            return false;
+        }
+        let Ok(rows) =
+            serde_json::from_str::<Vec<M3LoadoutConfiguration>>(&loadouts_json.to_string())
+        else {
+            return false;
+        };
+        let mut loadouts = BTreeMap::new();
+        for row in rows {
+            if !self.allowed_players.contains(&row.player_id)
+                || loadouts
+                    .insert(row.player_id, (row.horse_class, row.weapon_id))
+                    .is_some()
+            {
+                return false;
+            }
+        }
+        if loadouts.len() != self.allowed_players.len() {
+            return false;
+        }
+        let Ok(epoch) = u64::try_from(self.authority_epoch) else {
+            return false;
+        };
+        let Ok(mut authority) = M3CombatAuthority::new(60, 0, epoch) else {
+            return false;
+        };
+        for player in &self.allowed_players {
+            let Some((horse_class, weapon_id)) = loadouts.get(player).copied() else {
+                return false;
+            };
+            if !authority.register_actor(
+                *player,
+                rider_entity_id(*player),
+                horse_entity_id(*player),
+                horse_class,
+                weapon_id,
+                TeamId(1),
+            ) {
+                return false;
+            }
+        }
+        self.m3_combat_authority = Some(authority);
+        self.combat_authority = None;
+        self.combat_targets = None;
+        self.combat_receipts.clear();
+        self.m3_wire_active = true;
+        true
+    }
+
+    #[func]
+    fn is_m3_wire_active(&self) -> bool {
+        self.m3_wire_active
+    }
+
     /// Build a bounded, sequenced heartbeat datagram for `send_packet`.
     #[func]
     fn make_heartbeat(&mut self, tick: i64) -> PackedByteArray {
-        self.make_packet(tick, PeerPayload::Heartbeat)
+        if self.m3_wire_active {
+            self.make_m3_packet(tick, M3PeerPayloadV2::Heartbeat)
+        } else {
+            self.make_packet(tick, PeerPayload::Heartbeat)
+        }
     }
 
     /// Build an application-channel RTT probe or response.
@@ -949,7 +1081,11 @@ impl PeerSession {
         let Ok(nonce) = u64::try_from(nonce) else {
             return PackedByteArray::new();
         };
-        self.make_packet(tick, PeerPayload::Probe { nonce, reply })
+        if self.m3_wire_active {
+            self.make_m3_packet(tick, M3PeerPayloadV2::Probe { nonce, reply })
+        } else {
+            self.make_packet(tick, PeerPayload::Probe { nonce, reply })
+        }
     }
 
     /// Build bounded fixed-tick rider input; milli inputs must be in [-1000, 1000].
@@ -961,6 +1097,9 @@ impl PeerSession {
         steer_milli: i64,
         buttons: i64,
     ) -> PackedByteArray {
+        if self.m3_wire_active {
+            return PackedByteArray::new();
+        }
         let (Ok(throttle_milli), Ok(steer_milli), Ok(buttons)) = (
             i16::try_from(throttle_milli),
             i16::try_from(steer_milli),
@@ -995,6 +1134,9 @@ impl PeerSession {
         yaw_degrees: f64,
         stance_id: i64,
     ) -> PackedByteArray {
+        if self.m3_wire_active {
+            return PackedByteArray::new();
+        }
         fn millimetres(value: f32) -> Option<i32> {
             let scaled = f64::from(value) * 1_000.0;
             scaled
@@ -1054,7 +1196,221 @@ impl PeerSession {
         let Ok(command) = serde_json::from_str(&command_json.to_string()) else {
             return PackedByteArray::new();
         };
-        self.make_packet(tick, PeerPayload::ShotCommand { command })
+        if self.m3_wire_active {
+            self.make_m3_packet(tick, M3PeerPayloadV2::ShotCommand { command })
+        } else {
+            self.make_packet(tick, PeerPayload::ShotCommand { command })
+        }
+    }
+
+    /// Build complete wire-v2 mounted/on-foot intent. All milli axes and
+    /// assigned button bits are validated by the native codec.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn make_m3_actor_input(
+        &mut self,
+        tick: i64,
+        throttle_milli: i64,
+        steer_milli: i64,
+        move_x_milli: i64,
+        move_z_milli: i64,
+        buttons: i64,
+    ) -> PackedByteArray {
+        let (Ok(throttle_milli), Ok(steer_milli), Ok(move_x_milli), Ok(move_z_milli), Ok(buttons)) = (
+            i16::try_from(throttle_milli),
+            i16::try_from(steer_milli),
+            i16::try_from(move_x_milli),
+            i16::try_from(move_z_milli),
+            u16::try_from(buttons),
+        ) else {
+            return PackedByteArray::new();
+        };
+        self.make_m3_packet(
+            tick,
+            M3PeerPayloadV2::ActorInput {
+                input: M3ActorInput {
+                    throttle_milli,
+                    steer_milli,
+                    move_x_milli,
+                    move_z_milli,
+                    buttons,
+                },
+            },
+        )
+    }
+
+    /// Sign one authority-owned complete actor/horse snapshot.
+    #[func]
+    fn make_m3_actor_snapshot(&mut self, tick: i64, snapshot_json: GString) -> PackedByteArray {
+        let Ok(snapshot) = serde_json::from_str::<M3ActorSnapshot>(&snapshot_json.to_string())
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(authority) = self.m3_combat_authority.as_ref() else {
+            return PackedByteArray::new();
+        };
+        let Some(actor) = authority.actor(snapshot.rider_player_id) else {
+            return PackedByteArray::new();
+        };
+        if authority.actors().horse_entity_id(snapshot.rider_player_id)
+            != Some(snapshot.horse.entity_id)
+            || snapshot.horse.class.max_health() != actor.horse().max_health()
+            || snapshot.horse.health != actor.horse().health()
+            || snapshot.horse.state != actor.horse().state()
+            || snapshot.stamina_ticks != actor.on_foot().stamina_ticks()
+            || snapshot.recall_state != actor.recall().state()
+            || snapshot.recall_ready_tick != actor.recall().ready_tick()
+            || authority
+                .targets()
+                .health(rider_entity_id(snapshot.rider_player_id))
+                != Some(snapshot.rider_health)
+        {
+            return PackedByteArray::new();
+        }
+        self.make_m3_packet(tick, M3PeerPayloadV2::ActorSnapshot { snapshot })
+    }
+
+    /// Announce the sender's authority-locked M3 loadout.
+    #[func]
+    fn make_m3_actor_loadout(&mut self, tick: i64, loadout_json: GString) -> PackedByteArray {
+        let Ok(loadout) = serde_json::from_str::<M3ActorLoadout>(&loadout_json.to_string()) else {
+            return PackedByteArray::new();
+        };
+        let (Ok(local), Some(authority)) = (
+            PlayerId::parse(&self.local_player_id.to_string()),
+            self.m3_combat_authority.as_ref(),
+        ) else {
+            return PackedByteArray::new();
+        };
+        if authority
+            .actor(local)
+            .is_none_or(|actor| actor.horse().max_health() != loadout.horse_class.max_health())
+            || authority
+                .combat()
+                .shooter_kernel(local)
+                .is_none_or(|kernel| kernel.equipped_weapon() != loadout.weapon_id)
+        {
+            return PackedByteArray::new();
+        }
+        self.make_m3_packet(tick, M3PeerPayloadV2::ActorLoadout { loadout })
+    }
+
+    /// Advance the private composed M3 actor owner before recording collision
+    /// poses or resolving combat for the same authority tick.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn advance_m3_actor(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        move_input: Vector2,
+        sprint_pressed: bool,
+        crouch_pressed: bool,
+        reload_active: bool,
+        interact_pressed: bool,
+        rider_position: Vector3,
+        return_horse_position: Vector3,
+        return_horse_moving: bool,
+    ) -> VarDictionary {
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return VarDictionary::new();
+        }
+        let (Ok(player_id), Ok(tick), Ok(rider_position), Ok(return_horse_position)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            QuantizedOrigin::from_meters(
+                f64::from(rider_position.x),
+                f64::from(rider_position.y),
+                f64::from(rider_position.z),
+            ),
+            QuantizedOrigin::from_meters(
+                f64::from(return_horse_position.x),
+                f64::from(return_horse_position.y),
+                f64::from(return_horse_position.z),
+            ),
+        ) else {
+            return VarDictionary::new();
+        };
+        let input = ActorM3TickInput {
+            tick,
+            on_foot: OnFootTickInput {
+                tick,
+                move_direction: quantized_planar_input(move_input),
+                sprint_pressed,
+                crouch_pressed,
+                reload_active,
+            },
+            interact_pressed,
+            rider_position,
+            return_horse_position,
+            return_horse_moving,
+        };
+        let Some(authority) = self.m3_combat_authority.as_mut() else {
+            return VarDictionary::new();
+        };
+        let Ok(output) = authority.advance_actor(player_id, input) else {
+            return VarDictionary::new();
+        };
+        let Some(actor) = authority.actor(player_id) else {
+            return VarDictionary::new();
+        };
+        let mut result = VarDictionary::new();
+        result.set("advanced", true);
+        result.set("tick", i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
+        result.set("horse_health", i64::from(actor.horse().health()));
+        result.set("horse_max_health", i64::from(actor.horse().max_health()));
+        result.set("stamina_ticks", i64::from(actor.on_foot().stamina_ticks()));
+        result.set("horse_despawned", output.horse_despawned);
+        result.set("remounted", output.remounted);
+        result
+    }
+
+    /// Record authority collision-resolved horse geometry for M3 rewind.
+    #[func]
+    fn record_m3_horse_pose(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        body_center: Vector3,
+        body_forward: Vector3,
+        head_center: Vector3,
+    ) -> bool {
+        let (Ok(player_id), Ok(tick), Ok(body_center), Ok(body_forward), Ok(head_center)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            QuantizedOrigin::from_meters(
+                f64::from(body_center.x),
+                f64::from(body_center.y),
+                f64::from(body_center.z),
+            ),
+            QuantizedDirection::from_components(
+                f64::from(body_forward.x),
+                f64::from(body_forward.y),
+                f64::from(body_forward.z),
+            ),
+            QuantizedOrigin::from_meters(
+                f64::from(head_center.x),
+                f64::from(head_center.y),
+                f64::from(head_center.z),
+            ),
+        ) else {
+            return false;
+        };
+        self.m3_wire_active
+            && self.local_player_id.to_string() == self.authority_player_id.to_string()
+            && self.m3_combat_authority.as_mut().is_some_and(|authority| {
+                authority
+                    .record_horse_pose(M3HorseTargetPose {
+                        tick,
+                        rider_player_id: player_id,
+                        body_center,
+                        body_forward,
+                        head_center,
+                    })
+                    .is_ok()
+            })
     }
 
     /// Record authority-simulated muzzle, target geometry, and rider state for
@@ -1152,23 +1508,27 @@ impl PeerSession {
         if history.back().is_some_and(|previous| previous.tick >= tick) {
             return false;
         }
-        let Some(targets) = self.combat_targets.as_mut() else {
-            return false;
+        let pose = TargetPoseSnapshot {
+            tick,
+            entity_id: rider_entity_id(player_id),
+            stance,
+            body_center,
+            body_half_height_mm: 500,
+            body_radius_mm: 350,
+            head_center,
+            head_radius_mm: 250,
+            active: true,
         };
-        if targets
-            .record_pose(TargetPoseSnapshot {
-                tick,
-                entity_id: rider_entity_id(player_id),
-                stance,
-                body_center,
-                body_half_height_mm: 500,
-                body_radius_mm: 350,
-                head_center,
-                head_radius_mm: 250,
-                active: true,
-            })
-            .is_err()
-        {
+        let recorded = if self.m3_wire_active {
+            self.m3_combat_authority
+                .as_mut()
+                .is_some_and(|authority| authority.record_rider_pose(player_id, pose).is_ok())
+        } else {
+            self.combat_targets
+                .as_mut()
+                .is_some_and(|targets| targets.record_pose(pose).is_ok())
+        };
+        if !recorded {
             return false;
         }
         history.push_back(snapshot);
@@ -1190,18 +1550,87 @@ impl PeerSession {
         {
             return GString::new();
         }
-        let (Some(authority), Some(targets)) =
-            (self.combat_authority.as_mut(), self.combat_targets.as_mut())
-        else {
-            return GString::new();
-        };
-        let Some(result) =
-            resolve_authority_shot(authority, targets, &self.authority_rider_history, &command)
-        else {
-            return GString::new();
+        let result = if self.m3_wire_active {
+            let Some(authority) = self.m3_combat_authority.as_mut() else {
+                return GString::new();
+            };
+            let Some(resolved) = resolve_m3_authority_shot(
+                authority,
+                &self.authority_rider_history,
+                &command,
+                command.tick,
+            ) else {
+                return GString::new();
+            };
+            resolved.shot.result
+        } else {
+            let (Some(authority), Some(targets)) =
+                (self.combat_authority.as_mut(), self.combat_targets.as_mut())
+            else {
+                return GString::new();
+            };
+            let Some(result) =
+                resolve_authority_shot(authority, targets, &self.authority_rider_history, &command)
+            else {
+                return GString::new();
+            };
+            result
         };
         let encoded = serde_json::to_string(&result).unwrap_or_default();
         GString::from(&encoded)
+    }
+
+    /// Resolve M3 combat at the current authority tick and expose both signed
+    /// shot truth and routed horse effects to the native scene adapter.
+    #[func]
+    fn resolve_m3_shot_command(
+        &mut self,
+        command_json: GString,
+        authority_tick: i64,
+    ) -> VarDictionary {
+        let (Ok(command), Ok(authority_tick)) = (
+            serde_json::from_str::<ShotCommand>(&command_json.to_string()),
+            u64::try_from(authority_tick).map(SimulationTick::new),
+        ) else {
+            return VarDictionary::new();
+        };
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+            || !self.allowed_players.contains(&command.shooter_peer_id)
+        {
+            return VarDictionary::new();
+        }
+        let Some(authority) = self.m3_combat_authority.as_mut() else {
+            return VarDictionary::new();
+        };
+        let Some(resolved) = resolve_m3_authority_shot(
+            authority,
+            &self.authority_rider_history,
+            &command,
+            authority_tick,
+        ) else {
+            return VarDictionary::new();
+        };
+        let mut result = VarDictionary::new();
+        result.set(
+            "result_json",
+            serde_json::to_string(&resolved.shot.result).unwrap_or_default(),
+        );
+        if let Some(horse_damage) = resolved.horse_damage {
+            result.set(
+                "horse_damage_json",
+                serde_json::to_string(&horse_damage).unwrap_or_default(),
+            );
+            result.set(
+                "horse_rider_player_id",
+                horse_damage.rider_player_id.to_string(),
+            );
+            result.set(
+                "horse_entity_id",
+                horse_damage.horse_entity_id.0.to_string(),
+            );
+        }
+        result
     }
 
     /// Export authority-owned combat state for one checkpoint rider.
@@ -1211,8 +1640,16 @@ impl PeerSession {
         let Ok(player_id) = PlayerId::parse(&player_id.to_string()) else {
             return state;
         };
-        let Some(authority) = self.combat_authority.as_ref() else {
-            return state;
+        let authority = if self.m3_wire_active {
+            let Some(authority) = self.m3_combat_authority.as_ref() else {
+                return state;
+            };
+            authority.combat()
+        } else {
+            let Some(authority) = self.combat_authority.as_ref() else {
+                return state;
+            };
+            authority
         };
         let Some(kernel) = authority.shooter_kernel(player_id) else {
             return state;
@@ -1221,11 +1658,16 @@ impl PeerSession {
         state.set("weapon_id", i64::from(kernel.equipped_weapon().as_u8()));
         state.set("ammo_magazine", i64::from(ammo.magazine));
         state.set("ammo_reserve", i64::from(ammo.reserve));
-        let Some(health) = self
-            .combat_targets
-            .as_ref()
-            .and_then(|targets| targets.health(rider_entity_id(player_id)))
-        else {
+        let health = if self.m3_wire_active {
+            self.m3_combat_authority
+                .as_ref()
+                .and_then(|authority| authority.targets().health(rider_entity_id(player_id)))
+        } else {
+            self.combat_targets
+                .as_ref()
+                .and_then(|targets| targets.health(rider_entity_id(player_id)))
+        };
+        let Some(health) = health else {
             return VarDictionary::new();
         };
         state.set("health", i64::from(health));
@@ -1275,7 +1717,11 @@ impl PeerSession {
             result.shooter_peer_id,
             result.tick.as_u64(),
         );
-        let packet = self.make_packet(tick, PeerPayload::ShotResult { result });
+        let packet = if self.m3_wire_active {
+            self.make_m3_packet(tick, M3PeerPayloadV2::ShotResult { result })
+        } else {
+            self.make_packet(tick, PeerPayload::ShotResult { result })
+        };
         if !packet.is_empty() {
             if let Some(epoch) = receipt.0 {
                 self.combat_receipts.insert((epoch, receipt.1, receipt.2));
@@ -1287,6 +1733,9 @@ impl PeerSession {
     /// Advance exactly one epoch after timeout and sign a bounded checkpoint.
     #[func]
     fn poll_migration(&mut self, now_ms: i64, checkpoint_json: GString) -> PackedByteArray {
+        if self.m3_wire_active {
+            return PackedByteArray::new();
+        }
         let (Ok(now_ms), Ok(checkpoint)) = (
             u64::try_from(now_ms),
             serde_json::from_str::<MatchCheckpoint>(&checkpoint_json.to_string()),
@@ -1344,9 +1793,93 @@ impl PeerSession {
         )
     }
 
+    /// Build the exact combined M3 checkpoint without exposing private actor
+    /// state as an input surface.
+    #[func]
+    fn m3_checkpoint_json(&self, combat_checkpoint_json: GString) -> GString {
+        let Ok(combat) =
+            serde_json::from_str::<MatchCheckpoint>(&combat_checkpoint_json.to_string())
+        else {
+            return GString::new();
+        };
+        let Some(checkpoint) = self.build_m3_checkpoint(combat) else {
+            return GString::new();
+        };
+        GString::from(&serde_json::to_string(&checkpoint).unwrap_or_default())
+    }
+
+    /// Elect, preflight, install, fragment, and sign one complete M3 handoff.
+    /// Non-successors return an empty array after adopting the elected epoch.
+    #[func]
+    fn poll_m3_migration(
+        &mut self,
+        now_ms: i64,
+        combat_checkpoint_json: GString,
+    ) -> Array<PackedByteArray> {
+        let mut packets = Array::new();
+        if !self.m3_wire_active {
+            return packets;
+        }
+        let (Ok(now_ms), Ok(combat)) = (
+            u64::try_from(now_ms),
+            serde_json::from_str::<MatchCheckpoint>(&combat_checkpoint_json.to_string()),
+        ) else {
+            return packets;
+        };
+        let Some(checkpoint) = self.build_m3_checkpoint(combat) else {
+            return packets;
+        };
+        let Some(next_epoch) = checkpoint.combat.source_epoch.checked_add(1) else {
+            return packets;
+        };
+        let Some(restored) = Self::restore_m3_checkpoint(&checkpoint, next_epoch) else {
+            return packets;
+        };
+        let Some(mut candidate_session) = self.m3_secure_session.clone() else {
+            return packets;
+        };
+        let Some((authority, epoch)) = candidate_session.expire_and_migrate(now_ms) else {
+            return packets;
+        };
+        let Ok(local) = PlayerId::parse(&self.local_player_id.to_string()) else {
+            return packets;
+        };
+        if authority == local {
+            let Ok(payloads) = fragment_m3_checkpoint(authority, epoch, &checkpoint) else {
+                return Array::new();
+            };
+            let Some(seed) = self.session_key.as_ref() else {
+                return Array::new();
+            };
+            let signing = SigningKey::from_bytes(seed);
+            for payload in payloads {
+                let Ok(envelope) =
+                    candidate_session.envelope(checkpoint.combat.tick, payload, &signing)
+                else {
+                    return Array::new();
+                };
+                let Ok(encoded) = encode_m3(&envelope) else {
+                    return Array::new();
+                };
+                packets.push(&PackedByteArray::from(encoded.as_slice()));
+            }
+        }
+        self.m3_secure_session = Some(candidate_session);
+        self.authority_player_id = GString::from(&authority.to_string());
+        self.authority_epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
+        if authority == local {
+            self.m3_combat_authority = Some(restored);
+        }
+        self.advance_gameplay_epoch(epoch);
+        packets
+    }
+
     /// Decode presentation fields only for explicit insecure diagnostics.
     #[func]
     fn decode_packet(&self, packet: PackedByteArray) -> VarDictionary {
+        if self.m3_wire_active {
+            return self.decode_m3_packet(packet);
+        }
         let Ok(envelope) = decode(&packet.to_vec()) else {
             return VarDictionary::new();
         };
@@ -1461,10 +1994,104 @@ impl PeerSession {
         result
     }
 
+    fn decode_m3_packet(&self, packet: PackedByteArray) -> VarDictionary {
+        let Ok(envelope) = decode_m3(&packet.to_vec()) else {
+            return VarDictionary::new();
+        };
+        let mut result = VarDictionary::new();
+        result.set("sender", envelope.sender.to_string());
+        result.set(
+            "sequence",
+            i64::try_from(envelope.sequence).unwrap_or(i64::MAX),
+        );
+        result.set(
+            "tick",
+            i64::try_from(envelope.simulation_tick).unwrap_or(i64::MAX),
+        );
+        result.set(
+            "authority_epoch",
+            i64::try_from(envelope.authority_epoch).unwrap_or(i64::MAX),
+        );
+        match envelope.payload {
+            M3PeerPayloadV2::Hello { hostname } => {
+                result.set("type", "hello");
+                result.set("hostname", hostname);
+            }
+            M3PeerPayloadV2::Heartbeat => result.set("type", "heartbeat"),
+            M3PeerPayloadV2::Probe { nonce, reply } => {
+                result.set("type", "probe");
+                result.set("nonce", i64::try_from(nonce).unwrap_or(i64::MAX));
+                result.set("reply", reply);
+            }
+            M3PeerPayloadV2::ActorLoadout { loadout } => {
+                result.set("type", "actor_loadout");
+                result.set(
+                    "loadout_json",
+                    serde_json::to_string(&loadout).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::ActorInput { input } => {
+                result.set("type", "actor_input");
+                result.set(
+                    "input_json",
+                    serde_json::to_string(&input).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::ActorSnapshot { snapshot } => {
+                result.set("type", "actor_snapshot");
+                result.set("rider_player_id", snapshot.rider_player_id.to_string());
+                result.set(
+                    "snapshot_json",
+                    serde_json::to_string(&snapshot).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::ShotCommand { command } => {
+                result.set("type", "shot_command");
+                result.set("shooter_player_id", command.shooter_peer_id.to_string());
+                result.set(
+                    "command_json",
+                    serde_json::to_string(&command).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::ShotResult {
+                result: shot_result,
+            } => {
+                result.set("type", "shot_result");
+                result.set("shooter_player_id", shot_result.shooter_peer_id.to_string());
+                result.set(
+                    "result_json",
+                    serde_json::to_string(&shot_result).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::Authority { authority, epoch } => {
+                result.set("type", "authority");
+                result.set("authority", authority.to_string());
+                result.set("epoch", i64::try_from(epoch).unwrap_or(i64::MAX));
+            }
+            M3PeerPayloadV2::MigrationFragment {
+                authority,
+                epoch,
+                state_hash,
+                fragment_index,
+                fragment_count,
+                ..
+            } => {
+                result.set("type", "migration_fragment");
+                result.set("authority", authority.to_string());
+                result.set("epoch", i64::try_from(epoch).unwrap_or(i64::MAX));
+                result.set("state_hash", hex_bytes(&state_hash));
+                result.set("fragment_index", i64::from(fragment_index));
+                result.set("fragment_count", i64::from(fragment_count));
+            }
+            M3PeerPayloadV2::Leave => result.set("type", "leave"),
+        }
+        result
+    }
+
     /// Legacy packet acceptance, available only after explicit demo/test opt-in.
     #[func]
     fn accept_packet(&mut self, packet: PackedByteArray, now_ms: i64) -> i64 {
-        if !self.insecure_demo_mode || self.secure_session.is_some() {
+        if self.m3_wire_active || !self.insecure_demo_mode || self.secure_session.is_some() {
             return -1;
         }
         let (Some(session), Ok(envelope), Ok(now_ms)) = (
@@ -1491,6 +2118,15 @@ impl PeerSession {
         source_node_key: GString,
         now_ms: i64,
     ) -> i64 {
+        if self.m3_wire_active {
+            return self.accept_m3_packet_with_source(
+                packet,
+                source_ip,
+                source_port,
+                source_node_key,
+                now_ms,
+            );
+        }
         let (Some(session), Ok(envelope), Ok(source_ip), Ok(source_port), Ok(now_ms)) = (
             self.secure_session.as_mut(),
             decode(&packet.to_vec()),
@@ -1546,6 +2182,80 @@ impl PeerSession {
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
         if let Some(epoch) = accepted_migration {
             self.advance_gameplay_epoch(epoch);
+        }
+        Self::outcome_code(outcome)
+    }
+
+    fn accept_m3_packet_with_source(
+        &mut self,
+        packet: PackedByteArray,
+        source_ip: GString,
+        source_port: i64,
+        source_node_key: GString,
+        now_ms: i64,
+    ) -> i64 {
+        let (Ok(envelope), Ok(source_ip), Ok(source_port), Ok(now_ms)) = (
+            decode_m3(&packet.to_vec()),
+            source_ip.to_string().parse::<IpAddr>(),
+            u16::try_from(source_port),
+            u64::try_from(now_ms),
+        ) else {
+            return -1;
+        };
+        let node_key = if source_node_key.is_empty() {
+            None
+        } else {
+            match NodeKey::parse(&source_node_key.to_string()) {
+                Ok(key) => Some(key),
+                Err(_) => return -1,
+            }
+        };
+        if matches!(
+            &envelope.payload,
+            M3PeerPayloadV2::ActorLoadout { loadout }
+                if !self.m3_loadout_matches(envelope.sender, *loadout)
+        ) {
+            return Self::outcome_code(AcceptOutcome::InvalidPayloadSubject);
+        }
+        let mut prepared_authority = None;
+        let (outcome, authority, authority_epoch, installed) = {
+            let Some(session) = self.m3_secure_session.as_mut() else {
+                return -1;
+            };
+            let outcome = session.accept_with_source_validated(
+                &envelope,
+                SocketAddr::new(source_ip, source_port),
+                node_key,
+                now_ms,
+                |checkpoint| {
+                    prepared_authority =
+                        Self::restore_m3_checkpoint(checkpoint, envelope.authority_epoch);
+                    prepared_authority.is_some()
+                },
+            );
+            let installed = if outcome == AcceptOutcome::Accepted {
+                session.take_installed_checkpoint()
+            } else {
+                None
+            };
+            (
+                outcome,
+                session.state().authority(),
+                session.state().authority_epoch(),
+                installed,
+            )
+        };
+        let migrated = installed.is_some();
+        if migrated {
+            let Some(authority) = prepared_authority else {
+                return Self::outcome_code(AcceptOutcome::InvalidCheckpoint);
+            };
+            self.m3_combat_authority = Some(authority);
+        }
+        self.authority_player_id = GString::from(&authority.to_string());
+        self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
+        if migrated {
+            self.advance_gameplay_epoch(authority_epoch);
         }
         Self::outcome_code(outcome)
     }
@@ -1875,6 +2585,15 @@ impl PeerSession {
     /// Send one bounded Spurfire envelope returned by the protocol codec.
     #[func]
     fn send_packet(&mut self, packet: PackedByteArray, destination_ip: GString, port: i64) -> bool {
+        let bytes = packet.to_vec();
+        let valid = if self.m3_wire_active {
+            decode_m3(&bytes).is_ok()
+        } else {
+            decode(&bytes).is_ok()
+        };
+        if !valid {
+            return false;
+        }
         let Some(destination) = parse_destination(&destination_ip.to_string(), port) else {
             return false;
         };
@@ -1883,7 +2602,7 @@ impl PeerSession {
         };
         sender
             .send(WorkerCommand::Send {
-                packet: packet.to_vec(),
+                packet: bytes,
                 destination,
             })
             .is_ok()
@@ -1904,7 +2623,11 @@ impl PeerSession {
     /// Real admission remains closed until envelopes are cryptographically bound.
     #[func]
     fn make_leave(&mut self, tick: i64) -> PackedByteArray {
-        self.make_packet(tick, PeerPayload::Leave)
+        if self.m3_wire_active {
+            self.make_m3_packet(tick, M3PeerPayloadV2::Leave)
+        } else {
+            self.make_packet(tick, PeerPayload::Leave)
+        }
     }
 
     /// Cancel in-flight enrollment or stop live traffic, whichever is active.
@@ -1936,6 +2659,8 @@ impl PeerSession {
         self.connection_state = "offline".into();
         self.session = None;
         self.secure_session = None;
+        self.m3_wire_active = false;
+        self.m3_secure_session = None;
         self.session_key = None;
         self.session_key_generation = 0;
         self.pinned_manifest_key = None;
@@ -1949,9 +2674,13 @@ impl PeerSession {
         self.combat_targets = None;
         self.authority_rider_history.clear();
         self.combat_receipts.clear();
+        self.m3_combat_authority = None;
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
+        if self.m3_wire_active {
+            return PackedByteArray::new();
+        }
         let Ok(tick) = u64::try_from(tick) else {
             return PackedByteArray::new();
         };
@@ -1969,6 +2698,27 @@ impl PeerSession {
         };
         envelope
             .and_then(|envelope| encode(&envelope).ok())
+            .map_or_else(PackedByteArray::new, |bytes| {
+                PackedByteArray::from(bytes.as_slice())
+            })
+    }
+
+    fn make_m3_packet(&mut self, tick: i64, payload: M3PeerPayloadV2) -> PackedByteArray {
+        if !self.m3_wire_active {
+            return PackedByteArray::new();
+        }
+        let (Ok(tick), Some(secure), Some(seed)) = (
+            u64::try_from(tick),
+            self.m3_secure_session.as_mut(),
+            self.session_key.as_ref(),
+        ) else {
+            return PackedByteArray::new();
+        };
+        let signing = SigningKey::from_bytes(seed);
+        secure
+            .envelope(tick, payload, &signing)
+            .ok()
+            .and_then(|envelope| encode_m3(&envelope).ok())
             .map_or_else(PackedByteArray::new, |bytes| {
                 PackedByteArray::from(bytes.as_slice())
             })
@@ -2012,6 +2762,76 @@ impl PeerSession {
                 .ok()?;
         }
         Some((restored_combat, restored_targets))
+    }
+
+    fn build_m3_checkpoint(&self, combat: MatchCheckpoint) -> Option<M3MatchCheckpointV2> {
+        let authority = self.m3_combat_authority.as_ref()?;
+        let checkpoint = M3MatchCheckpointV2 {
+            wire_version: M3_WIRE_VERSION,
+            combat,
+            gameplay: authority.actors().checkpoint(),
+            next_horse_damage_sequence: authority.next_horse_damage_sequence(),
+        };
+        checkpoint.is_bounded_and_canonical().then_some(checkpoint)
+    }
+
+    fn m3_loadout_matches(&self, player: PlayerId, loadout: M3ActorLoadout) -> bool {
+        self.m3_combat_authority.as_ref().is_some_and(|authority| {
+            authority
+                .actor(player)
+                .is_some_and(|actor| actor.horse().max_health() == loadout.horse_class.max_health())
+                && authority
+                    .combat()
+                    .shooter_kernel(player)
+                    .is_some_and(|kernel| kernel.equipped_weapon() == loadout.weapon_id)
+        })
+    }
+
+    fn restore_m3_checkpoint(
+        checkpoint: &M3MatchCheckpointV2,
+        authority_epoch: u64,
+    ) -> Option<M3CombatAuthority> {
+        if !checkpoint.is_bounded_and_canonical()
+            || checkpoint.combat.source_epoch.checked_add(1) != Some(authority_epoch)
+        {
+            return None;
+        }
+        let (combat, mut targets) =
+            Self::restore_combat_checkpoint(&checkpoint.combat, authority_epoch)?;
+        let actors =
+            M3AuthorityBank::restore_checkpoint(checkpoint.gameplay.clone(), authority_epoch)
+                .ok()?;
+        let mut rider_entities = BTreeMap::new();
+        for row in actors.checkpoint().actors() {
+            let player = row.rider_player_id;
+            if row.horse_entity_id != horse_entity_id(player)
+                || rider_entities
+                    .insert(player, rider_entity_id(player))
+                    .is_some()
+            {
+                return None;
+            }
+            let actor = actors.actor(player)?;
+            targets
+                .restore(
+                    TargetDefinition {
+                        entity_id: row.horse_entity_id,
+                        owner_peer_id: Some(player),
+                        team_id: TeamId(1),
+                        max_health: actor.horse().max_health(),
+                    },
+                    actor.horse().health(),
+                )
+                .ok()?;
+        }
+        M3CombatAuthority::restore_components(
+            combat,
+            targets,
+            actors,
+            rider_entities,
+            checkpoint.next_horse_damage_sequence,
+        )
+        .ok()
     }
 
     const fn outcome_code(outcome: AcceptOutcome) -> i64 {
@@ -2126,6 +2946,8 @@ impl INode for PeerSession {
             authority_epoch: 0,
             session: None,
             secure_session: None,
+            m3_wire_active: false,
+            m3_secure_session: None,
             session_key: None,
             session_key_generation: 0,
             pinned_manifest_key: None,
@@ -2139,6 +2961,7 @@ impl INode for PeerSession {
             combat_targets: None,
             authority_rider_history: BTreeMap::new(),
             combat_receipts: BTreeSet::new(),
+            m3_combat_authority: None,
             lobby_client: LobbyClientState::default(),
             creator_join_display: None,
             creator_join_lobby: None,
@@ -2316,6 +3139,112 @@ mod tests {
             })
             .is_ok());
         assert_eq!(targets.health(target_id), Some(82));
+    }
+
+    #[test]
+    fn m3_checkpoint_restore_preflights_deterministic_horse_target_graph() {
+        let players = [test_player(1), test_player(2)];
+        let mut authority = M3CombatAuthority::new(60, 0, 1).unwrap();
+        for player in players {
+            assert!(authority.register_actor(
+                player,
+                rider_entity_id(player),
+                horse_entity_id(player),
+                HorseVitalityClass::Courser,
+                WeaponId::Dustwalker,
+                TeamId(1),
+            ));
+        }
+        let tick = SimulationTick::new(10);
+        for player in players {
+            authority
+                .advance_actor(
+                    player,
+                    ActorM3TickInput {
+                        tick,
+                        on_foot: OnFootTickInput {
+                            tick,
+                            move_direction: None,
+                            sprint_pressed: false,
+                            crouch_pressed: false,
+                            reload_active: false,
+                        },
+                        interact_pressed: false,
+                        rider_position: QuantizedOrigin::default(),
+                        return_horse_position: QuantizedOrigin::default(),
+                        return_horse_moving: false,
+                    },
+                )
+                .unwrap();
+        }
+        let rider = |rider_player_id| RiderCheckpoint {
+            rider_player_id,
+            position_mm: [0; 3],
+            velocity_mmps: [0; 3],
+            yaw_millidegrees: 0,
+            stance: RiderStance::Mounted,
+            health: 100,
+            weapon_id: WeaponId::Dustwalker.as_u8(),
+            ammo_magazine: 30,
+            ammo_reserve: 120,
+            last_input_tick: 10,
+            last_shot_tick: None,
+            last_command_tick: None,
+            shot_index: 0,
+        };
+        let checkpoint = M3MatchCheckpointV2 {
+            wire_version: M3_WIRE_VERSION,
+            combat: MatchCheckpoint {
+                source_epoch: 1,
+                tick: 10,
+                riders: players.into_iter().map(rider).collect(),
+                resolved_shots: Vec::new(),
+            },
+            gameplay: authority.actors().checkpoint(),
+            next_horse_damage_sequence: authority.next_horse_damage_sequence(),
+        };
+        let restored = PeerSession::restore_m3_checkpoint(&checkpoint, 2).unwrap();
+        assert_eq!(restored.actors().authority_epoch(), 2);
+        for player in players {
+            assert_eq!(
+                restored.actors().horse_entity_id(player),
+                Some(horse_entity_id(player))
+            );
+        }
+
+        let mut wrong_bank = M3AuthorityBank::new(1);
+        for (index, player) in players.into_iter().enumerate() {
+            assert!(wrong_bank.register_actor(
+                player,
+                EntityId(900 + u64::try_from(index).unwrap()),
+                HorseVitalityClass::Courser,
+            ));
+            wrong_bank
+                .advance_actor(
+                    player,
+                    ActorM3TickInput {
+                        tick,
+                        on_foot: OnFootTickInput {
+                            tick,
+                            move_direction: None,
+                            sprint_pressed: false,
+                            crouch_pressed: false,
+                            reload_active: false,
+                        },
+                        interact_pressed: false,
+                        rider_position: QuantizedOrigin::default(),
+                        return_horse_position: QuantizedOrigin::default(),
+                        return_horse_moving: false,
+                    },
+                )
+                .unwrap();
+        }
+        let forged = M3MatchCheckpointV2 {
+            gameplay: wrong_bank.checkpoint(),
+            ..checkpoint
+        };
+        assert!(forged.is_bounded_and_canonical());
+        assert!(PeerSession::restore_m3_checkpoint(&forged, 2).is_none());
     }
 
     #[test]
