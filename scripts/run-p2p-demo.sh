@@ -158,7 +158,8 @@ if [[ "$MODE" == "qualify" ]]; then
   if [[ "$wait_status" -ne 0 ]]; then
     for log in "$TMP"/client-*.log; do
       echo "--- ${log##*/}" >&2
-      tail -30 "$log" >&2
+      grep -E 'SPURFIRE_GODOT_P2P_|SCRIPT ERROR|Parse Error|ERROR:' "$log" \
+        | tail -30 >&2 || true
     done
     exit 1
   fi
