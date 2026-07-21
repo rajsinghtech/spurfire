@@ -35,11 +35,26 @@ run_bounded() {
   "$@" &
   local command_pid=$!
   (
-    sleep "$seconds"
+    watchdog_sleep_pid=""
+    stop_watchdog() {
+      if [[ -n "$watchdog_sleep_pid" ]]; then
+        kill "$watchdog_sleep_pid" 2>/dev/null || true
+        wait "$watchdog_sleep_pid" 2>/dev/null || true
+      fi
+      exit 0
+    }
+    trap stop_watchdog TERM INT
+    sleep "$seconds" &
+    watchdog_sleep_pid=$!
+    wait "$watchdog_sleep_pid" || exit 0
+    watchdog_sleep_pid=""
     if kill -0 "$command_pid" 2>/dev/null; then
       echo "error: command exceeded ${seconds}s: $*" >&2
       kill -TERM "$command_pid" 2>/dev/null || true
-      sleep 2
+      sleep 2 &
+      watchdog_sleep_pid=$!
+      wait "$watchdog_sleep_pid" || exit 0
+      watchdog_sleep_pid=""
       kill -KILL "$command_pid" 2>/dev/null || true
     fi
   ) &
@@ -54,7 +69,7 @@ run_bounded() {
 
 self_test() {
   run_bounded 2 bash -c 'exit 0'
-  if run_bounded 1 bash -c 'sleep 3'; then
+  if run_bounded 1 sleep 3; then
     echo "error: timeout self-test unexpectedly succeeded" >&2
     return 1
   fi
