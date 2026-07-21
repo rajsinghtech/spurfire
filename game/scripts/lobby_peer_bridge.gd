@@ -40,6 +40,7 @@ var _m5_most_wanted_node: Node3D
 var _m5_metrics: Dictionary = {}
 var _m5_result_logged := false
 var _m5_choice_recorded := false
+var _migration_election_bound := false
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -117,6 +118,7 @@ func apply_projection(response: Dictionary) -> bool:
 		if loadouts.is_empty() or not peer_session.activate_m3_wire(JSON.stringify(loadouts)):
 			return false
 		_session_binding_key = binding_key
+		_migration_election_bound = false
 	var was_authority := local_is_authority
 	_authority_player_id = authority_id
 	local_is_authority = authority_id == local_player_id
@@ -160,6 +162,13 @@ func apply_projection(response: Dictionary) -> bool:
 			lobby_id, JSON.stringify(projection), Time.get_ticks_msec()
 		):
 			return false
+		var election_value = response.get("authority_election")
+		if not _migration_election_bound:
+			if not election_value is Dictionary or not peer_session.configure_migration_election(
+				JSON.stringify(election_value)
+			):
+				return false
+			_migration_election_bound = true
 	if get_parent().has_method("set_playable_radius"):
 		get_parent().call("set_playable_radius", float(peer_session.m5_playable_radius_m()))
 	return true
@@ -196,7 +205,7 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 			_simulate_remote_actor(player_id, _latest_inputs[player_id] as Dictionary, tick)
 		for player_id: String in _actor_states:
 			_record_authority_combat_state(player_id, _actor_states[player_id] as Dictionary)
-		if tick % 2 == 0 or stance_changed:
+		if tick % 3 == 0 or stance_changed:
 			for player_id: String in _actor_states:
 				var state := _actor_states[player_id] as Dictionary
 				var snapshot: PackedByteArray = peer_session.make_rider_snapshot(
@@ -310,7 +319,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		_record_m3_actor_tick(player_id, actor_tick, state, input, tick)
 		_record_authority_combat_state(player_id, state)
 		_record_m3_horse_state(player_id, state, tick)
-		if tick % 2 == 0 or (player_id == local_player_id and stance_changed):
+		if tick % 3 == 0 or (player_id == local_player_id and stance_changed):
 			var snapshot: PackedByteArray = peer_session.make_m3_actor_snapshot_from_pose(
 				tick, player_id, state.position, state.velocity,
 				float(state.yaw_degrees), int(state.stance_id),

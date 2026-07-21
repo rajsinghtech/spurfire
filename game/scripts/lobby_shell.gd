@@ -358,6 +358,9 @@ func _on_started(response_json: String) -> void:
 
 func _on_heartbeat(response_json: String) -> void:
 	var response := _public_response(response_json)
+	var installed_input_hash := str(response.get("input_hash", ""))
+	if not installed_input_hash.is_empty():
+		_authority_input_hash = installed_input_hash
 	if not _leaving:
 		_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
 

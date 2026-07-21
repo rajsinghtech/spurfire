@@ -157,7 +157,7 @@ D6 remains the networking rule: on authority silence, surviving peers recompute 
 
 Peers retain state for migration. D7 keeps authority-side rewind over roughly 250 ms of position/stance history, capped at 150 ms, with no special authority-player shooting path.
 
-This control-plane groundwork does not reorder gameplay development. The strict M0–M6 ladder in [prototype-plan.md](prototype-plan.md) remains authoritative: the M6 spine was built early, but remaining gameplay/network-loop completion waits for the M5 fun verdict.
+The strict M0–M6 ladder in [prototype-plan.md](prototype-plan.md) remains authoritative. M3–M5 state now migrates through the signed checkpoint and D6/D7 are implemented; M6 still requires temporal actor-delta compression plus the credentialed scale, churn, soak, cleanup, and human qualification evidence.
 
 ## Failure posture
 

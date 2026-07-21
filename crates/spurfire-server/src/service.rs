@@ -36,12 +36,13 @@ use spurfire_protocol::{
     LobbySessionProjection, LobbyState, LobbyTtl, NetworkAuthority, NetworkBacking, NetworkCleanup,
     NetworkCounts, NetworkIsolation, NetworkLifecycle, NetworkTruthLabel, OpaqueCapability,
     ParticipantCleanupReason, Player, PlayerId, PlayerJoinState, ProvisioningMode,
-    RegisterSessionEndpointRequest, RegisterSessionEndpointResponse, ResponseMetadata,
-    RosterManifest, RosterManifestEntry, RouteAggregate, SessionPublicKey, SessionSignature,
-    StartLobbyRequest, StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
-    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
-    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
-    M3_WIRE_VERSION, MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS,
+    PublicAlphaStatsResponse, PublicLobbyStateCounts, RegisterSessionEndpointRequest,
+    RegisterSessionEndpointResponse, ResponseMetadata, RosterManifest, RosterManifestEntry,
+    RouteAggregate, SessionPublicKey, SessionSignature, StartLobbyRequest, StartLobbyResponse,
+    SubmitMeasurementsRequest, SubmitMeasurementsResponse, SubmitResultsRequest,
+    SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
+    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION, M3_WIRE_VERSION,
+    MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -94,6 +95,8 @@ const ABUSE_WINDOW_MS: u64 = 60_000;
 const MAX_MUTATIONS_GLOBAL_PER_MINUTE: usize = 600;
 const MAX_MUTATIONS_PER_IP_PER_MINUTE: usize = 120;
 const MAX_MUTATIONS_PER_ACTOR_PER_MINUTE: usize = 60;
+const PUBLIC_STATS_MIN_REAL_LOBBIES: usize = 3;
+const PUBLIC_STATS_SCHEMA_VERSION: u32 = 1;
 const LANDING_HTML: &str = include_str!("landing.html");
 const INSPECT_HTML: &str = include_str!("inspect.html");
 
@@ -779,6 +782,7 @@ fn route_set() -> Router<AppState> {
         .route("/", get(landing))
         .route("/inspect", get(inspect_shell))
         .route("/healthz", get(healthz))
+        .route("/v1/stats", get(public_stats))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/lobbies", post(create_lobby))
         .route(
@@ -932,6 +936,84 @@ async fn landing() -> impl IntoResponse {
         HeaderValue::from_static("nosniff"),
     );
     (headers, Html(LANDING_HTML))
+}
+
+async fn public_stats(State(state): State<AppState>) -> impl IntoResponse {
+    let now = state.clock.now();
+    let mut real_lobbies = Vec::new();
+    for lobby_id in state.store.lobby_ids().await {
+        if let Some(stored) = state.store.get(lobby_id).await {
+            if !stored.dry_run && !stored.lobby.state.is_terminal() {
+                real_lobbies.push(stored);
+            }
+        }
+    }
+
+    let response = if real_lobbies.len() < PUBLIC_STATS_MIN_REAL_LOBBIES {
+        PublicAlphaStatsResponse {
+            schema_version: PUBLIC_STATS_SCHEMA_VERSION,
+            cohort_suppressed: true,
+            riders_online: None,
+            lobbies_by_state: None,
+            direct_connection_rate_milli: None,
+            median_rtt_ms: None,
+            served_at: now,
+        }
+    } else {
+        let mut states = PublicLobbyStateCounts::default();
+        let mut riders_online = 0_u32;
+        let mut direct_directions = 0_u64;
+        let mut known_directions = 0_u64;
+        let mut median_rtts = Vec::new();
+        for stored in real_lobbies {
+            match stored.lobby.state {
+                LobbyState::Provisioning => states.provisioning += 1,
+                LobbyState::Forming => states.forming += 1,
+                LobbyState::Ready => states.ready += 1,
+                LobbyState::Starting => states.starting += 1,
+                LobbyState::InMatch => states.in_match += 1,
+                LobbyState::Closing => states.closing += 1,
+                LobbyState::Failed => states.failed += 1,
+                LobbyState::Expired => states.expired += 1,
+                LobbyState::Destroyed => states.destroyed += 1,
+            }
+            for sample in stored.measurements.values().filter(|sample| {
+                now.checked_duration_since(sample.measured_at)
+                    .is_some_and(|age| age <= MEASUREMENT_FRESHNESS_MS)
+            }) {
+                riders_online = riders_online.saturating_add(1);
+                direct_directions =
+                    direct_directions.saturating_add(u64::from(sample.route_summary.direct_count));
+                known_directions = known_directions.saturating_add(u64::from(
+                    sample.route_summary.checked_known_peer_count().unwrap_or(0),
+                ));
+                median_rtts.push(sample.rtt_ms_median);
+            }
+        }
+        median_rtts.sort_unstable();
+        let median_rtt_ms = median_rtts
+            .get(median_rtts.len().saturating_sub(1) / 2)
+            .copied();
+        let direct_connection_rate_milli = (known_directions != 0).then(|| {
+            u32::try_from(direct_directions.saturating_mul(1_000) / known_directions)
+                .unwrap_or(1_000)
+        });
+        PublicAlphaStatsResponse {
+            schema_version: PUBLIC_STATS_SCHEMA_VERSION,
+            cohort_suppressed: false,
+            riders_online: Some(riders_online),
+            lobbies_by_state: Some(states),
+            direct_connection_rate_milli,
+            median_rtt_ms,
+            served_at: now,
+        }
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=30"),
+    );
+    (headers, Json(response))
 }
 
 async fn inspect_shell() -> impl IntoResponse {
@@ -1441,6 +1523,11 @@ async fn get_lobby_inner(
             .last_election
             .as_ref()
             .map(|election| election.input_hash),
+        authority_election: stored
+            .match_start_election
+            .as_ref()
+            .or(stored.last_election.as_ref())
+            .map(AuthorityResponse::from),
         session: Some(session),
         metadata: metadata_for(stored.dry_run || dry_hint),
     })
@@ -2311,9 +2398,7 @@ async fn submit_measurements(
         stored.authenticated_reporters.insert(player_id);
     }
     refresh_idle_expiry(&mut stored, now);
-    if stored.lobby.state == LobbyState::InMatch {
-        let _ = migrate_silent_authority(&mut stored, now, dry_run)?;
-    } else {
+    if stored.lobby.state != LobbyState::InMatch {
         let _ = recompute_authority(&mut stored, now, dry_run)?;
     }
 
@@ -2392,9 +2477,7 @@ async fn authority_handler(
         ));
     }
 
-    if stored.lobby.state == LobbyState::InMatch {
-        let _ = migrate_silent_authority(&mut stored, now, dry_run)?;
-    } else if stored.last_election.is_none() {
+    if stored.lobby.state != LobbyState::InMatch && stored.last_election.is_none() {
         let _ = recompute_authority(&mut stored, now, dry_run)?;
     }
     let election = stored.last_election.clone().ok_or_else(|| {
@@ -2545,6 +2628,7 @@ async fn start_lobby(
         .dry_run(dry_run));
     }
 
+    stored.match_start_election = stored.last_election.clone();
     stored.lobby.map_seed = Some(request.map_seed.unwrap_or_else(random_map_seed));
     stored.session_generation = stored.session_generation.saturating_add(1).max(1);
     // Session keys are per-generation. Never project pre-start registrations
@@ -2607,7 +2691,7 @@ async fn authority_heartbeat(
             dry_run,
         ));
     }
-    let election = stored.last_election.as_ref().ok_or_else(|| {
+    let current_election = stored.last_election.clone().ok_or_else(|| {
         ApiError::new(
             StatusCode::CONFLICT,
             "authority_unavailable",
@@ -2615,22 +2699,114 @@ async fn authority_heartbeat(
         )
         .dry_run(dry_run)
     })?;
-    if election.winner_player_id != actor || election.input_hash != request.input_hash {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "not_authority",
-            "heartbeat actor or input hash does not match the current authority",
+    let requested_epoch = if request.authority_epoch == 0 {
+        stored.authority_epoch
+    } else {
+        request.authority_epoch
+    };
+    let current_claim = current_election.winner_player_id == actor
+        && current_election.input_hash == request.input_hash;
+    if current_claim {
+        if requested_epoch != stored.authority_epoch {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "authority_epoch_mismatch",
+                "heartbeat epoch does not match the installed authority",
+            )
+            .dry_run(dry_run));
+        }
+    } else {
+        let silent = stored
+            .last_authority_heartbeat_at
+            .or(stored.started_at)
+            .and_then(|heartbeat| now.checked_duration_since(heartbeat))
+            .is_some_and(|age| age >= AUTHORITY_SILENCE_MS);
+        let next_epoch = stored.authority_epoch.checked_add(1);
+        let survivor_set = request.survivors.iter().copied().collect::<BTreeSet<_>>();
+        let canonical_survivors = survivor_set.iter().copied().collect::<Vec<_>>();
+        let roster = stored
+            .lobby
+            .roster
+            .iter()
+            .map(|player| player.player_id)
+            .collect::<BTreeSet<_>>();
+        if stored.lobby.state != LobbyState::InMatch
+            || !silent
+            || next_epoch != Some(requested_epoch)
+            || current_election.input_hash != request.input_hash
+            || request.survivors != canonical_survivors
+            || survivor_set.is_empty()
+            || !survivor_set.is_subset(&roster)
+            || !survivor_set.contains(&actor)
+            || survivor_set.contains(&current_election.winner_player_id)
+        {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "not_authority",
+                "in-match successor claim failed silence, epoch, or survivor validation",
+            )
+            .dry_run(dry_run));
+        }
+        let locked = stored.match_start_election.as_ref().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "authority_unavailable",
+                "match-start election input is unavailable",
+            )
+            .dry_run(dry_run)
+        })?;
+        let candidates = locked
+            .input
+            .candidates
+            .iter()
+            .filter(|candidate| survivor_set.contains(&candidate.player_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.len() != survivor_set.len() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "not_authority",
+                "survivor set is not covered by the locked election matrix",
+            )
+            .dry_run(dry_run));
+        }
+        let successor = elect_authority_for_roster(
+            &candidates,
+            locked.input.election_at,
+            locked.input.expected_wire_version,
+            usize::try_from(locked.input.roster_size).unwrap_or(usize::MAX),
         )
-        .dry_run(dry_run));
+        .map_err(|error| authority_error(&error, dry_run))?;
+        if successor.winner_player_id != actor {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "not_authority",
+                "successor does not win the locked survivor election",
+            )
+            .dry_run(dry_run));
+        }
+        apply_election(&mut stored, successor, now, dry_run)?;
+        if stored.authority_epoch != requested_epoch {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "authority_epoch_mismatch",
+                "successor election did not install the requested epoch",
+            )
+            .dry_run(dry_run));
+        }
     }
     if stored.lobby.state == LobbyState::Starting {
         transition(&mut stored.lobby, LobbyState::InMatch, dry_run)?;
     }
     stored.last_authority_heartbeat_at = Some(now);
+    let election = stored
+        .last_election
+        .as_ref()
+        .ok_or_else(|| internal_error(dry_run))?;
     stored.last_accepted_heartbeat = Some(StoredAcceptedHeartbeat {
         player_id: actor,
         epoch: stored.authority_epoch,
-        input_hash: request.input_hash,
+        input_hash: election.input_hash,
         received_at: now,
     });
     let authority = stored
@@ -2647,6 +2823,7 @@ async fn authority_heartbeat(
         accepted: true,
         state: stored.lobby.state,
         authority,
+        input_hash: election.input_hash,
         metadata: metadata_for(dry_run),
     }))
 }
@@ -3927,42 +4104,6 @@ fn recompute_authority(
     let election =
         elect_authority(&candidates, now).map_err(|error| authority_error(&error, dry_run))?;
     apply_election(stored, election.clone(), now, dry_run)?;
-    Ok(Some(election))
-}
-
-fn migrate_silent_authority(
-    stored: &mut StoredLobby,
-    now: UnixMillis,
-    dry_run: bool,
-) -> Result<Option<AuthorityElection>, ApiError> {
-    let Some(current) = stored
-        .lobby
-        .authority
-        .as_ref()
-        .map(|authority| authority.candidate_player_id)
-    else {
-        return Ok(None);
-    };
-    let silent = stored
-        .last_authority_heartbeat_at
-        .or(stored.started_at)
-        .and_then(|heartbeat| now.checked_duration_since(heartbeat))
-        .is_some_and(|age| age >= AUTHORITY_SILENCE_MS);
-    if !silent {
-        return Ok(stored.last_election.clone());
-    }
-    let candidates: Vec<_> = authority_candidates(stored)
-        .into_iter()
-        .filter(|candidate| candidate.player_id != current)
-        .collect();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let election =
-        elect_authority_for_roster(&candidates, now, M3_WIRE_VERSION, stored.lobby.roster.len())
-            .map_err(|error| authority_error(&error, dry_run))?;
-    apply_election(stored, election.clone(), now, dry_run)?;
-    stored.last_authority_heartbeat_at = Some(now);
     Ok(Some(election))
 }
 

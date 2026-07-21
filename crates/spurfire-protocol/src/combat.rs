@@ -27,6 +27,9 @@ pub const ORIGIN_LEASH_MM: u32 = 1_500;
 pub const PICKUP_RANGE_MM: u32 = 3_000;
 /// Authority rewind window from the design contract.
 pub const ROLLBACK_WINDOW_MS: u32 = 250;
+/// Maximum client-view rewind admitted for one authority shot. The longer
+/// pose ring absorbs scheduling jitter but never grants more lag compensation.
+pub const MAX_LAG_COMPENSATION_MS: u32 = 150;
 /// Lifetime of a rifle dropped by a swap.
 pub const DROPPED_WEAPON_LIFETIME_MS: u32 = 30_000;
 /// Camera recoil recovery shared by every rifle.

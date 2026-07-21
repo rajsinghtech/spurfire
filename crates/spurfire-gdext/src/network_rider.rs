@@ -8,6 +8,8 @@ use spurfire_net::replication::{
 };
 use spurfire_protocol::RiderStance;
 
+const MIGRATION_SNAPSHOT_CAPACITY: usize = 600;
+
 #[derive(GodotClass)]
 #[class(base = Node3D)]
 pub struct NetworkRider {
@@ -165,14 +167,14 @@ impl INode3D for NetworkRider {
             extrapolating: false,
             stance_id: i64::from(RiderStance::MOUNTED_ID),
             stance_known: true,
-            buffer: SnapshotBuffer::new(60, 32),
+            buffer: SnapshotBuffer::new(60, MIGRATION_SNAPSHOT_CAPACITY),
             clock_started: false,
         }
     }
 
     fn ready(&mut self) {
         self.tick_rate = self.tick_rate.clamp(1, 240);
-        self.buffer = SnapshotBuffer::new(self.tick_rate as u32, 32);
+        self.buffer = SnapshotBuffer::new(self.tick_rate as u32, MIGRATION_SNAPSHOT_CAPACITY);
     }
 
     fn process(&mut self, delta: f64) {

@@ -50,6 +50,9 @@
         <div class="fact"><span>Real isolation path</span><strong>Dedicated lobby tailnet</strong></div>
         <div class="fact"><span>Control membership</span><strong>Never joins the tailnet</strong></div>
         <div class="fact"><span>Authority</span><strong>Deterministic migration</strong></div>
+        <div class="fact"><span>Riders online</span><strong id="stats-riders">Private cohort</strong></div>
+        <div class="fact"><span>Direct connection rate</span><strong id="stats-direct">Private cohort</strong></div>
+        <div class="fact"><span>Median application RTT</span><strong id="stats-rtt">Private cohort</strong></div>
         <div class="fact"><span>Source version</span><strong>Release candidate v0.2.0</strong></div>
       </aside>
     </section>
@@ -432,8 +435,9 @@
 
       Promise.all([
         fetch('/healthz',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json()),
-        fetch('/v1/capabilities',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json())
-      ]).then(([health,capabilities])=>{
+        fetch('/v1/capabilities',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json()),
+        fetch('/v1/stats',{cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'}).then(response=>response.json())
+      ]).then(([health,capabilities,stats])=>{
         const ok=health.status==='ok';
         byId('dot').className=`dot${ok?' ok':''}`;
         byId('status').textContent=ok?'Hosted lobby service online':'Lobby service degraded';
@@ -445,6 +449,11 @@
           mode.textContent=health.provisioning_ready?'PROVIDER CONFIGURED':'PROVIDER PAUSED';
           mode.className=`mode${health.provisioning_ready?' live':''}`;
           byId('status-detail').textContent=health.provisioning_ready?'The configured provider adapter reports ready. This does not attest the separate public real-activation gates.':'New network provisioning is paused while existing sessions remain peer-hosted.';
+        }
+        if(!stats.cohort_suppressed){
+          byId('stats-riders').textContent=String(stats.riders_online??0);
+          byId('stats-direct').textContent=stats.direct_connection_rate_milli===null?'No fresh routes':`${(stats.direct_connection_rate_milli/10).toFixed(1)}%`;
+          byId('stats-rtt').textContent=stats.median_rtt_ms===null?'No fresh samples':`${stats.median_rtt_ms} ms`;
         }
       }).catch(()=>{
         byId('status').textContent='Control plane unavailable';

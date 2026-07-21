@@ -6,11 +6,11 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 
 - `crates/spurfire-net` defines transport-independent, 1,200-byte-bounded envelopes.
 - Envelopes carry heartbeats, rider input/snapshots, shot commands/results, authority announcements, and migration snapshots.
-- `SessionState` rejects replayed/out-of-order sequences, wrong-lobby traffic, and stale authority epochs. Silent authority loss elects the lowest connected `PlayerId` and advances the epoch. Remote authority claims are accepted only as self-nominations: an exact one-epoch advance while the current authority is silent in the receiver's own view (the local player always counts as fresh), or a same-epoch tie-break toward the lowest `PlayerId` only after that same silence timeout; reannouncements by the installed authority remain valid; third-party installs and epoch jumps such as `u64::MAX` are rejected as `InvalidAuthorityClaim` before any state can mutate, so a signed roster member cannot freeze legitimate lower-epoch traffic.
+- `SessionState` rejects replayed/out-of-order sequences, wrong-lobby traffic, and stale authority epochs. Live wire 2.0 installs the exact match-start `election_v1` order after independently recomputing the server projection. After two seconds of authority silence it selects the best surviving candidate from that order, using the scored degraded order and only then lowest-ID fallback. Remote claims remain self-nominations for exactly the next epoch; third-party installs and epoch jumps are rejected before state mutation.
 - `spurfire_net::rustscale::RustScalePeer` enrolls an ephemeral node with a one-use auth key, clears the key after `up()`, binds `Server::listen_packet`, and sends/receives through `UdpListener`.
 - `SnapshotBuffer` interpolates authoritative states two ticks behind, follows the shortest yaw arc, caps velocity extrapolation at fifteen ticks (250 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
 - Godot's native `PeerSession` node owns RustScale on a background Tokio runtime and moves packets to the main thread through signals. OAuth credentials remain control-plane-only; this class accepts only a narrow join auth key.
-- Godot's `NetworkRider` presents buffered remote snapshots and exposes reconciliation results. `multiplayer_replication.gd` sends authority snapshots or rider inputs from the fixed physics loop and feeds accepted snapshots into the remote rider.
+- Godot's `NetworkRider` presents up to 600 buffered remote snapshots (at least ten seconds at 60 Hz) and exposes reconciliation results. The lobby bridge sends wire-2 actor snapshots at 20 Hz, sends stance changes immediately, and feeds accepted authority state into remote riders.
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
 
@@ -51,23 +51,15 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
 - The capability-bound endpoint route verifies key possession, rejects duplicate IP/node claims, and returns a server-signed complete projection. Server restart cannot reuse its memory-only manifest key silently: active sessions bump generation and must re-key/re-register. Unknown senders never auto-insert. Unsigned packets remain available only after explicit local demo/test opt-in.
 - This defeats cross-player forgery and cross-lobby/generation/session replay. It does not make a peer's own gameplay claims truthful, defeat control-plane/Tailscale compromise, prevent dropping/DoS, or solve ranked verification. Real product readiness remains forced closed on the coherent authority and native secret-handoff gates.
 
-## Remaining production work
+## Remaining M6 and production work
 
-Design for the first four items is settled in `docs/decisions.md` D6/D7 and
-`docs/prototype-plan.md` §M6; they build after the M5 fun verdict.
-
-- Unify authority migration on one rule (D6): survivors recompute `election_v1` over the
-  match-start matrix restricted to the survivor set; `SessionState.expire_and_migrate`'s
-  lowest-ID rule becomes the degraded fallback inside the same scoring function.
-- Replace the `MigrationSnapshot` hash stub with real `MatchState` handoff: 2 Hz keyframes +
-  20 Hz deltas, 10 s peer ring buffers, successor restores and announces the restored-state
-  hash.
-- Add lag compensation (D7): authority-side rewind over ~250 ms position + stance history,
-  capped at 150 ms; stance must be in snapshots from M2 onward.
-- The Alpha shell now drives `PeerSession` from invitation join and consumes a
-  capability-protected, server-signed, memory-only endpoint/key projection bound to the exact
-  roster, network/session generation, and revision. Replace the remaining GDScript HTTP secret
-  boundary with native zeroizing HTTPS handoff before real activation.
+- D6 migration, the real M3–M5 checkpoint, D7's 150 ms admission cap, the ten-second
+  presentation ring, and native zeroizing HTTPS create/join handoff are implemented and covered by
+  credential-free tests. The successor restores the complete latest signed checkpoint and
+  announces its hash.
+- Add temporal compression for the 20 Hz actor stream. MatchState already sends bounded 2 Hz
+  keyframes; actor packets are currently compact short-key full snapshots.
+- Extend the multi-process proof from the legacy M2 checkpoint to the complete wire-2 M5 state,
+  then exercise 8–16 peers, forced DERP, route transitions, roaming, packet loss, and churn.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
-- Exercise forced DERP, route transitions, roaming, packet loss, and 16-peer churn.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.

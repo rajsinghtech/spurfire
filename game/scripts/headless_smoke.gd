@@ -508,6 +508,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 		"resolve_m3_shot_command", "issue_m4_spur_credit", "advance_m5_match",
 		"make_m5_match_state", "m5_playable_radius_m", "m5_respawn_position",
 		"complete_m5_objective", "record_m5_signal_hold", "submit_results",
+		"configure_migration_election",
 	]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks M3 multiplayer method %s" % method)

@@ -23,15 +23,15 @@ use spurfire_net::{
 };
 use spurfire_protocol::{
     bounty_respawn_world_point, canonical_keyreg_digest, playable_radius_m, ActorM3Mode,
-    ActorM3TickInput, BountyMatchKernel, BountyWorldPoint, CombatAuthority, CombatGait, DiveId,
-    DynamicObjectiveKind, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId,
-    LobbySessionProjection, M3ActorStance, M3AuthorityBank, M3AuthorityShot, M3CombatAuthority,
-    M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput, PlayerId, QuantizedDirection,
-    QuantizedOrigin, RecallState, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
-    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotOutcome, ShotResult, SimulationTick, SpurCreditKind, SpurSpendOutcome,
-    SubmitResultsRequest, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
-    WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
+    ActorM3TickInput, AuthorityResponse, BountyMatchKernel, BountyWorldPoint, CombatAuthority,
+    CombatGait, DiveId, DynamicObjectiveKind, EntityId, HorseVitalityClass, HorseVitalityState,
+    LobbyId, LobbySessionProjection, M3ActorStance, M3AuthorityBank, M3AuthorityShot,
+    M3CombatAuthority, M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput, PlayerId,
+    QuantizedDirection, QuantizedOrigin, RecallState, RiderSnapshot as CombatRiderSnapshot,
+    RiderStance, RidingState, RosterManifest, RosterManifestEntry, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotOutcome, ShotResult, SimulationTick, SpurCreditKind,
+    SpurSpendOutcome, SubmitResultsRequest, TargetDefinition, TargetPoseSnapshot, TargetRegistry,
+    TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -475,6 +475,16 @@ impl PeerSession {
         true
     }
 
+    fn install_migration_election(&mut self, election_json: GString) -> bool {
+        let (Ok(election), Some(session)) = (
+            serde_json::from_str::<AuthorityResponse>(&election_json.to_string()),
+            self.m3_secure_session.as_mut(),
+        ) else {
+            return false;
+        };
+        session.configure_migration_election(&election)
+    }
+
     fn secret_input(&self, path: &str) -> Option<Gd<NativeSecretInput>> {
         self.base()
             .try_get_node_as::<NativeSecretInput>(&NodePath::from(path))
@@ -891,6 +901,13 @@ impl PeerSession {
             self.m3_secure_session = None;
         }
         true
+    }
+
+    /// Recompute and lock the exact match-start election order after the
+    /// server-signed roster has been installed.
+    #[func]
+    fn configure_migration_election(&mut self, election_json: GString) -> bool {
+        self.install_migration_election(election_json)
     }
 
     /// Configure validated application identity and deterministic authority state.
@@ -3344,7 +3361,22 @@ impl PeerSession {
             return;
         }
         let id = lobby_id.to_string();
-        let body = serde_json::json!({"player_id": self.lobby_client.player_id().unwrap_or_default(), "input_hash": input_hash.to_string()}).to_string();
+        let (authority_epoch, survivors) = self.m3_secure_session.as_ref().map_or_else(
+            || (0, Vec::new()),
+            |session| {
+                (
+                    session.state().authority_epoch(),
+                    session.state().connected_players(),
+                )
+            },
+        );
+        let body = serde_json::json!({
+            "player_id": self.lobby_client.player_id().unwrap_or_default(),
+            "input_hash": input_hash.to_string(),
+            "authority_epoch": authority_epoch,
+            "survivors": survivors,
+        })
+        .to_string();
         self.lobby_client.request_public(
             LobbyOperation::Heartbeat,
             Method::POST,

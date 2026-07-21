@@ -541,6 +541,28 @@ async fn landing_page_links_public_downloads_and_sets_browser_headers() {
     assert!(html.contains("brew install --cask rajsinghtech/tap/spurfire"));
     assert!(html.contains("github.com/rajsinghtech/spurfire/releases/latest"));
     assert!(html.contains("fetch('/v1/capabilities'"));
+    assert!(html.contains("fetch('/v1/stats'"));
+}
+
+#[tokio::test]
+async fn public_stats_suppress_small_real_cohorts_without_revealing_their_size() {
+    let clock = Arc::new(ManualClock::new(UnixMillis::new(2_050_000)));
+    let provider = Arc::new(RecordingProvider::available());
+    let (app, _, _) = live_app(clock, provider);
+    let (_, created) = create(&app, "stats-one-real", "tailnet_per_lobby", 2).await;
+
+    let (status, stats) = json_request(&app, Method::GET, "/v1/stats", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["schema_version"], 1);
+    assert_eq!(stats["cohort_suppressed"], true);
+    assert!(stats["riders_online"].is_null());
+    assert!(stats["lobbies_by_state"].is_null());
+    assert!(stats["direct_connection_rate_milli"].is_null());
+    assert!(stats["median_rtt_ms"].is_null());
+    assert!(stats.get("cohort_size").is_none());
+    let wire = stats.to_string();
+    assert!(!wire.contains(created["lobby_id"].as_str().unwrap()));
+    assert!(!wire.contains("child-test.ts.net"));
 }
 
 #[tokio::test]
@@ -653,6 +675,7 @@ async fn full_dry_run_lifecycle_reaches_destroyed_without_mutation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(heartbeat["state"], "IN_MATCH");
+    assert_eq!(heartbeat["input_hash"], input_hash);
     let (_, network_view) = network(&app, lobby_id, network_capability).await;
     assert_eq!(
         network_view["authority"]["last_accepted_heartbeat"]["value"]["player_id"],
@@ -1650,8 +1673,52 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
         &[("x-spurfire-player-id", PLAYER_1)],
     )
     .await;
+    let (status, premature) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/heartbeat"),
+        Some(json!({
+            "player_id": PLAYER_2,
+            "input_hash": hash,
+            "authority_epoch": 2,
+            "survivors": [PLAYER_2, PLAYER_3]
+        })),
+        &[("x-spurfire-player-id", PLAYER_2)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(premature["code"], "not_authority");
     clock.advance(2_000);
-    measurement(&app, lobby_id, PLAYER_2, 5, 2).await;
+    let (status, wrong_winner) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/heartbeat"),
+        Some(json!({
+            "player_id": PLAYER_3,
+            "input_hash": hash,
+            "authority_epoch": 2,
+            "survivors": [PLAYER_2, PLAYER_3]
+        })),
+        &[("x-spurfire-player-id", PLAYER_3)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(wrong_winner["code"], "not_authority");
+    let (status, successor) = json_request(
+        &app,
+        Method::POST,
+        &format!("/v1/lobbies/{lobby_id}/heartbeat"),
+        Some(json!({
+            "player_id": PLAYER_2,
+            "input_hash": hash,
+            "authority_epoch": 2,
+            "survivors": [PLAYER_2, PLAYER_3]
+        })),
+        &[("x-spurfire-player-id", PLAYER_2)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(successor["authority"]["candidate_player_id"], PLAYER_2);
     let (_, migrated) = json_request(
         &app,
         Method::GET,
@@ -1665,6 +1732,7 @@ async fn silent_authority_migrates_deterministically_after_two_seconds() {
     .await;
     assert_eq!(migrated["winner_player_id"], PLAYER_2);
     assert_ne!(migrated["input_hash"], authority["input_hash"]);
+    assert_eq!(successor["input_hash"], migrated["input_hash"]);
     assert_eq!(migrated["input"]["candidates"].as_array().unwrap().len(), 2);
 }
 

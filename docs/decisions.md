@@ -60,7 +60,7 @@ wire break. No ranked play ships before this is designed.
 
 ## D6 — Mid-match authority is peer-owned; one migration rule
 
-**Status:** accepted (design; implementation in M6-complete)
+**Status:** accepted and implemented (credential-free qualification complete)
 
 The match must survive without the control plane. On authority silence, every surviving
 peer recomputes `election_v1` over the match-start measurement matrix restricted to the
@@ -69,12 +69,14 @@ same successor independently. `SessionState`'s lowest-connected-ID rule becomes 
 degraded fallback inside the same protocol scoring function, replacing today's three
 divergent rules (server scored re-election / peer lowest-ID / election_v1). The server's
 scored re-election applies only in `READY`; during `IN_MATCH` the service validates
-successor heartbeats by recomputing the shared function. Epoch checks remain the guard
-against stale authorities.
+successor heartbeats by recomputing the shared function over the peer-claimed canonical
+survivor set and the immutable match-start input. The heartbeat response returns the newly
+installed input hash so result submission cannot race a stale poll. Epoch checks remain the
+guard against stale authorities. Live and scale evidence remains an M6 acceptance gate.
 
 ## D7 — Lag compensation: authority-side rewind, hard-capped at 150ms
 
-**Status:** accepted (design; implementation in M6-complete)
+**Status:** accepted and implemented (human fairness qualification pending)
 
 `CombatAuthority` keeps ~250ms of position **and stance** history per target (crouch/roll
 hitboxes must rewind too). `ShotCommand` carries the shooter's view tick; the authority

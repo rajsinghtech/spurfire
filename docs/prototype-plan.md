@@ -1,6 +1,6 @@
 # SPURFIRE — Prototype Plan (M0–M6)
 
-**Status:** v2, reconciled 2026-07-17 against shipped code. Companion to `docs/design.md`
+**Status:** v2, reconciled 2026-07-20 against shipped code. Companion to `docs/design.md`
 (pillars source of truth). Every number here is a *starting value for playtest iteration*,
 not a commitment. Numbers over prose; tune with data.
 
@@ -30,7 +30,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | **source complete / playtest pending** | 15-min match, winner 400–800 pts, "play again" >= 70% |
-| M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
+| M6 | Scale and qualify the complete loop | **implementation advanced / live qualification pending** | 8p peer-hosted match, migration < 3s with score intact |
 
 Build order is strict: each milestone's tuning depends on the previous one's feel. The invited-
 friends M2 movement/combat/failover source path is implemented now; it is not deferred to M6.
@@ -391,13 +391,19 @@ encounter math below); (3) respawn ride-back time at 16p radius (~50–75s to ce
 
 **Goal:** everything above works over a real tailnet with one elected authority, 8+ players.
 
-**Status: the spine plus invited-friends M2 source path are built** — lobby HTTP service,
-`election_v1`, signed peer UDP transport (`spurfire-net` + embedded RustScale), player-keyed
-authority simulation, prediction/reconciliation, authority-only combat results, and bounded
-hash-checked epoch-2 state continuation. Credential-free tests prove source behavior; credentialed
-packaged-client and human evidence is still outstanding.
+**Status: the complete gameplay state and peer-owned failover source paths are built; scale and
+live qualification remain** — the lobby locks and projects the exact match-start election input,
+survivors recompute the same rule after two seconds of authority silence, and the service validates
+the next-epoch claim without selecting it. Signed wire 2.0 carries M3–M5 authority state and a
+bounded hash-checked checkpoint; the new authority restores combat, Spur, match score/clock,
+objectives, receipts, and RNG state atomically. Actor snapshots broadcast at 20 Hz, MatchState
+keyframes at 2 Hz, presentation retains 600 snapshots (at least ten seconds), and shot admission
+uses the locked 150 ms rewind cap over a 250 ms pose/stance history. Native zeroizing create/join
+handoff and the privacy-suppressed public stats endpoint are implemented. Credential-free tests
+prove source behavior; temporal snapshot-delta compression, 8–16-peer/soak harnesses,
+credentialed packaged-client runs, and human evidence are still outstanding.
 
-**Remaining scale/qualification scope (build after the M5 fun verdict):**
+**M6 source scope and current state:**
 
 1. **One migration rule, peers own it.** Mid-match authority is decided by peers: on 2s
    authority silence, every survivor recomputes `election_v1` over the match-start
@@ -406,23 +412,25 @@ packaged-client and human evidence is still outstanding.
    the same protocol scoring function; the server's scored re-election applies only in
    `READY`, and during `IN_MATCH` the service validates the successor's heartbeat by
    recomputing the same function. Split-brain prevented by construction + existing epochs.
-2. **Scale the implemented M2 handoff.** The invited-friends path already carries bounded
-   per-rider movement/health/ammo/input/shot receipts and verifies the restored-state hash before
-   epoch continuation. Extend it with M5 score, match clock, Spur, objectives, RNG counter,
-   delta-compressed 2 Hz keyframes/20 Hz deltas, and the full 10-second ring needed for 8–16 riders.
+2. **Complete-state handoff.** The signed checkpoint carries per-rider movement/health/ammo,
+   input/shot receipts, M5 score and clock, Spur, objectives, and RNG counter and verifies the
+   restored-state hash before epoch continuation. MatchState keyframes remain MTU-safe at eight
+   players and the presentation ring retains at least ten seconds. Temporal compression of the
+   20 Hz actor stream remains a source task before M6 can be called complete.
 3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
    ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
    capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
-4. **Client join flow.** The gated Alpha shell now drives one-use create/invitation/join,
+4. **Client join flow.** The gated Alpha shell drives one-use create/invitation/join,
    capability-bound key proof, server-signed exact-roster endpoint/session-key projection,
-   wire 1.2 signed native source-checked traffic, route/RTT election reports, creator start,
-   peer Leave, self-leave, and truthful teardown into `PeerSession`. Real activation remains
-   dark because the current Godot HTTP adapter copies first-response secrets through
-   GDScript/GString; replace it with native zeroizing HTTPS handoff, then gather credentialed
-   packaged-client M2 and cleanup evidence. Per-lobby join code; no accounts.
+   wire 2.0 signed native source-checked traffic, route/RTT election reports, creator start,
+   peer Leave, self-leave, and truthful teardown into `PeerSession`. Create/join HTTPS and
+   first-response secret handling are native and zeroizing; GDScript receives only redacted public
+   JSON. Real activation remains dark pending credentialed packaged-client and cleanup evidence.
+   Per-lobby join code; no accounts.
 5. **Landing-page live stats.** Secret-free aggregate stats endpoint feeding
    spurfire.rajsingh.info: riders online, lobbies by state, direct-connection rate, median
-   RTT. No lobby IDs, no join material.
+   RTT. No lobby IDs or join material; all real metrics are suppressed below a cohort of three,
+   which means the singleton Alpha always publishes only the suppression state.
 
 **Tuning table:**
 

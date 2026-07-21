@@ -2197,7 +2197,7 @@ impl CombatAuthority {
             );
         }
         let rollback_ticks = u64::from(self.tick_rate)
-            .saturating_mul(u64::from(ROLLBACK_WINDOW_MS))
+            .saturating_mul(u64::from(MAX_LAG_COMPENSATION_MS))
             .div_ceil(1_000);
         let age = authority_tick
             .checked_duration_since(command.tick)
@@ -2986,7 +2986,7 @@ mod tests {
             &authority,
             shooter,
             WeaponId::Dustwalker,
-            84,
+            90,
             muzzle,
             forward(),
         );
@@ -2995,7 +2995,7 @@ mod tests {
                 .validate_shot(
                     &stale,
                     SimulationTick::new(100),
-                    rider_snapshot(shooter, 84, muzzle),
+                    rider_snapshot(shooter, 90, muzzle),
                     &mut targets
                 )
                 .result
@@ -3007,7 +3007,7 @@ mod tests {
             &authority,
             shooter,
             WeaponId::Dustwalker,
-            90,
+            91,
             muzzle,
             QuantizedDirection::new(0, 0, 0),
         );
@@ -3016,7 +3016,7 @@ mod tests {
                 .validate_shot(
                     &invalid,
                     SimulationTick::new(100),
-                    rider_snapshot(shooter, 90, muzzle),
+                    rider_snapshot(shooter, 91, muzzle),
                     &mut targets
                 )
                 .result
@@ -3028,7 +3028,7 @@ mod tests {
                 .validate_shot(
                     &invalid,
                     SimulationTick::new(100),
-                    rider_snapshot(shooter, 90, muzzle),
+                    rider_snapshot(shooter, 91, muzzle),
                     &mut targets
                 )
                 .result
@@ -3041,7 +3041,7 @@ mod tests {
             &authority,
             shooter,
             WeaponId::Dustwalker,
-            91,
+            92,
             far_origin,
             forward(),
         );
@@ -3050,7 +3050,7 @@ mod tests {
                 .validate_shot(
                     &leashed,
                     SimulationTick::new(100),
-                    rider_snapshot(shooter, 91, muzzle),
+                    rider_snapshot(shooter, 92, muzzle),
                     &mut targets
                 )
                 .result

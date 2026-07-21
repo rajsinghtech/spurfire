@@ -14,12 +14,13 @@ use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serialize
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     bounty_objective_world_point, canonical_envelope_digest, canonical_manifest_digest,
-    BountyMatchSnapshot, BountyObjectiveSnapshot, BountyRevealSnapshot, BountyWorldPoint,
-    DynamicObjectiveKind, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId, M3ActorStance,
-    NodeKey, PlayerId, QuantizedDirection, RecallState, RosterHash, RosterManifest, SessionBinding,
-    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
-    SimulationTick, WeaponId, WireVersion, DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS,
-    MAX_BOUNTY_SCORE, MAX_M3_AUTHORITY_ACTORS, MOST_WANTED_REVEAL_TICKS, OBJECTIVE_LIFETIME_TICKS,
+    elect_authority_for_roster, AuthorityResponse, BountyMatchSnapshot, BountyObjectiveSnapshot,
+    BountyRevealSnapshot, BountyWorldPoint, DynamicObjectiveKind, EntityId, HorseVitalityClass,
+    HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId, QuantizedDirection, RecallState,
+    RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotResult, SimulationTick, WeaponId, WireVersion,
+    DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS, MAX_BOUNTY_SCORE,
+    MAX_M3_AUTHORITY_ACTORS, MOST_WANTED_REVEAL_TICKS, OBJECTIVE_LIFETIME_TICKS,
     ON_FOOT_STAMINA_TICKS, SPUR_METER_MAX,
 };
 
@@ -764,6 +765,77 @@ impl M3SecureSession {
 
     pub fn take_installed_checkpoint(&mut self) -> Option<M3MatchCheckpointV2> {
         self.installed_checkpoint.take()
+    }
+
+    /// Locks the server-audited match-start election into the peer-owned
+    /// migration order. Exact recomputation prevents a forged preference list.
+    pub fn configure_migration_election(&mut self, response: &AuthorityResponse) -> bool {
+        let roster_size = self.manifest.entries.len();
+        let manifest_players = self
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| entry.player_id)
+            .collect::<BTreeSet<_>>();
+        let input_players = response
+            .input
+            .candidates
+            .iter()
+            .map(|candidate| candidate.player_id)
+            .collect::<BTreeSet<_>>();
+        if usize::try_from(response.input.roster_size).ok() != Some(roster_size)
+            || input_players != manifest_players
+            || response.winner_player_id != self.state.authority()
+        {
+            return false;
+        }
+        let Ok(election) = elect_authority_for_roster(
+            &response.input.candidates,
+            response.input.election_at,
+            response.input.expected_wire_version,
+            roster_size,
+        ) else {
+            return false;
+        };
+        if AuthorityResponse::from(&election) != *response {
+            return false;
+        }
+
+        let mut normally_eligible = election
+            .scored_candidates
+            .iter()
+            .filter(|candidate| candidate.ineligibility_reasons.is_empty())
+            .collect::<Vec<_>>();
+        let mut degraded = election
+            .scored_candidates
+            .iter()
+            .filter(|candidate| !candidate.ineligibility_reasons.is_empty())
+            .collect::<Vec<_>>();
+        let by_score =
+            |left: &&spurfire_protocol::ScoredAuthorityCandidate,
+             right: &&spurfire_protocol::ScoredAuthorityCandidate| {
+                right
+                    .breakdown
+                    .score_milli
+                    .cmp(&left.breakdown.score_milli)
+                    .then_with(|| left.player_id.cmp(&right.player_id))
+            };
+        normally_eligible.sort_by(by_score);
+        degraded.sort_by(by_score);
+        if normally_eligible.is_empty() {
+            std::mem::swap(&mut normally_eligible, &mut degraded);
+        }
+        let mut preference = normally_eligible
+            .into_iter()
+            .chain(degraded)
+            .map(|candidate| candidate.player_id)
+            .collect::<Vec<_>>();
+        let remaining = manifest_players
+            .into_iter()
+            .filter(|player| !preference.contains(player))
+            .collect::<Vec<_>>();
+        preference.extend(remaining);
+        self.state.configure_migration_preference(preference)
     }
 
     pub fn envelope(
@@ -1657,6 +1729,41 @@ mod tests {
         M5MatchStateV2::from_snapshot(&kernel.snapshot())
     }
 
+    fn migration_election_response() -> AuthorityResponse {
+        let candidates = [(1_u8, 20_u32), (2, 120), (3, 60)]
+            .into_iter()
+            .map(|(index, rtt)| spurfire_protocol::AuthorityCandidate {
+                player_id: player(index),
+                wire_version: M3_WIRE_VERSION,
+                joined_at: spurfire_protocol::UnixMillis::new(0),
+                measurement: spurfire_protocol::ConnectivitySample {
+                    route_summary: spurfire_protocol::RouteSummary {
+                        direct_count: 2,
+                        peer_relay_count: 0,
+                        derp_count: 0,
+                    },
+                    rtt_ms_median: rtt,
+                    rtt_ms_worst: rtt * 2,
+                    jitter_ms: 3,
+                    loss_pct_milli: 100,
+                    upload_mbps_sustained: 20,
+                    device_perf_score: 800,
+                    observed_peer_count: 2,
+                    measured_at: spurfire_protocol::UnixMillis::new(99_000),
+                },
+            })
+            .collect::<Vec<_>>();
+        let election = elect_authority_for_roster(
+            &candidates,
+            spurfire_protocol::UnixMillis::new(100_000),
+            M3_WIRE_VERSION,
+            3,
+        )
+        .unwrap();
+        assert_eq!(election.winner_player_id, player(1));
+        AuthorityResponse::from(&election)
+    }
+
     fn envelope(payload: M3PeerPayloadV2) -> M3EnvelopeV2 {
         M3EnvelopeV2 {
             wire_version: M3_WIRE_VERSION,
@@ -2165,5 +2272,24 @@ mod tests {
         assert_eq!(rejected.state().authority(), player(1));
         assert_eq!(rejected.state().authority_epoch(), 1);
         assert!(rejected.installed_checkpoint().is_none());
+    }
+
+    #[test]
+    fn v2_secure_migration_recomputes_locked_election_instead_of_lowest_id() {
+        let response = migration_election_response();
+        let mut session = secure_session(player(2));
+        assert!(session.configure_migration_election(&response));
+        let heartbeat = secure_session(player(3))
+            .envelope(9, M3PeerPayloadV2::Heartbeat, &signing_key(3))
+            .unwrap();
+        assert_eq!(
+            session.accept_with_source(&heartbeat, source(3), None, 2_000),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(session.expire_and_migrate(3_000), Some((player(3), 2)));
+
+        let mut forged = response;
+        forged.winner_player_id = player(2);
+        assert!(!secure_session(player(2)).configure_migration_election(&forged));
     }
 }

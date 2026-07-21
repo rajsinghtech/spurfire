@@ -135,6 +135,9 @@ pub struct LobbyResponse {
     /// Current election input hash used by the authority heartbeat, when elected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_input_hash: Option<InputHash>,
+    /// Exact public election inputs locked for peer-owned in-match migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_election: Option<AuthorityResponse>,
     /// Capability-protected, memory-only gameplay endpoint projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<LobbySessionProjection>,
@@ -691,12 +694,19 @@ pub struct FinalScore {
 }
 
 /// `POST /v1/lobbies/{lobby_id}/heartbeat` request body.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityHeartbeatRequest {
     /// Must be the currently elected authority.
     pub player_id: PlayerId,
     /// Election view under which the authority is operating.
     pub input_hash: InputHash,
+    /// Peer-owned authority epoch. Zero is accepted only as the legacy form
+    /// for the already elected epoch.
+    #[serde(default)]
+    pub authority_epoch: u64,
+    /// Canonical survivor set used only for an in-match epoch advance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub survivors: Vec<PlayerId>,
 }
 
 /// Authority heartbeat acceptance response.
@@ -708,9 +718,49 @@ pub struct AuthorityHeartbeatResponse {
     pub state: LobbyState,
     /// Current authority summary.
     pub authority: AuthoritySummary,
+    /// Hash of the installed election input. This can change on a successful
+    /// peer-owned migration and lets the new authority submit results without
+    /// racing a later lobby poll.
+    pub input_hash: InputHash,
     /// Dry-run metadata.
     #[serde(flatten)]
     pub metadata: ResponseMetadata,
+}
+
+/// Privacy-safe public counts by lobby lifecycle state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicLobbyStateCounts {
+    pub provisioning: u32,
+    pub forming: u32,
+    pub ready: u32,
+    pub starting: u32,
+    pub in_match: u32,
+    pub closing: u32,
+    pub failed: u32,
+    pub expired: u32,
+    pub destroyed: u32,
+}
+
+/// Secret-free aggregate statistics for the public Alpha landing page.
+///
+/// Every metric is absent until at least three real lobby records contribute;
+/// the response deliberately never reveals the suppressed cohort size.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicAlphaStatsResponse {
+    /// Stable schema identifier for the independently cached public surface.
+    pub schema_version: u32,
+    /// True when the real-lobby cohort is too small to publish safely.
+    pub cohort_suppressed: bool,
+    /// Fresh accepted measurement rows across the publishable cohort.
+    pub riders_online: Option<u32>,
+    /// Aggregate retained real-lobby lifecycle counts.
+    pub lobbies_by_state: Option<PublicLobbyStateCounts>,
+    /// Direct known directions divided by all known directions, times 1,000.
+    pub direct_connection_rate_milli: Option<u32>,
+    /// Median of fresh accepted per-rider median RTT samples.
+    pub median_rtt_ms: Option<u32>,
+    /// Service time used for freshness and this response.
+    pub served_at: UnixMillis,
 }
 
 /// `POST /v1/lobbies/{lobby_id}/results` request body.

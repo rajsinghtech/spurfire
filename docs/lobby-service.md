@@ -46,6 +46,7 @@ Secure/default surface:
 | Method and path | Behavior |
 |---|---|
 | `GET /healthz` | Process health and cached provisioning readiness. A blocked provider reports `degraded` without exposing probe bodies. |
+| `GET /v1/stats` | Public, secret-free real-lobby aggregates for the landing page. Riders online, lobbies by state, direct-route rate, and median RTT are all `null` while fewer than three nonterminal real lobbies contribute. The suppressed response never reveals cohort size. The singleton Alpha lease therefore always suppresses real values. |
 | `GET /v1/capabilities` | Cached provider evidence plus explicit `real_lobby_creation_authorized` and `real_lobby_join_authorized` product gates. Provider probes alone never open the client. Both product gates remain false in production until native zeroizing client handoff, authenticated coherent P2P, restrictive policy, persistent abuse controls, and live qualification are complete. |
 | `POST /v1/lobbies` | Persists `PROVISIONING` and acquires the real-lobby lease before provider work. In tailnet-per-lobby mode it creates one API-only child, encrypts the exact child OAuth tuple in the file vault, installs the generated same-rider-tag UDP/41643-only policy, and requires semantic readback before activation. Mismatch, 403, timeout, transport, or decode failure triggers exact child-scoped deletion and retains custody/lease until exact absence and CAS vault erasure are proven. `max_players` defaults to 8 and is capped at 16. Same idempotency key/body/actor replays without a second create; a mismatch returns 409. |
 | `GET /v1/lobbies/{lobby_id}` | Currently unauthenticated, secret-free snapshot, including roster, TTLs, authority summary, and aggregate `cleanup_pending`. Secret-free is not authorization-safe: it must not expose real lobbies. The maintained read path can also advance expiry/cleanup/provider work, so it is not the target inspector. It never returns the tailnet FQDN. |
@@ -56,13 +57,13 @@ Secure/default surface:
 | `GET /v1/lobbies/{lobby_id}/authority` | Returns `election_v1`, scores, winner, SHA-256 `input_hash`, and the exact canonical input (evaluation time, wire context, roster size, and player-sorted measurement rows) needed for peer recomputation. |
 | `POST /v1/lobbies/{lobby_id}/elect-authority` | Compatibility alias for the authority read/evaluation path. |
 | `POST /v1/lobbies/{lobby_id}/start` | Creator-only. Requires `READY`, at least two players, fresh measurements, a winner, compatible wire majors, and one authority formula. Fixes `map_seed` and enters `STARTING`. |
-| `POST /v1/lobbies/{lobby_id}/heartbeat` | Current authority only. The first matching heartbeat enters `IN_MATCH`; later heartbeats prevent migration. After two seconds of silence, a fresh measurement re-elects over a matrix excluding the silent winner. |
+| `POST /v1/lobbies/{lobby_id}/heartbeat` | The first matching authority heartbeat enters `IN_MATCH`; later heartbeats keep that epoch current. After two seconds of silence, a survivor may claim exactly the next epoch with a canonical survivor set. The service recomputes `election_v1` from the immutable match-start matrix, rejects a non-winner or malformed claim, installs the shared result, and returns its new input hash. Measurements never choose an in-match successor. |
 | `POST /v1/lobbies/{lobby_id}/results` | Last authority only. Performs shallow schema, roster, score, duration, and input-hash checks; returns 202/`CLOSING`, then runs teardown. Co-signers are recorded inputs, not ranked trust. |
 | `DELETE /v1/lobbies/{lobby_id}` | Creator-only and idempotent. Shared mode revokes known unexpired keys before tagged-device cleanup. Child mode deletes the entire child tailnet with its child token and evicts the in-memory OAuth material only after success. Capability or vault failures set `cleanup_pending`. |
 
 JSON bodies larger than 64 KiB return 413; missing or wrong JSON content type returns 415.
 
-Planned (M6-complete, not yet implemented): a privacy-safe aggregate stats surface for the public landing page. It contains no lobby IDs, FQDNs, private addresses, join material, roster rows, provider IDs, or per-player detail. Real network aggregates are suppressed for cohorts smaller than three; with the alpha one-real-lobby quota they are always suppressed.
+The public landing page consumes the privacy-safe aggregate stats surface above. It contains no lobby IDs, FQDNs, private addresses, join material, roster rows, provider IDs, or per-player detail. Real network aggregates are suppressed for cohorts smaller than three; with the Alpha one-real-lobby quota they are always suppressed.
 
 ## Protected selected-lobby target
 

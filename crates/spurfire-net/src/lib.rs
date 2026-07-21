@@ -430,6 +430,7 @@ pub struct SessionState {
     authority_epoch: u64,
     next_sequence: u64,
     peers: BTreeMap<PlayerId, PeerState>,
+    migration_preference: Vec<PlayerId>,
     applied_shot_results: BTreeSet<(u64, PlayerId, u64)>,
     checkpoint: Option<MatchCheckpoint>,
 }
@@ -457,6 +458,7 @@ impl SessionState {
             authority_epoch: 1,
             next_sequence: 1,
             peers,
+            migration_preference: Vec::new(),
             applied_shot_results: BTreeSet::new(),
             checkpoint: None,
         }
@@ -490,6 +492,29 @@ impl SessionState {
                 connected: true,
             },
         );
+    }
+
+    /// Installs the validated match-start `election_v1` order used by every
+    /// peer after authority silence. The order must cover the exact roster.
+    pub fn configure_migration_preference(&mut self, preference: Vec<PlayerId>) -> bool {
+        let ordered = preference.iter().copied().collect::<BTreeSet<_>>();
+        if ordered.len() != preference.len()
+            || ordered.len() != self.peers.len()
+            || ordered.iter().ne(self.peers.keys())
+        {
+            return false;
+        }
+        self.migration_preference = preference;
+        true
+    }
+
+    /// Current locally observed survivor set in canonical player order.
+    #[must_use]
+    pub fn connected_players(&self) -> Vec<PlayerId> {
+        self.peers
+            .iter()
+            .filter_map(|(player, peer)| peer.connected.then_some(*player))
+            .collect()
     }
 
     pub fn envelope(&mut self, tick: u64, payload: PeerPayload) -> Envelope {
@@ -683,15 +708,18 @@ impl SessionState {
     }
 
     fn deterministic_successor(&self, now_ms: u64) -> Option<PlayerId> {
-        self.peers
-            .iter()
-            .filter_map(|(player, peer)| {
-                (*player == self.local_player
+        let connected = |player: PlayerId| {
+            self.peers.get(&player).is_some_and(|peer| {
+                player == self.local_player
                     || (peer.connected
-                        && now_ms.saturating_sub(peer.last_seen_ms) < HEARTBEAT_TIMEOUT_MS))
-                    .then_some(*player)
+                        && now_ms.saturating_sub(peer.last_seen_ms) < HEARTBEAT_TIMEOUT_MS)
             })
-            .min()
+        };
+        self.migration_preference
+            .iter()
+            .copied()
+            .find(|player| connected(*player))
+            .or_else(|| self.peers.keys().copied().find(|player| connected(*player)))
     }
 
     fn current_authority_is_silent(&self, now_ms: u64) -> bool {
@@ -719,10 +747,15 @@ impl SessionState {
             return None;
         }
         let successor = self
-            .peers
+            .migration_preference
             .iter()
-            .filter_map(|(id, peer)| peer.connected.then_some(*id))
-            .min()?;
+            .copied()
+            .find(|id| self.peers.get(id).is_some_and(|peer| peer.connected))
+            .or_else(|| {
+                self.peers
+                    .iter()
+                    .find_map(|(id, peer)| peer.connected.then_some(*id))
+            })?;
         let next_epoch = self.authority_epoch.checked_add(1)?;
         self.authority = successor;
         self.authority_epoch = next_epoch;
@@ -1360,6 +1393,19 @@ mod tests {
             session.accept(&stale, 3_101),
             AcceptOutcome::StaleAuthorityEpoch
         );
+    }
+
+    #[test]
+    fn configured_election_order_replaces_lowest_id_and_covers_exact_roster() {
+        let mut session = SessionState::new(lobby(), player(2), player(1), 0);
+        session.add_peer(player(3), 0);
+        assert!(!session.configure_migration_preference(vec![player(3), player(2)]));
+        assert!(!session.configure_migration_preference(vec![player(3), player(3), player(1)]));
+        assert!(session.configure_migration_preference(vec![player(1), player(3), player(2)]));
+        session.peers.get_mut(&player(2)).unwrap().last_seen_ms = 2_000;
+        session.peers.get_mut(&player(3)).unwrap().last_seen_ms = 2_000;
+        assert_eq!(session.expire_and_migrate(3_100), Some((player(3), 2)));
+        assert_eq!(session.connected_players(), vec![player(2), player(3)]);
     }
 
     #[test]

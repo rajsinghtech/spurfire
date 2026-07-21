@@ -292,6 +292,10 @@ pub struct StoredLobby {
     pub(crate) join_attempts: VecDeque<StoredJoinAttempt>,
     pub(crate) cleanup_pending: bool,
     pub(crate) last_election: Option<AuthorityElection>,
+    /// Immutable match-start matrix used by peers and the service to validate
+    /// every in-match successor election.
+    #[serde(default)]
+    pub(crate) match_start_election: Option<AuthorityElection>,
     #[serde(default)]
     pub(crate) authority_epoch: u64,
     pub(crate) started_at: Option<UnixMillis>,
@@ -350,6 +354,7 @@ impl StoredLobby {
             join_attempts: VecDeque::new(),
             cleanup_pending: false,
             last_election: None,
+            match_start_election: None,
             authority_epoch: 0,
             started_at: None,
             last_authority_heartbeat_at: None,
