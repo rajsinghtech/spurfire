@@ -464,7 +464,7 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
 - [x] Kill the authority mid-match: live signed `p2p-live` resumed in 2,044 ms with exact M3–M5 score/clock/objective continuity (2026-07-21).
 - [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
 - [ ] No movement desync > 200ms peak for any client over a 15-min soak.
-- [ ] Forced-DERP + packet-loss soak playable: TTK consistency holds, sway model unaffected.
+- [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 25 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
 - [ ] 16-peer churn run (joins/leaves mid-lobby) without stuck state.
 - [ ] Ephemeral devices and tailnet cleaned up after match (no leaked state).
 

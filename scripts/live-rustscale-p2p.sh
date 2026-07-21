@@ -84,13 +84,17 @@ mint_key() {
 }
 mint_key "$TMP/key-a"
 mint_key "$TMP/key-b"
+mint_key "$TMP/derp-a"
+mint_key "$TMP/derp-b"
 mint_key "$TMP/migration-a"
 mint_key "$TMP/migration-b"
 mint_key "$TMP/migration-c"
 unset CHILD_TOKEN ORG_TOKEN
 
-cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-p2p-smoke -- \
+cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
   --key-a "$TMP/key-a" --key-b "$TMP/key-b"
+cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
+  --force-derp --key-a "$TMP/derp-a" --key-b "$TMP/derp-b"
 mkdir "$TMP/migration"
 cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-migration-smoke -- \
   --key-a "$TMP/migration-a" --key-b "$TMP/migration-b" --key-c "$TMP/migration-c" \

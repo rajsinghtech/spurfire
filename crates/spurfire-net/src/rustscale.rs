@@ -64,6 +64,27 @@ impl RustScalePeer {
         auth_key: Zeroizing<Vec<u8>>,
         port: u16,
     ) -> Result<Self, RustScaleTransportError> {
+        Self::connect_inner(hostname.into(), auth_key, port, false).await
+    }
+
+    /// Live-harness-only connection mode for proving relay behavior without
+    /// changing host firewall state. Production builds do not expose it.
+    #[cfg(feature = "rustscale-test-support")]
+    pub async fn connect_for_test(
+        hostname: impl Into<String>,
+        auth_key: Zeroizing<Vec<u8>>,
+        port: u16,
+        disable_direct_paths: bool,
+    ) -> Result<Self, RustScaleTransportError> {
+        Self::connect_inner(hostname.into(), auth_key, port, disable_direct_paths).await
+    }
+
+    async fn connect_inner(
+        hostname: String,
+        auth_key: Zeroizing<Vec<u8>>,
+        port: u16,
+        disable_direct_paths: bool,
+    ) -> Result<Self, RustScaleTransportError> {
         let state_dir = tempfile::Builder::new()
             .prefix("spurfire-rustscale-")
             .tempdir()
@@ -79,6 +100,7 @@ impl RustScalePeer {
                 .auth_key(auth_key_text)
                 .state_dir(state_dir.path())
                 .ephemeral(true)
+                .disable_direct_paths(disable_direct_paths)
                 .build()?,
         );
         let status = server.0.up().await;

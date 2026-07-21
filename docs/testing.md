@@ -213,14 +213,15 @@ just p2p-live
 The headless probe creates a disposable child tailnet and should print:
 
 ```text
-SPURFIRE_P2P_UDP_OK ... route_a_to_b=Direct|Derp|PeerRelay ... samples=9 median_rtt_ms=<measured>
+SPURFIRE_P2P_UDP_OK mode=direct_allowed ... route_a_to_b=Direct|Derp|PeerRelay ... samples=9 median_rtt_ms=<measured>
+SPURFIRE_P2P_UDP_OK mode=forced_derp ... route_a_to_b=Derp route_b_to_a=Derp ... samples=9 median_rtt_ms=<measured>
 SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true checkpoint=complete_m3_m5 score_continuity=true clock_continuity=true objective_continuity=true failover_ms=<measured-under-3000>
 SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 ```
 
-`Direct` is preferred but relay paths are valid when NAT or local policy prevents direct UDP. Nine
-signed request/reply samples measure application-path RTT; a direct-path median at or above 80 ms
-fails the probe. The
+The first pass allows normal path selection; the second uses RustScale's test-only direct-path
+disable switch and fails unless both directions report `Derp`. Nine signed request/reply samples
+measure application-path RTT; a direct-path median at or above 80 ms fails the normal-path probe. The
 migration marker proves three separate OS peer processes formed a signed wire-2 mesh, authority A
 was forcibly terminated, B and C agreed on B at epoch 2, C installed B's exact fragmented M3–M5
 checkpoint, score/clock/objective state continued, a rider-input packet was accepted, and the

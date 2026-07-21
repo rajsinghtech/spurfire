@@ -60,10 +60,31 @@ fn read_key(path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let force_derp = env::args().any(|value| value == "--force-derp");
     let key_a = read_key(&argument("--key-a")?)?;
     let key_b = read_key(&argument("--key-b")?)?;
-    let mut a = RustScalePeer::connect("spurfire-p2p-a", key_a, 41_641).await?;
-    let mut b = RustScalePeer::connect("spurfire-p2p-b", key_b, 41_641).await?;
+    let mut a = RustScalePeer::connect_for_test(
+        if force_derp {
+            "spurfire-p2p-derp-a"
+        } else {
+            "spurfire-p2p-a"
+        },
+        key_a,
+        41_641,
+        force_derp,
+    )
+    .await?;
+    let mut b = RustScalePeer::connect_for_test(
+        if force_derp {
+            "spurfire-p2p-derp-b"
+        } else {
+            "spurfire-p2p-b"
+        },
+        key_b,
+        41_641,
+        force_derp,
+    )
+    .await?;
     sleep(Duration::from_secs(2)).await;
 
     let lobby = LobbyId::parse("00000000-0000-4000-8000-000000000001")?;
@@ -223,9 +244,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("direct application median RTT exceeded 80ms: {median_rtt_ms}ms").into(),
         );
     }
+    if force_derp && (route_a_to_b != "Derp" || route_b_to_a != "Derp") {
+        return Err(format!(
+            "forced-DERP proof selected unexpected routes: {route_a_to_b}/{route_b_to_a}"
+        )
+        .into());
+    }
 
     println!(
-        "SPURFIRE_P2P_UDP_OK a={} b={} route_a_to_b={} route_b_to_a={} samples=9 median_rtt_ms={median_rtt_ms}",
+        "SPURFIRE_P2P_UDP_OK mode={} a={} b={} route_a_to_b={} route_b_to_a={} samples=9 median_rtt_ms={median_rtt_ms}",
+        if force_derp { "forced_derp" } else { "direct_allowed" },
         a.tailnet_ip(),
         b.tailnet_ip(),
         route_a_to_b,

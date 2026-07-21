@@ -9,6 +9,7 @@ license.workspace = true
 [features]
 default = []
 rustscale = ["dep:rustscale-tsnet", "dep:rustscale-netstack", "dep:tempfile"]
+rustscale-test-support = ["rustscale"]
 
 [dependencies]
 base64 = "0.22"
@@ -35,7 +36,7 @@ path = "src/bin/local_scale_soak.rs"
 [[bin]]
 name = "spurfire-p2p-smoke"
 path = "src/bin/p2p_smoke.rs"
-required-features = ["rustscale"]
+required-features = ["rustscale-test-support"]
 
 [[bin]]
 name = "spurfire-migration-smoke"

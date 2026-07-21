@@ -30,15 +30,17 @@ The script requires the gitignored `.env` OAuth settings. It:
 2. Creates an API-only child tailnet.
 3. Immediately stores its one-time child credentials in a mode-0600 temporary file.
 4. Installs a disposable `tag:spurfire` allow policy.
-5. Mints five non-reusable, ephemeral, preauthorized 15-minute keys.
-6. Enrolls two independent embedded RustScale servers.
+5. Mints seven non-reusable, ephemeral, preauthorized 15-minute keys.
+6. Enrolls two independent embedded RustScale servers with normal path selection.
 7. Exchanges bounded signed Spurfire traffic in both directions, reports the route class, and measures the median of nine application-path RTT probes; direct median RTT at or above 80 ms fails.
-8. Starts three additional peers as separate OS processes with a signed exact-endpoint wire-2 roster, establishes the mesh, and forcibly kills authority process A without a Leave packet.
-9. Verifies surviving processes B and C elect B after the two-second silence boundary, installs B's fragmented complete M3–M5 checkpoint on C, proves exact score/clock/objective continuity plus continued rider input, and requires kill-to-continuation below three seconds.
-10. Closes survivors and exactly deletes the child tailnet under an exit trap.
+8. Enrolls two additional peers with RustScale's test-only direct-path disable switch, repeats the signed RTT exchange, and requires both directions to report `Derp`.
+9. Starts three additional peers as separate OS processes with a signed exact-endpoint wire-2 roster, establishes the mesh, and forcibly kills authority process A without a Leave packet.
+10. Verifies surviving processes B and C elect B after the two-second silence boundary, installs B's fragmented complete M3–M5 checkpoint on C, proves exact score/clock/objective continuity plus continued rider input, and requires kill-to-continuation below three seconds.
+11. Closes survivors and exactly deletes the child tailnet under an exit trap.
 
-On 2026-07-21, the complete Linux ARM64 probe used direct paths with a 3 ms application median,
-printed signed complete-state continuity with `failover_ms=2044`, and ended with
+On 2026-07-21, the complete Linux ARM64 probe used direct paths with a 2 ms application median,
+then forced DERP in both directions with a 25 ms median, printed signed complete-state continuity
+with `failover_ms=2044`, and ended with
 `SPURFIRE_P2P_LIFECYCLE_OK`. A separate
 organization-tailnet listing confirmed exact absence of that child and every disposable child
 created during the correction runs. This is live protocol/lifecycle development evidence, not the
@@ -69,8 +71,9 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   recovery on the next base.
 - The credential-free three-process proof now kills the original authority, installs the fragmented
   complete wire-2 M3–M5 checkpoint, and verifies exact score, clock, and objective continuity.
-  Credentialed qualification must still exercise 8–16 peers, forced DERP, route transitions,
-  roaming, packet loss, and churn.
+  Credentialed qualification still must exercise forced-DERP gameplay under packet loss, 8–16
+  peers, route transitions, roaming, and churn; the two-peer signed transport probe now proves
+  explicit DERP selection only.
 - Authority rider inputs drive distinct actor and horse presentation state, and followers replay
   their bounded unacknowledged input history after each reconciliation snapshot. The credential-free
   scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a
