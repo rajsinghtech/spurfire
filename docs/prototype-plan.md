@@ -27,7 +27,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
-| M3 | Spook/bolt, on-foot kit, Majestic Return | not started | median lose-horse-to-remount < 40s |
+| M3 | Spook/bolt, on-foot kit, Majestic Return | **authority kernel in progress / integration pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
@@ -176,6 +176,16 @@ broken will poison playtest feedback; (3) airborne FOV/camera motion sickness.
 ---
 
 ## M3 — Horse vitality, spook/bolt, on-foot kit, Majestic Return
+
+**Status: native authority foundation in progress / not yet playable.**
+`spurfire-protocol::m3` now owns replay-safe archetype vitality and regeneration, the fatal
+spook/three-second bolt edge, exact on-foot stamina/crouch/roll/stun timing, recall reductions,
+the Majestic Return phase clock, running-mount validation, acceptance telemetry, and validated
+migration checkpoints. M3 changes signed actor input/snapshot/checkpoint canonicalization, so the
+foundation declares wire 2.0 without changing the active 1.2 transport. M3 remains incomplete
+until the native authority actor bank, horse target/hitbox model, paused-reload combat path,
+jump/crouch input buffers, per-stance acceleration/deceleration, GDExtension adapter, remote horse
+presentation, wire-v2 replication, and playtest instrumentation consume this state end to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.
