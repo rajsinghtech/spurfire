@@ -305,6 +305,9 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 			failures.append("frontier arena moved smoke fixture: %s" % fixture)
 	arena.queue_free()
 	await get_tree().process_frame
+	# Let the physics server observe removal of the duplicate inherited course
+	# before the primary graybox course resumes deterministic simulation.
+	await _wait_physics_frames(5)
 
 func _check_render_interpolation(failures: Array[String]) -> void:
 	if int(Engine.physics_ticks_per_second) != 60:
