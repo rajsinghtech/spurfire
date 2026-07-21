@@ -1070,6 +1070,8 @@ mod tests {
                             reload_active: false,
                         },
                         interact_pressed: false,
+                        spur_pressed: false,
+                        mounted_for_spur: true,
                         rider_position: QuantizedOrigin::default(),
                         return_horse_position: QuantizedOrigin::default(),
                         return_horse_moving: false,

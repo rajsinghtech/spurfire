@@ -86,6 +86,10 @@ combat_interact={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":69)]
 }
+spur_spend={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":81)]
+}
 weapon_dustwalker={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":52)]

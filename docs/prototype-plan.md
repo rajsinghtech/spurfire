@@ -28,7 +28,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
-| M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
+| M4 | Spur meter + Majestic Charge | **authority foundation in progress** | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
@@ -264,6 +264,12 @@ prototype.
 ---
 
 ## M4 — Spur meter + Majestic Charge
+
+**Status: authority foundation in progress.** The checkpointed native meter validates the locked
+award rows, enforces no decay and an 18-point movement-style lifetime cap, and owns rising-edge
+mounted Charge versus horseless instant-Return spending. Live wire 2.0 consumes the reserved Q bit
+and snapshots meter/charge timing; combat awards come only from transactional authority results.
+Movement and near-miss producers, Charge modifiers/presentation, HUD/audio, and telemetry remain.
 
 **Goal:** reward stylish riding with a readable power spike that doesn't break balance.
 One meter, one button (Q), effect depends on state.

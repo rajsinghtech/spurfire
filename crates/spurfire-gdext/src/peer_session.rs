@@ -1275,6 +1275,9 @@ impl PeerSession {
             || snapshot.stamina_ticks != actor.on_foot().stamina_ticks()
             || snapshot.recall_state != actor.recall().state()
             || snapshot.recall_ready_tick != actor.recall().ready_tick()
+            || snapshot.spur_meter != actor.spur().meter()
+            || snapshot.charge_started_tick != actor.spur().charge_started_tick()
+            || snapshot.charge_end_tick != actor.spur().charge_end_tick()
             || authority
                 .targets()
                 .health(rider_entity_id(snapshot.rider_player_id))
@@ -1342,6 +1345,9 @@ impl PeerSession {
             "stamina_ticks": actor.on_foot().stamina_ticks(),
             "recall_state": actor.recall().state(),
             "recall_ready_tick": ready_tick,
+            "spur_meter": actor.spur().meter(),
+            "charge_started_tick": actor.spur().charge_started_tick(),
+            "charge_end_tick": actor.spur().charge_end_tick(),
             "actor_mode": actor.mode(),
             "on_foot_state": actor.on_foot().state(),
             "bolt_away_delta_mm": actor.horse().bolt_away_delta_mm(),
@@ -1481,6 +1487,9 @@ impl PeerSession {
             },
             recall_state: actor.recall().state(),
             recall_ready_tick: actor.recall().ready_tick(),
+            spur_meter: actor.spur().meter(),
+            charge_started_tick: actor.spur().charge_started_tick(),
+            charge_end_tick: actor.spur().charge_end_tick(),
         };
         self.make_m3_packet(tick as i64, M3PeerPayloadV2::ActorSnapshot { snapshot })
     }
@@ -1498,6 +1507,8 @@ impl PeerSession {
         crouch_pressed: bool,
         reload_active: bool,
         interact_pressed: bool,
+        spur_pressed: bool,
+        mounted_for_spur: bool,
         rider_position: Vector3,
         return_horse_position: Vector3,
         return_horse_moving: bool,
@@ -1533,6 +1544,8 @@ impl PeerSession {
                 reload_active,
             },
             interact_pressed,
+            spur_pressed,
+            mounted_for_spur,
             rider_position,
             return_horse_position,
             return_horse_moving,
@@ -1571,6 +1584,21 @@ impl PeerSession {
             Vector2::new(bolt_x as f32, bolt_z as f32).normalized(),
         );
         result.set("stamina_ticks", i64::from(actor.on_foot().stamina_ticks()));
+        result.set("spur_meter", i64::from(actor.spur().meter()));
+        result.set("charge_active", output.spur.charge_active);
+        result.set("charge_ended", output.spur.charge_ended);
+        result.set(
+            "charge_started_tick",
+            actor.spur().charge_started_tick().map_or(-1, |value| {
+                i64::try_from(value.as_u64()).unwrap_or(i64::MAX)
+            }),
+        );
+        result.set(
+            "charge_end_tick",
+            actor.spur().charge_end_tick().map_or(-1, |value| {
+                i64::try_from(value.as_u64()).unwrap_or(i64::MAX)
+            }),
+        );
         result.set(
             "recall_state_id",
             match actor.recall().state() {
@@ -1875,6 +1903,9 @@ impl PeerSession {
         let Some(authority) = self.m3_combat_authority.as_mut() else {
             return VarDictionary::new();
         };
+        let spur_before = authority
+            .actor(command.shooter_peer_id)
+            .map_or(0, |actor| actor.spur().meter());
         let Some(resolved) = resolve_m3_authority_shot(
             authority,
             &self.authority_rider_history,
@@ -1886,6 +1917,9 @@ impl PeerSession {
         let shooter_on_foot = authority
             .actor(command.shooter_peer_id)
             .is_some_and(|actor| actor.mode() != ActorM3Mode::Mounted);
+        let spur_after = authority
+            .actor(command.shooter_peer_id)
+            .map_or(spur_before, |actor| actor.spur().meter());
         let eliminated_rider = resolved
             .shot
             .result
@@ -1903,6 +1937,11 @@ impl PeerSession {
             serde_json::to_string(&resolved.shot.result).unwrap_or_default(),
         );
         result.set("shooter_on_foot", shooter_on_foot);
+        result.set(
+            "spur_awarded_points",
+            i64::from(spur_after.saturating_sub(spur_before)),
+        );
+        result.set("spur_meter", i64::from(spur_after));
         if let Some(player) = eliminated_rider {
             result.set("eliminated_rider_player_id", player.to_string());
             result.set("eliminated_rider_on_foot", target_on_foot);
@@ -3465,6 +3504,8 @@ mod tests {
                             reload_active: false,
                         },
                         interact_pressed: false,
+                        spur_pressed: false,
+                        mounted_for_spur: true,
                         rider_position: QuantizedOrigin::default(),
                         return_horse_position: QuantizedOrigin::default(),
                         return_horse_moving: false,
@@ -3528,6 +3569,8 @@ mod tests {
                             reload_active: false,
                         },
                         interact_pressed: false,
+                        spur_pressed: false,
+                        mounted_for_spur: true,
                         rider_position: QuantizedOrigin::default(),
                         return_horse_position: QuantizedOrigin::default(),
                         return_horse_moving: false,

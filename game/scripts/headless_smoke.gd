@@ -6,7 +6,7 @@ const RIDER_POSE_SCRIPT := preload("res://scripts/rider_pose.gd")
 const REQUIRED_ACTIONS := [
 	&"move_forward", &"move_back", &"steer_left", &"steer_right",
 	&"gait_up", &"gait_down", &"hard_brake", &"jump", &"reset_horse", &"scoreboard",
-	&"combat_fire", &"combat_reload", &"combat_interact", &"toggle_diagnostics"
+	&"combat_fire", &"combat_reload", &"combat_interact", &"spur_spend", &"toggle_diagnostics"
 ]
 const REQUIRED_NODES := [
 	"Horse", "Horse/CollisionShape3D", "Rider", "Rider/CollisionShape3D",
@@ -115,6 +115,10 @@ func _check_input_map(failures: Array[String]) -> void:
 	e_event.physical_keycode = KEY_E
 	if not InputMap.event_is_action(e_event, &"combat_interact"):
 		failures.append("physical E is not mapped to combat_interact")
+	var q_event := InputEventKey.new()
+	q_event.physical_keycode = KEY_Q
+	if not InputMap.event_is_action(q_event, &"spur_spend"):
+		failures.append("physical Q is not mapped to spur_spend")
 	var f3_event := InputEventKey.new()
 	f3_event.physical_keycode = KEY_F3
 	if not InputMap.event_is_action(f3_event, &"toggle_diagnostics"):
@@ -553,7 +557,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 		var actor_tick := peer_session.call(
 			"advance_m3_actor",
 			"00000000-0000-4000-8000-000000000002", 10, Vector2.ZERO,
-			false, false, false, false, Vector3.ZERO, Vector3.ZERO, false
+			false, false, false, false, false, true, Vector3.ZERO, Vector3.ZERO, false
 		) as Dictionary
 		if not bool(actor_tick.get("advanced", false)):
 			failures.append("PeerSession did not advance its private composed M3 actor")

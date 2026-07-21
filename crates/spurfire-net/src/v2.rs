@@ -17,7 +17,7 @@ use spurfire_protocol::{
     HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId, QuantizedDirection, RecallState,
     RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
     SessionSignature, ShotCommand, ShotResult, SimulationTick, WeaponId, WireVersion,
-    DIRECTION_UNITS, M3_WIRE_VERSION, ON_FOOT_STAMINA_TICKS,
+    DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS, ON_FOOT_STAMINA_TICKS, SPUR_METER_MAX,
 };
 
 use crate::{
@@ -180,6 +180,25 @@ pub struct M3ActorSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub recall_ready_tick: Option<SimulationTick>,
+    /// Authority-owned M4 Spur meter.
+    #[serde(default, rename = "u", alias = "spur_meter")]
+    pub spur_meter: u8,
+    /// Exact charge start tick when Majestic Charge is active.
+    #[serde(
+        default,
+        rename = "b",
+        alias = "charge_started_tick",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub charge_started_tick: Option<SimulationTick>,
+    /// Exclusive charge end tick when Majestic Charge is active.
+    #[serde(
+        default,
+        rename = "e",
+        alias = "charge_end_tick",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub charge_end_tick: Option<SimulationTick>,
 }
 
 /// Base64-on-JSON fragment so large migration checkpoints remain MTU-safe.
@@ -221,7 +240,13 @@ impl M3ActorSnapshot {
     pub fn is_canonical(self) -> bool {
         if self.rider_health > 100
             || self.stamina_ticks > ON_FOOT_STAMINA_TICKS
+            || self.spur_meter > SPUR_METER_MAX
             || !self.horse.is_canonical()
+            || !match (self.charge_started_tick, self.charge_end_tick) {
+                (None, None) => true,
+                (Some(start), Some(end)) => end == start.saturating_add(MAJESTIC_CHARGE_TICKS),
+                _ => false,
+            }
         {
             return false;
         }
@@ -1199,6 +1224,9 @@ mod tests {
             },
             recall_state: RecallState::HorsePresent,
             recall_ready_tick: None,
+            spur_meter: 0,
+            charge_started_tick: None,
+            charge_end_tick: None,
         }
     }
 
@@ -1244,6 +1272,8 @@ mod tests {
                             reload_active: false,
                         },
                         interact_pressed: false,
+                        spur_pressed: false,
+                        mounted_for_spur: true,
                         rider_position: QuantizedOrigin::default(),
                         return_horse_position: QuantizedOrigin::default(),
                         return_horse_moving: false,

@@ -6,7 +6,8 @@ use thiserror::Error;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    EntityId, PlayerId, QuantizedDirection, QuantizedOrigin, SimulationTick, WireVersion,
+    EntityId, PlayerId, QuantizedDirection, QuantizedOrigin, SimulationTick, SpurCreditCommand,
+    SpurCreditKind, SpurKernel, SpurSpendContext, SpurSpendOutcome, SpurTickOutput, WireVersion,
     DIRECTION_UNITS,
 };
 
@@ -1151,6 +1152,18 @@ impl RecallKernel {
         true
     }
 
+    /// Starts the return sequence immediately by spending a full M4 Spur meter.
+    pub fn request_recall_instant(&mut self, tick: SimulationTick) -> bool {
+        if !matches!(self.state, RecallState::CoolingDown | RecallState::Ready)
+            || self.current_tick != Some(tick)
+        {
+            return false;
+        }
+        self.state = RecallState::Hoofbeats;
+        self.phase_enter_tick = Some(tick);
+        true
+    }
+
     /// Checks range/window and records one successful mount.
     pub fn try_mount(
         &mut self,
@@ -1279,6 +1292,10 @@ pub struct ActorM3TickInput {
     pub on_foot: OnFootTickInput,
     /// Recall/return interaction edge.
     pub interact_pressed: bool,
+    /// Contextual Q/Spur edge. On foot this is the Majestic Return whistle.
+    pub spur_pressed: bool,
+    /// Authority movement stance says the rider is currently attached and mounted.
+    pub mounted_for_spur: bool,
     /// Collision-resolved rider position for mount range validation.
     pub rider_position: QuantizedOrigin,
     /// Collision-resolved return-horse position.
@@ -1302,6 +1319,8 @@ pub struct ActorM3TickOutput {
     pub remounted: bool,
     /// True exactly when that remount used the moving-horse window.
     pub running_mount: bool,
+    /// M4 meter spend and charge state for this tick.
+    pub spur: SpurTickOutput,
 }
 
 /// Serializable native authority state required to migrate during a bolt,
@@ -1320,6 +1339,8 @@ pub struct ActorGameplayKernel {
     horse_loss_tick: Option<SimulationTick>,
     #[serde(rename = "p")]
     pending_horse_loss_effects: Option<HorseDamageEffects>,
+    #[serde(rename = "s")]
+    spur: SpurKernel,
 }
 
 /// Validated wire-v2 migration checkpoint. Deserialized checkpoints must pass
@@ -1370,6 +1391,8 @@ struct RawActorGameplayKernel {
     horse_loss_tick: Option<SimulationTick>,
     #[serde(rename = "p", alias = "pending_horse_loss_effects")]
     pending_horse_loss_effects: Option<HorseDamageEffects>,
+    #[serde(default, rename = "s", alias = "spur")]
+    spur: SpurKernel,
 }
 
 impl<'de> Deserialize<'de> for ActorGameplayCheckpointV2 {
@@ -1387,6 +1410,7 @@ impl<'de> Deserialize<'de> for ActorGameplayCheckpointV2 {
                 recall: raw.actor.recall,
                 horse_loss_tick: raw.actor.horse_loss_tick,
                 pending_horse_loss_effects: raw.actor.pending_horse_loss_effects,
+                spur: raw.actor.spur,
             },
         };
         ActorGameplayKernel::restore_checkpoint(checkpoint.clone())
@@ -1417,6 +1441,7 @@ impl ActorGameplayKernel {
             recall: RecallKernel::default(),
             horse_loss_tick: None,
             pending_horse_loss_effects: None,
+            spur: SpurKernel::default(),
         }
     }
 
@@ -1442,6 +1467,12 @@ impl ActorGameplayKernel {
     #[must_use]
     pub const fn recall(&self) -> &RecallKernel {
         &self.recall
+    }
+
+    /// Current M4 Spur economy and charge clock.
+    #[must_use]
+    pub const fn spur(&self) -> &SpurKernel {
+        &self.spur
     }
 
     /// Idempotent fatal effects awaiting native adapter/network delivery.
@@ -1486,9 +1517,11 @@ impl ActorGameplayKernel {
         if !actor.horse.state_is_valid()
             || !actor.on_foot.state_is_valid()
             || !actor.recall.state_is_valid()
+            || !actor.spur.state_is_valid()
             || !tick_is_not_after(actor.horse.current_tick, actor.current_tick)
             || !tick_is_not_after(actor.on_foot.current_tick, actor.current_tick)
             || !tick_is_not_after(actor.recall.current_tick, actor.current_tick)
+            || !tick_is_not_after(actor.spur.current_tick(), actor.current_tick)
         {
             return Err(M3CheckpointError::InvalidState);
         }
@@ -1594,6 +1627,11 @@ impl ActorGameplayKernel {
         self.recall.apply_credit(command)
     }
 
+    /// Applies one replay-safe M4 award to this actor's authoritative meter.
+    pub fn apply_spur_credit(&mut self, command: SpurCreditCommand) -> Option<u8> {
+        self.spur.apply_credit(command)
+    }
+
     /// Advances horse, rider, recall, and remount state on one shared tick.
     pub fn advance_tick(&mut self, input: ActorM3TickInput) -> Result<ActorM3TickOutput, M3Error> {
         if input.on_foot.tick != input.tick
@@ -1612,6 +1650,24 @@ impl ActorGameplayKernel {
                 self.horse_loss_tick.ok_or(M3Error::InvalidState)?,
             )?;
         }
+
+        let spur_context =
+            if self.horse.state() == HorseVitalityState::Available && input.mounted_for_spur {
+                SpurSpendContext::Mounted
+            } else if self.horse.state() == HorseVitalityState::Despawned
+                && matches!(
+                    self.recall.state(),
+                    RecallState::CoolingDown | RecallState::Ready
+                )
+            {
+                SpurSpendContext::HorseAbsent
+            } else {
+                SpurSpendContext::Ineligible
+            };
+        let spur = self
+            .spur
+            .advance_tick(input.tick, input.spur_pressed, spur_context)
+            .map_err(|_| M3Error::TickReplay)?;
 
         let on_foot = (self.horse.state() != HorseVitalityState::Available)
             .then(|| self.on_foot.advance_tick(input.on_foot))
@@ -1634,9 +1690,6 @@ impl ActorGameplayKernel {
             }
         } else if self.horse.state() == HorseVitalityState::Despawned {
             let output = self.recall.advance_tick(input.tick)?;
-            if input.interact_pressed && output.state == RecallState::Ready {
-                self.recall.request_recall(input.tick);
-            }
             Some(RecallTickOutput {
                 state: self.recall.state(),
                 ..output
@@ -1644,7 +1697,14 @@ impl ActorGameplayKernel {
         } else {
             None
         };
-        if input.interact_pressed && self.recall.state() == RecallState::Ready {
+        if spur.spend == Some(SpurSpendOutcome::InstantMajesticReturn) {
+            if !self.recall.request_recall_instant(input.tick) {
+                return Err(M3Error::InvalidState);
+            }
+            if let Some(output) = recall.as_mut() {
+                output.state = self.recall.state();
+            }
+        } else if input.spur_pressed && self.recall.state() == RecallState::Ready {
             self.recall.request_recall(input.tick);
             if let Some(output) = recall.as_mut() {
                 output.state = self.recall.state();
@@ -1682,6 +1742,7 @@ impl ActorGameplayKernel {
             horse_despawned: horse_despawn_tick.is_some(),
             remounted,
             running_mount: remounted && running_mount_candidate,
+            spur,
         })
     }
 }
@@ -1939,6 +2000,23 @@ impl M3AuthorityBank {
         Ok(row.actor.apply_recall_credit(command))
     }
 
+    /// Issues one authority-derived M4 award with a checkpointed replay sequence.
+    pub fn issue_spur_credit(
+        &mut self,
+        rider_player_id: PlayerId,
+        tick: SimulationTick,
+        kind: SpurCreditKind,
+    ) -> Result<Option<u8>, M3AuthorityError> {
+        let row = self
+            .actors
+            .get_mut(&rider_player_id)
+            .ok_or(M3AuthorityError::UnknownActor)?;
+        Ok(row
+            .actor
+            .spur
+            .issue_credit(self.authority_epoch, tick, kind))
+    }
+
     /// Advances exactly one roster actor on the shared authority tick.
     pub fn advance_actor(
         &mut self,
@@ -2061,6 +2139,8 @@ mod tests {
                 reload_active: false,
             },
             interact_pressed,
+            spur_pressed: interact_pressed,
+            mounted_for_spur: true,
             rider_position: QuantizedOrigin::default(),
             return_horse_position: QuantizedOrigin::new(3_999, 0, 0),
             return_horse_moving: true,

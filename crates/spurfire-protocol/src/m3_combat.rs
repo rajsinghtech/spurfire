@@ -9,9 +9,9 @@ use crate::{
     ActorGameplayKernel, ActorM3TickInput, ActorM3TickOutput, AuthorityShot, CombatAuthority,
     EntityId, HorseDamageCommand, HorseDamageId, HorseTargetPoseSnapshot, HorseVitalityClass,
     HorseVitalityState, M3AuthorityBank, M3AuthorityError, M3AuthorityHorseDamage, PlayerId,
-    QuantizedDirection, QuantizedOrigin, ReloadSnapshot, RiderSnapshot, ShotCommand, ShotOutcome,
-    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TargetRegistryError,
-    TeamId, WeaponId,
+    QuantizedDirection, QuantizedOrigin, ReloadSnapshot, RiderSnapshot, RiderStance, ShotCommand,
+    ShotOutcome, SimulationTick, SpurCreditKind, TargetDefinition, TargetPoseSnapshot,
+    TargetRegistry, TargetRegistryError, TeamId, WeaponId,
 };
 
 /// Prototype rider health registered alongside each M3 horse target.
@@ -522,6 +522,26 @@ impl M3CombatAuthority {
                 }
             }
         }
+        let spur_kind = match (
+            rider.riding.stance,
+            shot.result.outcome,
+            shot.result.eliminated,
+        ) {
+            (RiderStance::SaddleDiveAirborne, ShotOutcome::Hit, true) => {
+                Some(SpurCreditKind::SaddleDiveElimination)
+            }
+            (RiderStance::Mounted, ShotOutcome::Hit, true) => {
+                Some(SpurCreditKind::MountedElimination)
+            }
+            (RiderStance::Mounted, ShotOutcome::Hit, false) => Some(SpurCreditKind::MountedHit),
+            _ => None,
+        };
+        if let Some(kind) = spur_kind {
+            candidate
+                .actors
+                .issue_spur_credit(command.shooter_peer_id, authority_tick, kind)?
+                .ok_or(M3CombatAuthorityError::CrossKernelInvariant)?;
+        }
         *self = candidate;
         Ok(M3AuthorityShot { shot, horse_damage })
     }
@@ -550,6 +570,8 @@ mod tests {
                 reload_active: false,
             },
             interact_pressed: false,
+            spur_pressed: false,
+            mounted_for_spur: true,
             rider_position: QuantizedOrigin::default(),
             return_horse_position: QuantizedOrigin::default(),
             return_horse_moving: false,

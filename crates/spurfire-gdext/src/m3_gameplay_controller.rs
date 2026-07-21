@@ -125,6 +125,11 @@ impl M3GameplayController {
                 reload_active,
             },
             interact_pressed,
+            // This isolated M3 regression adapter predates the live wire-v2 Q
+            // bit. Keep its single interaction edge driving recall; PeerSession
+            // separates E mount from Q spend in actual lobbies.
+            spur_pressed: interact_pressed,
+            mounted_for_spur: self.mode_id == 0,
             rider_position,
             return_horse_position,
             return_horse_moving,

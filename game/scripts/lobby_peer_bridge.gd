@@ -38,6 +38,7 @@ const M3_INPUT_SPRINT := 1 << 2
 const M3_INPUT_CROUCH := 1 << 3
 const M3_INPUT_RELOAD := 1 << 4
 const M3_INPUT_ADS := 1 << 5
+const M3_INPUT_SPUR := 1 << 6
 const M3_INPUT_BUFFER_TICKS := 9
 const M3_BOLT_SPEED_MPS := 12.0
 const M3_RETURN_SPAWN_DISTANCE_M := 60.0
@@ -249,6 +250,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 			player_id, tick, movement,
 			buttons & M3_INPUT_SPRINT != 0, buttons & M3_INPUT_CROUCH != 0,
 			buttons & M3_INPUT_RELOAD != 0, buttons & M3_INPUT_INTERACT != 0,
+			buttons & M3_INPUT_SPUR != 0, int(state.stance_id) in [1, 2],
 			state.position, state.horse_position, (state.horse_velocity as Vector3).length() > 0.1
 		) as Dictionary
 		if not bool(actor_tick.get("advanced", false)):
@@ -256,6 +258,10 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		state["reload_active_ticks"] = int(actor_tick.get("reload_active_ticks", 0))
 		state["reload_required_ticks"] = int(actor_tick.get("reload_required_ticks", 0))
 		state["reload_paused"] = bool(actor_tick.get("reload_pause_started", false))
+		state["spur_meter"] = int(actor_tick.get("spur_meter", 0))
+		state["charge_active"] = bool(actor_tick.get("charge_active", false))
+		state["charge_started_tick"] = int(actor_tick.get("charge_started_tick", -1))
+		state["charge_end_tick"] = int(actor_tick.get("charge_end_tick", -1))
 		if bool(actor_tick.get("on_foot_active", false)):
 			state["stance_id"] = 6
 			var on_foot_velocity := actor_tick.get("on_foot_velocity", Vector2.ZERO) as Vector2
@@ -531,6 +537,8 @@ func _sample_m3_input(tick: int) -> Dictionary:
 		buttons |= M3_INPUT_RELOAD
 	if Input.is_action_pressed(&"combat_aim"):
 		buttons |= M3_INPUT_ADS
+	if Input.is_action_just_pressed(&"spur_spend"):
+		buttons |= M3_INPUT_SPUR
 	var on_foot_move := Vector2(float(steer), float(-throttle))
 	if on_foot_move.length() > 1000.0:
 		on_foot_move = on_foot_move.normalized() * 1000.0
@@ -911,6 +919,9 @@ func _apply_m3_snapshot(snapshot_json: String, snapshot_tick: int) -> void:
 		"horse_state": str(horse.get("s", horse.get("state", "despawned"))),
 		"horse_class": str(horse.get("c", horse.get("class", "courser"))),
 		"recall_state": str(row.get("r", row.get("recall_state", "horse_present"))),
+		"spur_meter": int(row.get("u", row.get("spur_meter", 0))),
+		"charge_started_tick": int(row.get("b", row.get("charge_started_tick", -1))),
+		"charge_end_tick": int(row.get("e", row.get("charge_end_tick", -1))),
 	}
 	if player_id == local_player_id:
 		var correction := rider_position - local_rider.global_position
