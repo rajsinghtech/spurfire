@@ -106,6 +106,63 @@ impl M3CombatAuthority {
         })
     }
 
+    /// Reassembles a migrated authority only when combat, rider targets,
+    /// horse targets, actor ownership, health, and epochs form one exact graph.
+    pub fn restore_components(
+        combat: CombatAuthority,
+        targets: TargetRegistry,
+        actors: M3AuthorityBank,
+        rider_entities: BTreeMap<PlayerId, EntityId>,
+        next_horse_damage_sequence: u64,
+    ) -> Result<Self, M3CombatAuthorityError> {
+        let actor_rows = actors.checkpoint();
+        if next_horse_damage_sequence == 0
+            || combat.authority_epoch() != actors.authority_epoch()
+            || actor_rows.actors().len() != rider_entities.len()
+            || combat.shooter_count() != actor_rows.actors().len()
+            || targets.len() != actor_rows.actors().len().saturating_mul(2)
+        {
+            return Err(M3CombatAuthorityError::CrossKernelInvariant);
+        }
+        let mut seen_entities = BTreeMap::new();
+        for row in actor_rows.actors() {
+            let player = row.rider_player_id;
+            let Some(rider_entity) = rider_entities.get(&player).copied() else {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            };
+            let horse_entity = row.horse_entity_id;
+            let Some(actor) = actors.actor(player) else {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            };
+            let Some(rider_definition) = targets.definition(rider_entity) else {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            };
+            let Some(horse_definition) = targets.definition(horse_entity) else {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            };
+            if rider_entity == horse_entity
+                || seen_entities.insert(rider_entity, player).is_some()
+                || seen_entities.insert(horse_entity, player).is_some()
+                || combat.shooter_kernel(player).is_none()
+                || rider_definition.owner_peer_id != Some(player)
+                || rider_definition.max_health != M3_RIDER_MAX_HEALTH
+                || horse_definition.owner_peer_id != Some(player)
+                || horse_definition.team_id != rider_definition.team_id
+                || horse_definition.max_health != actor.horse().max_health()
+                || targets.health(horse_entity) != Some(actor.horse().health())
+            {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            }
+        }
+        Ok(Self {
+            combat,
+            targets,
+            actors,
+            rider_entities,
+            next_horse_damage_sequence,
+        })
+    }
+
     /// Registers one shooter, rider target, horse target, and actor atomically.
     #[allow(clippy::too_many_arguments)]
     pub fn register_actor(
@@ -172,6 +229,12 @@ impl M3CombatAuthority {
     #[must_use]
     pub const fn actors(&self) -> &M3AuthorityBank {
         &self.actors
+    }
+
+    /// Next authority-global horse damage receipt sequence for checkpoints.
+    #[must_use]
+    pub const fn next_horse_damage_sequence(&self) -> u64 {
+        self.next_horse_damage_sequence
     }
 
     /// Immutable actor state for one roster member.
@@ -436,6 +499,46 @@ mod tests {
             TeamId(1),
         ));
         assert_eq!(authority, before);
+    }
+
+    #[test]
+    fn migrated_components_require_one_exact_combat_actor_target_graph() {
+        let authority = authority();
+        let restored = M3CombatAuthority::restore_components(
+            authority.combat.clone(),
+            authority.targets.clone(),
+            authority.actors.clone(),
+            authority.rider_entities.clone(),
+            authority.next_horse_damage_sequence,
+        )
+        .unwrap();
+        assert_eq!(restored, authority);
+
+        let mut wrong_health = authority.targets.clone();
+        wrong_health.synchronize_health(EntityId(202), 1).unwrap();
+        assert_eq!(
+            M3CombatAuthority::restore_components(
+                authority.combat.clone(),
+                wrong_health,
+                authority.actors.clone(),
+                authority.rider_entities.clone(),
+                authority.next_horse_damage_sequence,
+            ),
+            Err(M3CombatAuthorityError::CrossKernelInvariant)
+        );
+
+        let mut missing_rider = authority.rider_entities.clone();
+        missing_rider.remove(&player(2));
+        assert_eq!(
+            M3CombatAuthority::restore_components(
+                authority.combat.clone(),
+                authority.targets.clone(),
+                authority.actors.clone(),
+                missing_rider,
+                authority.next_horse_damage_sequence,
+            ),
+            Err(M3CombatAuthorityError::CrossKernelInvariant)
+        );
     }
 
     #[test]

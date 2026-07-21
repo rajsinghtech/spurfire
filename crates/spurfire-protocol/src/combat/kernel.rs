@@ -1369,6 +1369,24 @@ impl TargetRegistry {
         self.restore(definition, definition.max_health)
     }
 
+    /// Number of immutable target identities in the authority registry.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// Whether no target identities are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// Immutable identity row for migration graph validation.
+    #[must_use]
+    pub fn definition(&self, entity_id: EntityId) -> Option<TargetDefinition> {
+        self.targets.get(&entity_id).map(|record| record.definition)
+    }
+
     /// Restores a stable target definition and authority-owned health.
     ///
     /// This is intended for a hash-checked migration checkpoint. Pose history is
@@ -1908,6 +1926,12 @@ impl CombatAuthority {
     #[must_use]
     pub const fn authority_epoch(&self) -> u64 {
         self.authority_epoch
+    }
+
+    /// Number of authority-owned shooter kernels.
+    #[must_use]
+    pub fn shooter_count(&self) -> usize {
+        self.shooters.len()
     }
 
     /// Match-lifetime accepted-shot ledger.

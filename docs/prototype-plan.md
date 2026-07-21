@@ -190,8 +190,10 @@ elimination. `M3MatchCheckpointV2` binds that gameplay bank to the existing sort
 ammo, health, command receipts, authority epoch, and canonical digest. M3 changes signed actor
 input/snapshot/checkpoint canonicalization, so a separate strict wire-2.0 candidate now defines
 bounded loadouts, mounted/on-foot input, complete actor/horse snapshots, hash-bound MTU-safe
-migration fragments, and fixed-layout signing bytes without changing the active 1.2 transport. M3
-remains incomplete until the
+migration fragments, and fixed-layout signing bytes without changing the active 1.2 transport.
+`M3SecureSession` now applies exact-roster signatures, endpoint identity, replay/role checks, and
+atomic out-of-order checkpoint assembly; composed combat restoration validates the complete
+rider/horse target graph before installation. M3 remains incomplete until the
 paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
 scene adapter, remote horse presentation, atomic `PeerSession` wire-v2 activation, and playtest
 instrumentation consume this state end to end.

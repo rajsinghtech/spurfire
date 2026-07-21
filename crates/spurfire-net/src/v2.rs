@@ -3,19 +3,27 @@
 //! This module is deliberately separate from the active wire-1.2 codec. Its
 //! types, validation, and canonical signing bytes must be integrated together.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+};
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    canonical_envelope_digest, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId,
-    M3ActorStance, PlayerId, QuantizedDirection, RecallState, SessionBinding, ShotCommand,
-    ShotResult, SimulationTick, WeaponId, WireVersion, DIRECTION_UNITS, M3_WIRE_VERSION,
-    ON_FOOT_STAMINA_TICKS,
+    canonical_envelope_digest, canonical_manifest_digest, EntityId, HorseVitalityClass,
+    HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId, QuantizedDirection, RecallState,
+    RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotResult, SimulationTick, WeaponId, WireVersion,
+    DIRECTION_UNITS, M3_WIRE_VERSION, ON_FOOT_STAMINA_TICKS,
 };
 
-use crate::{CodecError, M3MatchCheckpointV2, MAX_DATAGRAM_BYTES};
+use crate::{
+    AcceptOutcome, CodecError, M3MatchCheckpointV2, SessionState, HEARTBEAT_TIMEOUT_MS,
+    MAX_DATAGRAM_BYTES,
+};
 
 /// Decoded checkpoint bytes carried by one migration datagram.
 pub const M3_CHECKPOINT_FRAGMENT_BYTES: usize = 384;
@@ -343,6 +351,453 @@ impl M3EnvelopeV2 {
             &canonical_m3_payload_bytes(&self.payload),
         ))
     }
+}
+
+#[derive(Clone, Debug)]
+struct PendingMigration {
+    authority: PlayerId,
+    epoch: u64,
+    state_hash: [u8; 32],
+    fragment_count: u16,
+    started_ms: u64,
+    envelopes: BTreeMap<u16, M3EnvelopeV2>,
+}
+
+/// Exact-roster signing, source admission, replay, and atomic M3 migration.
+#[derive(Clone, Debug)]
+pub struct M3SecureSession {
+    manifest: RosterManifest,
+    roster_hash: RosterHash,
+    state: SessionState,
+    pending_migration: Option<PendingMigration>,
+    installed_checkpoint: Option<M3MatchCheckpointV2>,
+}
+
+impl M3SecureSession {
+    pub fn new(
+        manifest: RosterManifest,
+        manifest_public_key: SessionPublicKey,
+        manifest_signature: SessionSignature,
+        state: SessionState,
+    ) -> Result<Self, SessionIdentityError> {
+        manifest.validate()?;
+        manifest_public_key.verify_digest(
+            &canonical_manifest_digest(manifest_public_key, &manifest),
+            manifest_signature,
+        )?;
+        let roster_hash = manifest.hash();
+        Ok(Self {
+            manifest,
+            roster_hash,
+            state,
+            pending_migration: None,
+            installed_checkpoint: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn roster_hash(&self) -> RosterHash {
+        self.roster_hash
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    #[must_use]
+    pub fn installed_checkpoint(&self) -> Option<&M3MatchCheckpointV2> {
+        self.installed_checkpoint.as_ref()
+    }
+
+    pub fn take_installed_checkpoint(&mut self) -> Option<M3MatchCheckpointV2> {
+        self.installed_checkpoint.take()
+    }
+
+    pub fn envelope(
+        &mut self,
+        tick: u64,
+        payload: M3PeerPayloadV2,
+        signing_key: &SigningKey,
+    ) -> Result<M3EnvelopeV2, SessionIdentityError> {
+        validate_payload(&payload).map_err(|_| SessionIdentityError::BadSignature)?;
+        let local = self.state.local_player;
+        let authority = self.state.authority;
+        let subject_is_valid = match &payload {
+            M3PeerPayloadV2::ActorSnapshot { snapshot } => {
+                local == authority && self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::ShotResult { result } => {
+                local == authority
+                    && result.tick.as_u64() == tick
+                    && self.state.peers.contains_key(&result.shooter_peer_id)
+            }
+            M3PeerPayloadV2::ShotCommand { command } => {
+                command.shooter_peer_id == local && command.tick.as_u64() == tick
+            }
+            M3PeerPayloadV2::Authority {
+                authority: claimed,
+                epoch,
+            }
+            | M3PeerPayloadV2::MigrationFragment {
+                authority: claimed,
+                epoch,
+                ..
+            } => *claimed == local && *epoch == self.state.authority_epoch,
+            M3PeerPayloadV2::Hello { .. }
+            | M3PeerPayloadV2::Heartbeat
+            | M3PeerPayloadV2::Probe { .. }
+            | M3PeerPayloadV2::ActorLoadout { .. }
+            | M3PeerPayloadV2::ActorInput { .. }
+            | M3PeerPayloadV2::Leave => true,
+        };
+        if !subject_is_valid {
+            return Err(SessionIdentityError::BadSignature);
+        }
+        let sequence = self.state.next_sequence;
+        let mut envelope = M3EnvelopeV2 {
+            wire_version: M3_WIRE_VERSION,
+            lobby_id: self.state.lobby_id,
+            sender: local,
+            sequence,
+            authority_epoch: self.state.authority_epoch,
+            simulation_tick: tick,
+            payload,
+            session: None,
+        };
+        self.sign(&mut envelope, signing_key)?;
+        self.state.next_sequence = self.state.next_sequence.saturating_add(1);
+        Ok(envelope)
+    }
+
+    pub fn sign(
+        &self,
+        envelope: &mut M3EnvelopeV2,
+        signing_key: &SigningKey,
+    ) -> Result<(), SessionIdentityError> {
+        if envelope.wire_version != M3_WIRE_VERSION {
+            return Err(SessionIdentityError::BadSignature);
+        }
+        let Some(entry) = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.player_id == envelope.sender)
+        else {
+            return Err(SessionIdentityError::BadSignature);
+        };
+        if entry.session_public_key.as_bytes() != &signing_key.verifying_key().to_bytes() {
+            return Err(SessionIdentityError::BadSignature);
+        }
+        let digest = m3_envelope_digest(
+            envelope,
+            self.manifest.network_generation,
+            self.manifest.session_generation,
+            self.roster_hash,
+        );
+        envelope.session = Some(SessionBinding {
+            network_generation: self.manifest.network_generation,
+            session_generation: self.manifest.session_generation,
+            roster_hash: self.roster_hash,
+            signature: SessionSignature::from_bytes(signing_key.sign(&digest).to_bytes()),
+        });
+        Ok(())
+    }
+
+    pub fn expire_and_migrate(&mut self, now_ms: u64) -> Option<(PlayerId, u64)> {
+        self.pending_migration = None;
+        self.state.expire_and_migrate(now_ms)
+    }
+
+    pub fn accept_with_source(
+        &mut self,
+        envelope: &M3EnvelopeV2,
+        source: SocketAddr,
+        current_node_key: Option<NodeKey>,
+        now_ms: u64,
+    ) -> AcceptOutcome {
+        if envelope.wire_version != M3_WIRE_VERSION {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        let Some(binding) = envelope.session else {
+            return AcceptOutcome::UnsignedInSecureMode;
+        };
+        let Some(entry) = self
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.player_id == envelope.sender)
+        else {
+            return AcceptOutcome::UnknownSender;
+        };
+        if entry.tailnet_address != source.ip() || entry.application_port != source.port() {
+            return AcceptOutcome::EndpointMismatch;
+        }
+        if let (Some(claimed), Some(current)) = (entry.node_key, current_node_key) {
+            if claimed != current {
+                return AcceptOutcome::NodeKeyMismatch;
+            }
+        }
+        if envelope.lobby_id != self.manifest.lobby_id {
+            return AcceptOutcome::WrongLobby;
+        }
+        if binding.network_generation != self.manifest.network_generation
+            || binding.session_generation != self.manifest.session_generation
+        {
+            return AcceptOutcome::WrongGeneration;
+        }
+        if binding.roster_hash != self.roster_hash {
+            return AcceptOutcome::RosterMismatch;
+        }
+        let digest = m3_envelope_digest(
+            envelope,
+            binding.network_generation,
+            binding.session_generation,
+            binding.roster_hash,
+        );
+        if entry
+            .session_public_key
+            .verify_digest(&digest, binding.signature)
+            .is_err()
+        {
+            return AcceptOutcome::BadSignature;
+        }
+        if validate_payload(&envelope.payload).is_err() {
+            return AcceptOutcome::InvalidPayloadSubject;
+        }
+        self.accept_authenticated(envelope, now_ms)
+    }
+
+    fn accept_authenticated(&mut self, envelope: &M3EnvelopeV2, now_ms: u64) -> AcceptOutcome {
+        if envelope.lobby_id != self.state.lobby_id {
+            return AcceptOutcome::WrongLobby;
+        }
+        if envelope.authority_epoch < self.state.authority_epoch {
+            return AcceptOutcome::StaleAuthorityEpoch;
+        }
+        if !self.state.peers.contains_key(&envelope.sender) {
+            return AcceptOutcome::UnknownSender;
+        }
+        if matches!(envelope.payload, M3PeerPayloadV2::MigrationFragment { .. }) {
+            return self.accept_migration_fragment(envelope, now_ms);
+        }
+        let authority_claim = matches!(envelope.payload, M3PeerPayloadV2::Authority { .. });
+        if envelope.authority_epoch != self.state.authority_epoch && !authority_claim {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        if matches!(
+            envelope.payload,
+            M3PeerPayloadV2::ActorSnapshot { .. } | M3PeerPayloadV2::ShotResult { .. }
+        ) && envelope.sender != self.state.authority
+        {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        let subject_is_invalid = match &envelope.payload {
+            M3PeerPayloadV2::ShotCommand { command } => {
+                command.shooter_peer_id != envelope.sender
+                    || command.tick.as_u64() != envelope.simulation_tick
+            }
+            M3PeerPayloadV2::ShotResult { result } => {
+                result.tick.as_u64() != envelope.simulation_tick
+                    || !self.state.peers.contains_key(&result.shooter_peer_id)
+            }
+            M3PeerPayloadV2::ActorSnapshot { snapshot } => {
+                !self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::Authority { authority, epoch } => {
+                *authority != envelope.sender || *epoch != envelope.authority_epoch
+            }
+            M3PeerPayloadV2::Hello { .. }
+            | M3PeerPayloadV2::Heartbeat
+            | M3PeerPayloadV2::Probe { .. }
+            | M3PeerPayloadV2::ActorLoadout { .. }
+            | M3PeerPayloadV2::ActorInput { .. }
+            | M3PeerPayloadV2::Leave => false,
+            M3PeerPayloadV2::MigrationFragment { .. } => unreachable!("handled above"),
+        };
+        if subject_is_invalid {
+            return AcceptOutcome::InvalidPayloadSubject;
+        }
+        if matches!(
+            envelope.payload,
+            M3PeerPayloadV2::ShotResult { ref result }
+                if self.state.applied_shot_results.contains(&(
+                    envelope.authority_epoch,
+                    result.shooter_peer_id,
+                    result.tick.as_u64(),
+                ))
+        ) {
+            return AcceptOutcome::DuplicateShotResult;
+        }
+        if envelope.sequence <= self.state.peers[&envelope.sender].last_sequence {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        if let M3PeerPayloadV2::Authority { authority, epoch } = envelope.payload {
+            if !self
+                .state
+                .authority_claim_is_coherent(envelope.sender, authority, epoch, now_ms)
+            {
+                return AcceptOutcome::InvalidAuthorityClaim;
+            }
+        }
+        let peer = self
+            .state
+            .peers
+            .get_mut(&envelope.sender)
+            .expect("sender membership checked");
+        peer.last_sequence = envelope.sequence;
+        peer.last_seen_ms = now_ms;
+        peer.connected = !matches!(envelope.payload, M3PeerPayloadV2::Leave);
+        if let M3PeerPayloadV2::ShotResult { ref result } = envelope.payload {
+            self.state.applied_shot_results.insert((
+                envelope.authority_epoch,
+                result.shooter_peer_id,
+                result.tick.as_u64(),
+            ));
+        }
+        if let M3PeerPayloadV2::Authority { authority, epoch } = envelope.payload {
+            if epoch > self.state.authority_epoch
+                || (epoch == self.state.authority_epoch && authority < self.state.authority)
+            {
+                self.state.authority = authority;
+                self.state.authority_epoch = epoch;
+            }
+        }
+        AcceptOutcome::Accepted
+    }
+
+    fn accept_migration_fragment(&mut self, envelope: &M3EnvelopeV2, now_ms: u64) -> AcceptOutcome {
+        let M3PeerPayloadV2::MigrationFragment {
+            authority,
+            epoch,
+            state_hash,
+            fragment_index,
+            fragment_count,
+            ..
+        } = &envelope.payload
+        else {
+            unreachable!("caller matched fragment")
+        };
+        if *authority != envelope.sender
+            || *epoch != envelope.authority_epoch
+            || !self
+                .state
+                .authority_claim_is_coherent(envelope.sender, *authority, *epoch, now_ms)
+        {
+            return AcceptOutcome::InvalidAuthorityClaim;
+        }
+        let last_sequence = self.state.peers[&envelope.sender].last_sequence;
+        if envelope.sequence <= last_sequence {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        if self.pending_migration.as_ref().is_some_and(|pending| {
+            now_ms.saturating_sub(pending.started_ms) >= HEARTBEAT_TIMEOUT_MS
+        }) {
+            self.pending_migration = None;
+        }
+        let pending = self
+            .pending_migration
+            .get_or_insert_with(|| PendingMigration {
+                authority: *authority,
+                epoch: *epoch,
+                state_hash: *state_hash,
+                fragment_count: *fragment_count,
+                started_ms: now_ms,
+                envelopes: BTreeMap::new(),
+            });
+        if pending.authority != *authority
+            || pending.epoch != *epoch
+            || pending.state_hash != *state_hash
+            || pending.fragment_count != *fragment_count
+        {
+            return AcceptOutcome::InvalidCheckpoint;
+        }
+        if pending.envelopes.contains_key(fragment_index)
+            || pending
+                .envelopes
+                .values()
+                .any(|candidate| candidate.sequence == envelope.sequence)
+        {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        pending.envelopes.insert(*fragment_index, envelope.clone());
+        if pending.envelopes.len() != usize::from(*fragment_count) {
+            return AcceptOutcome::PendingMigration;
+        }
+        let pending = self
+            .pending_migration
+            .take()
+            .expect("complete pending migration exists");
+        let payloads = pending
+            .envelopes
+            .values()
+            .map(|candidate| candidate.payload.clone())
+            .collect::<Vec<_>>();
+        let Ok((authority, epoch, checkpoint)) = reassemble_m3_checkpoint(&payloads) else {
+            return AcceptOutcome::InvalidCheckpoint;
+        };
+        if pending
+            .envelopes
+            .values()
+            .any(|candidate| candidate.simulation_tick != checkpoint.combat.tick)
+            || !self
+                .state
+                .authority_claim_is_coherent(envelope.sender, authority, epoch, now_ms)
+        {
+            return AcceptOutcome::InvalidCheckpoint;
+        }
+        let sequences = pending
+            .envelopes
+            .values()
+            .map(|candidate| candidate.sequence)
+            .collect::<BTreeSet<_>>();
+        if sequences.len() != pending.envelopes.len()
+            || sequences
+                .first()
+                .is_none_or(|sequence| *sequence <= last_sequence)
+        {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        let peer = self
+            .state
+            .peers
+            .get_mut(&envelope.sender)
+            .expect("sender membership checked");
+        peer.last_sequence = *sequences.last().expect("complete migration is nonempty");
+        peer.last_seen_ms = now_ms;
+        peer.connected = true;
+        self.state.applied_shot_results.extend(
+            checkpoint
+                .combat
+                .resolved_shots
+                .iter()
+                .map(|(shooter, tick)| (checkpoint.combat.source_epoch, *shooter, *tick)),
+        );
+        self.state.authority = authority;
+        self.state.authority_epoch = epoch;
+        self.installed_checkpoint = Some(checkpoint);
+        AcceptOutcome::Accepted
+    }
+}
+
+fn m3_envelope_digest(
+    envelope: &M3EnvelopeV2,
+    network_generation: u64,
+    session_generation: u64,
+    roster_hash: RosterHash,
+) -> [u8; 32] {
+    canonical_envelope_digest(
+        envelope.wire_version,
+        envelope.lobby_id,
+        network_generation,
+        session_generation,
+        roster_hash,
+        envelope.sender,
+        envelope.authority_epoch,
+        envelope.sequence,
+        envelope.simulation_tick,
+        &canonical_m3_payload_bytes(&envelope.payload),
+    )
 }
 
 /// Encodes only exact wire 2.0 and canonical M3 fields.
@@ -684,7 +1139,9 @@ const fn recall_state_code(value: RecallState) -> u8 {
 mod tests {
     use super::*;
     use crate::{MatchCheckpoint, RiderCheckpoint};
-    use spurfire_protocol::{M3AuthorityBank, RiderStance, RosterHash, SessionSignature};
+    use spurfire_protocol::{
+        M3AuthorityBank, RiderStance, RosterHash, RosterManifestEntry, SessionSignature,
+    };
 
     fn lobby() -> LobbyId {
         LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap()
@@ -736,34 +1193,88 @@ mod tests {
         }
     }
 
-    fn migration_checkpoint(source_epoch: u64) -> M3MatchCheckpointV2 {
+    fn migration_checkpoint_for(source_epoch: u64, players: &[PlayerId]) -> M3MatchCheckpointV2 {
         let mut gameplay = M3AuthorityBank::new(source_epoch);
-        assert!(gameplay.register_actor(player(2), EntityId(22), HorseVitalityClass::Courser,));
+        for (index, player_id) in players.iter().copied().enumerate() {
+            assert!(gameplay.register_actor(
+                player_id,
+                EntityId(22 + u64::try_from(index).unwrap()),
+                HorseVitalityClass::Courser,
+            ));
+        }
         M3MatchCheckpointV2 {
             wire_version: M3_WIRE_VERSION,
             combat: MatchCheckpoint {
                 source_epoch,
                 tick: 10,
-                riders: vec![RiderCheckpoint {
-                    rider_player_id: player(2),
-                    position_mm: [0; 3],
-                    velocity_mmps: [0; 3],
-                    yaw_millidegrees: 0,
-                    stance: RiderStance::Mounted,
-                    health: 100,
-                    weapon_id: WeaponId::Dustwalker.as_u8(),
-                    ammo_magazine: 30,
-                    ammo_reserve: 120,
-                    last_input_tick: 10,
-                    last_shot_tick: None,
-                    last_command_tick: None,
-                    shot_index: 0,
-                }],
+                riders: players
+                    .iter()
+                    .copied()
+                    .map(|rider_player_id| RiderCheckpoint {
+                        rider_player_id,
+                        position_mm: [0; 3],
+                        velocity_mmps: [0; 3],
+                        yaw_millidegrees: 0,
+                        stance: RiderStance::Mounted,
+                        health: 100,
+                        weapon_id: WeaponId::Dustwalker.as_u8(),
+                        ammo_magazine: 30,
+                        ammo_reserve: 120,
+                        last_input_tick: 10,
+                        last_shot_tick: None,
+                        last_command_tick: None,
+                        shot_index: 0,
+                    })
+                    .collect(),
                 resolved_shots: Vec::new(),
             },
             gameplay: gameplay.checkpoint(),
             next_horse_damage_sequence: 1,
         }
+    }
+
+    fn migration_checkpoint(source_epoch: u64) -> M3MatchCheckpointV2 {
+        migration_checkpoint_for(source_epoch, &[player(2)])
+    }
+
+    fn signing_key(value: u8) -> SigningKey {
+        SigningKey::from_bytes(&[value; 32])
+    }
+
+    fn secure_session(local: PlayerId) -> M3SecureSession {
+        let server = signing_key(9);
+        let server_public = SessionPublicKey::from_bytes(server.verifying_key().to_bytes());
+        let manifest = RosterManifest {
+            lobby_id: lobby(),
+            network_generation: 6,
+            session_generation: 7,
+            roster_revision: 8,
+            entries: (1..=3)
+                .map(|index| RosterManifestEntry {
+                    player_id: player(index),
+                    session_public_key: SessionPublicKey::from_bytes(
+                        signing_key(index).verifying_key().to_bytes(),
+                    ),
+                    tailnet_address: format!("100.64.0.{index}").parse().unwrap(),
+                    application_port: 7_777,
+                    node_key: None,
+                })
+                .collect(),
+        };
+        let signature = SessionSignature::from_bytes(
+            server
+                .sign(&canonical_manifest_digest(server_public, &manifest))
+                .to_bytes(),
+        );
+        let mut state = SessionState::new(lobby(), local, player(1), 0);
+        for index in 1..=3 {
+            state.add_peer(player(index), 0);
+        }
+        M3SecureSession::new(manifest, server_public, signature, state).unwrap()
+    }
+
+    fn source(index: u8) -> SocketAddr {
+        format!("100.64.0.{index}:7777").parse().unwrap()
     }
 
     #[test]
@@ -933,5 +1444,97 @@ mod tests {
             .map(|payload| canonical_m3_payload_bytes(payload)[0])
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(tags.len(), payloads.len());
+    }
+
+    #[test]
+    fn v2_secure_session_binds_source_signature_subject_and_replay() {
+        let mut sender = secure_session(player(2));
+        let mut receiver = secure_session(player(3));
+        let input = M3ActorInput {
+            throttle_milli: 500,
+            steer_milli: -250,
+            move_x_milli: 0,
+            move_z_milli: 0,
+            buttons: M3_INPUT_ADS_PRESSED,
+        };
+        let packet = sender
+            .envelope(42, M3PeerPayloadV2::ActorInput { input }, &signing_key(2))
+            .unwrap();
+        let encoded = encode_m3(&packet).unwrap();
+        let decoded = decode_m3(&encoded).unwrap();
+        assert_eq!(
+            receiver.accept_with_source(&decoded, source(2), None, 10),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            receiver.accept_with_source(&decoded, source(2), None, 11),
+            AcceptOutcome::DuplicateOrReplay
+        );
+        assert_eq!(
+            secure_session(player(3)).accept_with_source(&decoded, source(1), None, 10),
+            AcceptOutcome::EndpointMismatch
+        );
+        assert!(sender
+            .envelope(
+                43,
+                M3PeerPayloadV2::ActorSnapshot {
+                    snapshot: snapshot(),
+                },
+                &signing_key(2),
+            )
+            .is_err());
+
+        let mut forged = decoded;
+        if let M3PeerPayloadV2::ActorInput { input } = &mut forged.payload {
+            input.steer_milli += 1;
+        }
+        assert_eq!(
+            secure_session(player(3)).accept_with_source(&forged, source(2), None, 10),
+            AcceptOutcome::BadSignature
+        );
+    }
+
+    #[test]
+    fn v2_secure_migration_installs_only_after_complete_out_of_order_fragments() {
+        let mut sender = secure_session(player(2));
+        let mut receiver = secure_session(player(3));
+        let heartbeat = sender
+            .envelope(9, M3PeerPayloadV2::Heartbeat, &signing_key(2))
+            .unwrap();
+        assert_eq!(
+            receiver.accept_with_source(&heartbeat, source(2), None, 2_999),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(sender.expire_and_migrate(3_000), Some((player(2), 2)));
+
+        let checkpoint = migration_checkpoint_for(1, &[player(1), player(2), player(3)]);
+        let mut envelopes = fragment_m3_checkpoint(player(2), 2, &checkpoint)
+            .unwrap()
+            .into_iter()
+            .map(|payload| {
+                sender
+                    .envelope(checkpoint.combat.tick, payload, &signing_key(2))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(envelopes.len() > 1);
+        envelopes.reverse();
+        for envelope in &envelopes[..envelopes.len() - 1] {
+            assert_eq!(
+                receiver.accept_with_source(envelope, source(2), None, 3_000),
+                AcceptOutcome::PendingMigration
+            );
+            assert_eq!(receiver.state().authority(), player(1));
+            assert!(receiver.installed_checkpoint().is_none());
+        }
+        assert_eq!(
+            receiver.accept_with_source(envelopes.last().unwrap(), source(2), None, 3_000),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(receiver.state().authority(), player(2));
+        assert_eq!(receiver.state().authority_epoch(), 2);
+        assert_eq!(receiver.installed_checkpoint(), Some(&checkpoint));
+        assert_eq!(receiver.take_installed_checkpoint(), Some(checkpoint));
+        assert!(receiver.installed_checkpoint().is_none());
     }
 }

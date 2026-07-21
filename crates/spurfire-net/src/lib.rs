@@ -363,6 +363,7 @@ pub enum AcceptOutcome {
     InvalidPayloadSubject,
     InvalidCheckpoint,
     DuplicateShotResult,
+    PendingMigration,
 }
 
 #[derive(Clone, Debug)]

@@ -2032,6 +2032,7 @@ impl PeerSession {
             AcceptOutcome::InvalidPayloadSubject => 13,
             AcceptOutcome::InvalidCheckpoint => 14,
             AcceptOutcome::DuplicateShotResult => 15,
+            AcceptOutcome::PendingMigration => 16,
         }
     }
 
