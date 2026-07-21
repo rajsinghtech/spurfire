@@ -317,7 +317,7 @@ jobs:
             smoke_status="${PIPESTATUS[0]}"
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then
-              wevtutil.exe qe Application /c:20 /rd:true /f:text || true
+              MSYS2_ARG_CONV_EXCL='*' wevtutil.exe qe Application /c:20 /rd:true /f:text || true
               exit "$smoke_status"
             fi
           done

@@ -61,18 +61,25 @@ func _ready() -> void:
 		failures.append("graybox_course.tscn could not be loaded")
 		_finish(failures)
 		return
+	print("SPURFIRE_DIAG_COURSE loaded")
 	var course := packed.instantiate()
+	print("SPURFIRE_DIAG_COURSE instantiated")
 	add_child(course)
+	print("SPURFIRE_DIAG_COURSE added")
 	for path in REQUIRED_NODES:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
+	print("SPURFIRE_DIAG_COURSE nodes_checked")
 	await _check_capture_contract(course, failures)
+	print("SPURFIRE_DIAG_COURSE capture_checked")
 	await _check_frontier_arena_contract(course, failures)
+	print("SPURFIRE_DIAG_COURSE frontier_checked")
 	# The remaining deterministic simulation scenarios drive InputMap directly;
 	# explicitly open the presentation gate after its dedicated assertions.
 	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
 	course.get_node("M2Gameplay").call("set_presentation_input_enabled", true, false)
 	course.get_node("Rider/CombatInput").call("set_presentation_input_enabled", true, false)
+	print("SPURFIRE_DIAG_COURSE presentation_enabled")
 	Input.action_press(&"scoreboard")
 	await get_tree().process_frame
 	await get_tree().process_frame
@@ -80,6 +87,7 @@ func _ready() -> void:
 	if roster_panel == null or not roster_panel.visible:
 		failures.append("TAB did not reveal the peer route/RTT roster")
 	Input.action_release(&"scoreboard")
+	print("SPURFIRE_DIAG_COURSE scoreboard_checked")
 	var network_layer := course.get_node("NetworkLayer")
 	network_layer.call("_refresh_results", {
 		"winner": "rider-a",
@@ -96,6 +104,7 @@ func _ready() -> void:
 		failures.append("M5 results omitted the final score-category breakdown")
 	if results_panel:
 		results_panel.visible = false
+	print("SPURFIRE_DIAG_COURSE results_checked")
 
 	var horse := course.get_node_or_null("Horse") as CharacterBody3D
 	var rider := course.get_node_or_null("Rider") as CharacterBody3D
@@ -117,14 +126,23 @@ func _ready() -> void:
 		failures.append("network session identity did not reach SaddleDiveController")
 	elif str(course.get_node("Rider/WeaponController").get("shooter_peer_id")) != bound_player:
 		failures.append("network session identity did not reach combat authority")
+	print("SPURFIRE_DIAG_COURSE identity_checked")
 	_check_native_apis(horse, rider, failures)
+	print("SPURFIRE_DIAG_COURSE native_apis_checked")
 	_check_bridge_input_replay(failures)
+	print("SPURFIRE_DIAG_COURSE replay_checked")
 	await _exercise_reload_after_remount(course, horse, rider, failures)
+	print("SPURFIRE_DIAG_COURSE remount_checked")
 	await _exercise_native_input(course, horse, failures)
+	print("SPURFIRE_DIAG_COURSE input_checked")
 	await _exercise_m2(course, horse, rider, failures)
+	print("SPURFIRE_DIAG_COURSE m2_checked")
 	await _exercise_landing_boundaries(course, horse, rider, failures)
+	print("SPURFIRE_DIAG_COURSE landing_checked")
 	await _exercise_bridge_caps(course, horse, rider, failures)
+	print("SPURFIRE_DIAG_COURSE bridge_caps_checked")
 	_check_persisted_telemetry(course, failures)
+	print("SPURFIRE_DIAG_COURSE telemetry_checked")
 	_finish(failures)
 
 func _check_input_map(failures: Array[String]) -> void:
