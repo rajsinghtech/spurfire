@@ -305,7 +305,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          scripts/build-gdext.sh debug
+          # Rule out restored incremental cdylib state before attributing the
+          # intermittent access violation to the engine or extension runtime.
+          cargo clean -p spurfire-gdext
+          CARGO_INCREMENTAL=0 scripts/build-gdext.sh debug
+          sha256sum game/bin/windows/spurfire_godot.debug.x86_64.dll
           # Run the full behavioral native smoke suite on the Windows build,
           # matching the Linux gates; a bootstrap-scene launch alone cannot
           # catch ABI, loader, input, or exported-method regressions.
@@ -318,10 +322,12 @@ jobs:
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then
               MSYS2_ARG_CONV_EXCL='*' wevtutil.exe qe Application /c:20 /rd:true /f:text || true
-              gdb --batch \
+              timeout 180 gdb --batch \
                 -ex 'set pagination off' \
                 -ex run \
-                -ex 'thread apply all backtrace' \
+                -ex 'thread apply all bt' \
+                -ex 'set confirm off' \
+                -ex kill \
                 --args "$PWD/godot4.exe" \
                 --headless --display-driver headless --audio-driver Dummy \
                 --path "$PWD/game" --scene res://scenes/headless_smoke.tscn || true
