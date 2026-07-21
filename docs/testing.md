@@ -103,8 +103,11 @@ Verify:
 6. The lower-left network panel says `NET OFFLINE` when no lobby join credential has been supplied. This is expected for local play.
 7. At grounded speed ≥8 m/s, press E to Saddle Dive; below 8 m/s, E performs an ordinary dismount. Verify the horse runs out and remains retrievable, airborne reload is blocked, recovery gates movement/fire, and remount does not teleport the horse.
 8. Escape releases the mouse and opens the capture gate; click once to recapture. Escape never quits. Use the gate's `QUIT` button so network matches follow normal leave/cleanup.
+9. Build Spur through riding/combat, verify the 50/80/100 readiness tones, and press Q at full meter. Mounted Q must show a six-second Majestic Charge countdown; horseless Q must begin Majestic Return immediately and consume the meter without starting Charge.
 
 M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. Record real 15-minute sessions until the observational gates can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. Until evidence meets those bands, status stays **implementation complete / playtest pending**.
+
+M4 follows the same evidence rule. The aggregator reports points by each locked source, movement-style share, median and p75 Charges per observed actor, median time to first Charge, Charges per 15 player-minutes, Charge/full-meter time shares, contextual-spend split, and charged versus uncharged duel win rates. Source completion does not check off M4 until invited-player sessions show median >=1 and p75 <=3 Charges per match, a +15–25% Charge duel delta, useful instant Return, and readiness players can identify without looking.
 
 ## 6. Credential-free signed process proofs
 

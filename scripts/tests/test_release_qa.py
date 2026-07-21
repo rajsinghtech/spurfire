@@ -236,6 +236,8 @@ class AggregateTests(unittest.TestCase):
             {
                 **base_record("m3_interval"),
                 "actor_slot": 0,
+                "tick_start": 0,
+                "tick_end": 599,
                 "mounted_ticks": 420,
                 "on_foot_ticks": 180,
                 "roll_ticks": 30,
@@ -248,6 +250,26 @@ class AggregateTests(unittest.TestCase):
                 "on_foot_vs_mounted_duels": 4,
                 "on_foot_vs_mounted_wins": 1,
                 "post_spook_deaths": 1,
+                "charge_ticks": 120,
+                "full_spur_ticks": 60,
+                "charge_starts": 1,
+                "instant_returns": 1,
+                "charged_duels": 4,
+                "charged_duel_wins": 3,
+                "uncharged_duels": 4,
+                "uncharged_duel_wins": 2,
+                "spur_points_jump": 4,
+                "spur_points_clean_landing": 2,
+                "spur_points_near_miss": 3,
+                "spur_points_mounted_hit": 2,
+                "spur_points_mounted_elimination": 6,
+                "spur_points_saddle_dive_elimination": 8,
+            },
+            {
+                **base_record("m4_spend"),
+                "actor_slot": 0,
+                "tick": 300,
+                "kind": "majestic_charge",
             },
             {
                 **base_record("m3_remount"),
@@ -281,6 +303,16 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(m3["on_foot_vs_mounted_win_rate"], 0.25)
         self.assertEqual(m3["post_spook_death_rate"], 1.0)
         self.assertEqual(m3["bolt_notification_coverage"], 1.0)
+        m4 = first["m4_metrics"]
+        self.assertEqual(m4["spur_points_total"], 25)
+        self.assertEqual(m4["movement_style_point_share"], 0.24)
+        self.assertEqual(m4["charge_time_share"], 0.2)
+        self.assertEqual(m4["full_meter_hoard_time_share"], 0.1)
+        self.assertEqual(m4["instant_return_spend_share"], 0.5)
+        self.assertEqual(m4["charge_win_rate_delta"], 0.25)
+        self.assertEqual(m4["charge_starts_per_actor_median"], 1)
+        self.assertEqual(m4["charge_starts_per_actor_p75"], 1)
+        self.assertEqual(m4["first_charge_minutes_median"], 0.083333)
 
     def test_secret_field_rejected(self):
         with self.assertRaises(AGGREGATE.InputError):

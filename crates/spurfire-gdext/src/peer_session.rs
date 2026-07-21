@@ -28,8 +28,8 @@ use spurfire_protocol::{
     OnFootState, OnFootTickInput, PlayerId, QuantizedDirection, QuantizedOrigin, RecallState,
     RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
     RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
-    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
-    WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
+    SimulationTick, SpurCreditKind, SpurSpendOutcome, TargetDefinition, TargetPoseSnapshot,
+    TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -1588,6 +1588,14 @@ impl PeerSession {
         result.set("charge_active", output.spur.charge_active);
         result.set("charge_ended", output.spur.charge_ended);
         result.set(
+            "spur_spend_id",
+            match output.spur.spend {
+                None => 0_i64,
+                Some(SpurSpendOutcome::MajesticCharge) => 1,
+                Some(SpurSpendOutcome::InstantMajesticReturn) => 2,
+            },
+        );
+        result.set(
             "charge_started_tick",
             actor.spur().charge_started_tick().map_or(-1, |value| {
                 i64::try_from(value.as_u64()).unwrap_or(i64::MAX)
@@ -1665,6 +1673,57 @@ impl PeerSession {
             result.set("reload_required_ticks", 0);
         }
         result
+    }
+
+    /// Issue one authority-observed non-combat M4 award. Evidence is validated
+    /// by the native Spur kernel; clients cannot submit meter deltas.
+    #[func]
+    fn issue_m4_spur_credit(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        source_id: i64,
+        evidence_a: i64,
+        evidence_b: i64,
+    ) -> i64 {
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return -1;
+        }
+        let (Ok(player_id), Ok(tick)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+        ) else {
+            return -1;
+        };
+        let kind = match source_id {
+            0 => SpurCreditKind::Jump,
+            1 => {
+                let Ok(sway_impulse_milli) = u16::try_from(evidence_b) else {
+                    return -1;
+                };
+                SpurCreditKind::CleanLanding {
+                    collision_free: evidence_a == 1,
+                    sway_impulse_milli,
+                }
+            }
+            2 => {
+                let Ok(closest_distance_mm) = u16::try_from(evidence_b) else {
+                    return -1;
+                };
+                SpurCreditKind::NearMiss {
+                    hostile: evidence_a == 1,
+                    closest_distance_mm,
+                }
+            }
+            _ => return -1,
+        };
+        self.m3_combat_authority
+            .as_mut()
+            .and_then(|authority| authority.issue_spur_credit(player_id, tick, kind).ok())
+            .flatten()
+            .map_or(-1, i64::from)
     }
 
     /// Record authority collision-resolved horse geometry for M3 rewind.
@@ -1784,6 +1843,11 @@ impl PeerSession {
         } else {
             CombatGait::Gallop
         };
+        let majestic_charge = self
+            .m3_combat_authority
+            .as_ref()
+            .and_then(|authority| authority.actor(player_id))
+            .is_some_and(|actor| actor.spur().charge_active());
         let snapshot = CombatRiderSnapshot {
             tick,
             shooter_peer_id: player_id,
@@ -1799,6 +1863,7 @@ impl PeerSession {
                 stumbling: false,
                 ads: false,
                 sprint_gallop: false,
+                majestic_charge,
             },
         };
         if !snapshot.riding.is_consistent() {
@@ -1903,6 +1968,12 @@ impl PeerSession {
         let Some(authority) = self.m3_combat_authority.as_mut() else {
             return VarDictionary::new();
         };
+        let shooter_snapshot = self
+            .authority_rider_history
+            .get(&command.shooter_peer_id)
+            .and_then(|history| history.iter().find(|row| row.tick == command.tick))
+            .copied();
+        let shooter_stance = shooter_snapshot.map(|row| row.riding.stance);
         let spur_before = authority
             .actor(command.shooter_peer_id)
             .map_or(0, |actor| actor.spur().meter());
@@ -1920,6 +1991,9 @@ impl PeerSession {
         let spur_after = authority
             .actor(command.shooter_peer_id)
             .map_or(spur_before, |actor| actor.spur().meter());
+        let shooter_charge_active = authority
+            .actor(command.shooter_peer_id)
+            .is_some_and(|actor| actor.spur().charge_active());
         let eliminated_rider = resolved
             .shot
             .result
@@ -1942,6 +2016,22 @@ impl PeerSession {
             i64::from(spur_after.saturating_sub(spur_before)),
         );
         result.set("spur_meter", i64::from(spur_after));
+        result.set("shooter_charge_active", shooter_charge_active);
+        if let Some(snapshot) = shooter_snapshot {
+            let origin = snapshot.muzzle_origin.to_meters();
+            result.set(
+                "authority_origin",
+                Vector3::new(origin[0] as f32, origin[1] as f32, origin[2] as f32),
+            );
+        }
+        if spur_after > spur_before {
+            let source = match (shooter_stance, resolved.shot.result.eliminated) {
+                (Some(RiderStance::SaddleDiveAirborne), true) => "saddle_dive_elimination",
+                (Some(RiderStance::Mounted), true) => "mounted_elimination",
+                _ => "mounted_hit",
+            };
+            result.set("spur_award_source", source);
+        }
         if let Some(player) = eliminated_rider {
             result.set("eliminated_rider_player_id", player.to_string());
             result.set("eliminated_rider_on_foot", target_on_foot);

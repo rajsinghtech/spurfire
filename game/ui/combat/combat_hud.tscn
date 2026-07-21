@@ -142,6 +142,21 @@ layout_mode = 2
 theme_override_font_sizes/font_size = 28
 text = "30 | 120"
 
+[node name="SpurLabel" type="Label" parent="WeaponCard/Margin/Rows"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.815686, 0.45098, 1)
+text = "SPUR  0"
+
+[node name="SpurBar" type="ProgressBar" parent="WeaponCard/Margin/Rows"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+max_value = 100.0
+show_percentage = false
+theme_override_styles/background = SubResource("ReloadBg")
+theme_override_styles/fill = SubResource("ReloadFill")
+
 [node name="StatusRow" type="HBoxContainer" parent="WeaponCard/Margin/Rows"]
 layout_mode = 2
 

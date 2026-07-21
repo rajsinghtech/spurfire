@@ -186,6 +186,8 @@ pub struct HorseController {
     runout_distance_m: f64,
     #[var(no_set)]
     presentation_input_enabled: bool,
+    #[var(no_set)]
+    majestic_charge_active: bool,
 
     kernel: HorseKernel,
     runout_kernel: HorseRunoutKernel,
@@ -322,6 +324,13 @@ impl HorseController {
         }
     }
 
+    /// Applies the authority-owned M4 Charge window to mounted locomotion.
+    #[func]
+    pub fn set_majestic_charge_active(&mut self, active: bool) {
+        self.majestic_charge_active = active;
+        self.kernel.set_majestic_charge_active(active);
+    }
+
     /// Restore the configured spawn marker synchronously. Course reset is an
     /// explicit censor/reset path, never normal horse retrieval.
     #[func]
@@ -414,6 +423,7 @@ impl ICharacterBody3D for HorseController {
             is_retrievable: false,
             runout_distance_m: 0.0,
             presentation_input_enabled: false,
+            majestic_charge_active: false,
             kernel: HorseKernel::new(tuning, KernelVec3::ZERO, 0.0),
             runout_kernel: HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
                 .expect("M2 tick rate is nonzero"),

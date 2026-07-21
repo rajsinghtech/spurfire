@@ -197,6 +197,7 @@ impl MountedWeaponController {
             stumbling,
             ads,
             sprint_gallop,
+            majestic_charge: false,
         };
         if !riding.is_consistent() {
             return false;

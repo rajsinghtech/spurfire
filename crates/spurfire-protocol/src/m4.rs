@@ -227,11 +227,12 @@ impl SpurKernel {
         {
             return None;
         }
-        let points = if command.kind.is_movement_style() {
+        let source_points = if command.kind.is_movement_style() {
             raw_points.min(MOVEMENT_STYLE_SPUR_CAP.saturating_sub(self.movement_style_points))
         } else {
             raw_points
         };
+        let points = source_points.min(SPUR_METER_MAX.saturating_sub(self.meter));
         self.last_credit_id = Some(command.id);
         self.next_credit_sequence = self.next_credit_sequence.max(next_sequence);
         if points == 0 {

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     dive_shot_cap, dive_sway_scale_milli, AcceptedShotMetadata, DiveId, GameplayEventRow,
-    RiderStance, ShotAttributionLedger,
+    RiderStance, ShotAttributionLedger, CHARGE_SWAY_MULTIPLIER_MILLI,
 };
 
 use super::*;
@@ -74,6 +74,9 @@ pub struct RidingState {
     pub ads: bool,
     /// Sprint-gallop input is held and pauses reload time.
     pub sprint_gallop: bool,
+    /// Authority-owned M4 Majestic Charge window.
+    #[serde(default)]
+    pub majestic_charge: bool,
 }
 
 impl Default for RidingState {
@@ -88,6 +91,7 @@ impl Default for RidingState {
             stumbling: false,
             ads: false,
             sprint_gallop: false,
+            majestic_charge: false,
         }
     }
 }
@@ -1092,9 +1096,14 @@ pub fn deterministic_sway(tick: SimulationTick, tick_rate: u32, riding: RidingSt
         tick.as_u64() as f64 * f64::from(frequency_millihertz) / (f64::from(tick_rate) * 1_000.0);
     let phase = TAU * cycles;
     let turn_coupling = (riding.yaw_rate_millidegrees_per_second / 200).clamp(-450, 450);
-    SwaySample {
+    let sample = SwaySample {
         pitch_millidegrees: (phase.sin() * amplitude).round() as i32,
         yaw_millidegrees: (phase.cos() * amplitude).round() as i32 + turn_coupling,
+    };
+    if riding.majestic_charge {
+        scale_sway(sample, CHARGE_SWAY_MULTIPLIER_MILLI)
+    } else {
+        sample
     }
 }
 
@@ -2620,6 +2629,30 @@ mod tests {
             } else {
                 reference = Some(sample);
             }
+        }
+    }
+
+    #[test]
+    fn majestic_charge_scales_only_authority_sway_to_seventy_percent() {
+        for tick in [1, 17, 60, 359] {
+            let normal = RidingState {
+                gait: CombatGait::Gallop,
+                yaw_rate_millidegrees_per_second: 45_000,
+                ..RidingState::default()
+            };
+            let charged = RidingState {
+                majestic_charge: true,
+                ..normal
+            };
+            let normal_sample = deterministic_sway(SimulationTick::new(tick), 60, normal);
+            assert_eq!(
+                deterministic_sway(SimulationTick::new(tick), 60, charged),
+                scale_sway(normal_sample, CHARGE_SWAY_MULTIPLIER_MILLI)
+            );
+            assert_eq!(
+                effective_spread_millidegrees(*WeaponId::Dustwalker.stats(), charged),
+                effective_spread_millidegrees(*WeaponId::Dustwalker.stats(), normal)
+            );
         }
     }
 

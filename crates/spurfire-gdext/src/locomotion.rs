@@ -7,6 +7,8 @@
 use std::f64::consts::PI;
 use std::ops::{Add, AddAssign, Mul, Sub};
 
+use spurfire_protocol::{CHARGE_ACCEL_MULTIPLIER_MILLI, CHARGE_TURN_MULTIPLIER_MILLI};
+
 use crate::archetype::{HorseArchetype, HorseStats};
 
 const SIDESTEP_FORWARD_LIMIT_MPS: f64 = 1.0;
@@ -230,6 +232,8 @@ pub struct Environment {
     /// Reserved movement-state gates; neither implements combat behavior.
     pub power_turning: bool,
     pub staggered: bool,
+    /// Headshot stagger remains effective during Majestic Charge.
+    pub headshot_staggered: bool,
 }
 
 impl Environment {
@@ -254,6 +258,7 @@ impl Default for Environment {
             downhill_direction: Vec3::ZERO,
             power_turning: false,
             staggered: false,
+            headshot_staggered: false,
         }
     }
 }
@@ -597,6 +602,7 @@ pub struct HorseKernel {
     state: HorseState,
     spawn_position: Vec3,
     spawn_yaw_radians: f64,
+    majestic_charge_active: bool,
 }
 
 impl HorseKernel {
@@ -615,6 +621,7 @@ impl HorseKernel {
             state: Self::fresh_state(tuning, spawn_position, spawn_yaw_radians),
             spawn_position,
             spawn_yaw_radians,
+            majestic_charge_active: false,
         }
     }
 
@@ -679,6 +686,19 @@ impl HorseKernel {
     #[must_use]
     pub const fn state(&self) -> &HorseState {
         &self.state
+    }
+
+    /// Installs authority-owned M4 Charge handling for subsequent fixed steps.
+    pub fn set_majestic_charge_active(&mut self, active: bool) {
+        self.majestic_charge_active = active;
+        if active {
+            self.state.terrain_speed_multiplier = 1.0;
+        }
+    }
+
+    #[must_use]
+    pub const fn majestic_charge_active(&self) -> bool {
+        self.majestic_charge_active
     }
 
     pub fn set_spawn(&mut self, position: Vec3, yaw_radians: f64) {
@@ -908,7 +928,12 @@ impl HorseKernel {
             + (reference.turn_gallop_deg_s - reference.turn_walk_deg_s) * fraction;
         let active_rate =
             active.turn_walk_deg_s + (active.turn_gallop_deg_s - active.turn_walk_deg_s) * fraction;
-        editor_rate * active_rate / reference_rate
+        let rate = editor_rate * active_rate / reference_rate;
+        if self.majestic_charge_active {
+            rate * f64::from(CHARGE_TURN_MULTIPLIER_MILLI) / 1_000.0
+        } else {
+            rate
+        }
     }
 
     fn clamp_canonical_motion(&mut self) {
@@ -1020,7 +1045,8 @@ impl HorseKernel {
         if self.state.landing_recovery_remaining > f64::EPSILON {
             return SidestepBlockReason::LandingRecovery;
         }
-        if environment.staggered {
+        if environment.headshot_staggered || (environment.staggered && !self.majestic_charge_active)
+        {
             return SidestepBlockReason::Stagger;
         }
         if environment.power_turning || input.hard_brake {
@@ -1099,12 +1125,22 @@ impl HorseKernel {
         }
 
         let (terrain_speed, terrain_acceleration) = self.terrain_multipliers(environment, delta);
-        let gait_cap = self.target_speed(self.state.gait) * terrain_speed;
+        let gait_cap = if self.majestic_charge_active {
+            self.archetype_stats().sprint_mps
+        } else {
+            self.target_speed(self.state.gait) * terrain_speed
+        };
         let mut longitudinal = self.state.forward_speed_mps;
         let mut lateral = self.state.lateral_speed_mps;
         let settling_lateral = !sidestep_requested && lateral.abs() > SIDESTEP_EPSILON_MPS;
 
-        let (target_longitudinal, rate) = if input.hard_brake {
+        let (target_longitudinal, rate) = if input.hard_brake
+            && self.majestic_charge_active
+            && input.steer.abs() > f64::EPSILON
+        {
+            self.state.reverse_hold_time = 0.0;
+            (longitudinal, 0.0)
+        } else if input.hard_brake {
             self.state.reverse_hold_time = 0.0;
             (0.0, self.hard_brake_deceleration())
         } else if sidestep_requested || (input.throttle > 0.0 && settling_lateral) {
@@ -1135,7 +1171,13 @@ impl HorseKernel {
         } else if input.throttle > 0.0 {
             (
                 gait_cap * input.throttle,
-                self.forward_acceleration(self.state.gait) * terrain_acceleration,
+                self.forward_acceleration(self.state.gait)
+                    * terrain_acceleration
+                    * if self.majestic_charge_active {
+                        f64::from(CHARGE_ACCEL_MULTIPLIER_MILLI) / 1_000.0
+                    } else {
+                        1.0
+                    },
             )
         } else {
             (0.0, self.tuning.coast_deceleration)
@@ -1191,6 +1233,10 @@ impl HorseKernel {
     }
 
     fn terrain_multipliers(&mut self, environment: Environment, delta: f64) -> (f64, f64) {
+        if self.majestic_charge_active {
+            self.state.terrain_speed_multiplier = 1.0;
+            return (1.0, 1.0);
+        }
         let terrain = environment.effective_terrain();
         let global_speed_scale =
             self.tuning.rough_speed_multiplier / HorseArchetype::Courser.stats().terrain_scrub;
@@ -1706,6 +1752,79 @@ mod tests {
                 (0.55..=0.75).contains(&uphill_fraction),
                 "{hz} Hz uphill fraction {uphill_fraction}"
             );
+        }
+    }
+
+    #[test]
+    fn majestic_charge_uses_locked_speed_accel_turn_terrain_and_drift_rows() {
+        for hz in HZ_VALUES {
+            let mut charged = kernel();
+            charged.set_majestic_charge_active(true);
+            select_gallop(&mut charged, hz);
+            for _ in 0..(3 * hz) {
+                step(
+                    &mut charged,
+                    InputFrame {
+                        throttle: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment {
+                        terrain: TerrainSurface::Mud,
+                        rough: true,
+                        ..Environment::default()
+                    },
+                    hz,
+                );
+            }
+            let sprint = charged.archetype_stats().sprint_mps;
+            assert!((charged.state().forward_speed_abs() - sprint).abs() < 1.0e-9);
+            assert_eq!(charged.state().terrain_speed_multiplier, 1.0);
+
+            let before_drift = charged.state().forward_speed_abs();
+            step(
+                &mut charged,
+                InputFrame {
+                    steer: 1.0,
+                    hard_brake: true,
+                    ..InputFrame::default()
+                },
+                Environment {
+                    power_turning: true,
+                    ..Environment::default()
+                },
+                hz,
+            );
+            assert!((charged.state().forward_speed_abs() - before_drift).abs() < 1.0e-9);
+
+            let mut normal_turn = kernel();
+            let mut charge_turn = kernel();
+            select_gallop(&mut normal_turn, hz);
+            select_gallop(&mut charge_turn, hz);
+            normal_turn.resolve_motion(Vec3::ZERO, Vec3::new(0.0, 0.0, -13.0), true);
+            charge_turn.resolve_motion(Vec3::ZERO, Vec3::new(0.0, 0.0, -13.0), true);
+            charge_turn.set_majestic_charge_active(true);
+            step(
+                &mut normal_turn,
+                InputFrame {
+                    throttle: 1.0,
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            step(
+                &mut charge_turn,
+                InputFrame {
+                    throttle: 1.0,
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment::default(),
+                hz,
+            );
+            let ratio = charge_turn.state().yaw_rate_radians / normal_turn.state().yaw_rate_radians;
+            assert!((ratio - 1.3).abs() < 1.0e-9, "{hz} Hz ratio {ratio}");
         }
     }
 
@@ -2399,6 +2518,52 @@ mod tests {
                 assert_eq!(blocked.telemetry().sidestep_blocked_reason, reason);
                 assert_eq!(blocked.state().lateral_speed_mps, 0.0);
             }
+        }
+    }
+
+    #[test]
+    fn majestic_charge_ignores_body_stagger_but_not_headshot_stagger() {
+        for hz in HZ_VALUES {
+            let mut body_hit = kernel();
+            body_hit.set_majestic_charge_active(true);
+            step(
+                &mut body_hit,
+                InputFrame {
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment {
+                    staggered: true,
+                    ..Environment::default()
+                },
+                hz,
+            );
+            assert_eq!(
+                body_hit.telemetry().sidestep_blocked_reason,
+                SidestepBlockReason::None
+            );
+            assert!(body_hit.state().lateral_speed_mps > 0.0);
+
+            let mut headshot = kernel();
+            headshot.set_majestic_charge_active(true);
+            step(
+                &mut headshot,
+                InputFrame {
+                    steer: 1.0,
+                    ..InputFrame::default()
+                },
+                Environment {
+                    staggered: true,
+                    headshot_staggered: true,
+                    ..Environment::default()
+                },
+                hz,
+            );
+            assert_eq!(
+                headshot.telemetry().sidestep_blocked_reason,
+                SidestepBlockReason::Stagger
+            );
+            assert_eq!(headshot.state().lateral_speed_mps, 0.0);
         }
     }
 

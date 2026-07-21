@@ -28,7 +28,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
-| M4 | Spur meter + Majestic Charge | **authority foundation in progress** | median player earns >=1 charge/match |
+| M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
@@ -265,11 +265,16 @@ prototype.
 
 ## M4 — Spur meter + Majestic Charge
 
-**Status: authority foundation in progress.** The checkpointed native meter validates the locked
+**Status: source complete / playtest pending.** The checkpointed native meter validates the locked
 award rows, enforces no decay and an 18-point movement-style lifetime cap, and owns rising-edge
 mounted Charge versus horseless instant-Return spending. Live wire 2.0 consumes the reserved Q bit
-and snapshots meter/charge timing; combat awards come only from transactional authority results.
-Movement and near-miss producers, Charge modifiers/presentation, HUD/audio, and telemetry remain.
+and snapshots meter/charge timing. Authority-observed movement, hostile near-miss, and transactional
+combat producers issue the only credits. Charge applies archetype sprint speed, x2 acceleration,
++30% turn, zero drift cost, terrain factor 1.0, x0.7 weapon sway, and the body/headshot stagger
+distinction. Godot supplies the meter/readiness/countdown HUD, 50/80/100 audio tiers, local/remote
+presentation, and secret-free source, spend, exposure, per-actor frequency, fill-time, and duel
+telemetry. Automated coverage establishes the implementation contract; the human checklist below
+still requires invited-player evidence.
 
 **Goal:** reward stylish riding with a readable power spike that doesn't break balance.
 One meter, one button (Q), effect depends on state.
@@ -523,8 +528,16 @@ sorted integer actor slots before persistence; credentials, endpoints, join code
 are never stored. Terminal and authority-loss flushes preserve partial observations. The shared
 aggregator reports mounted/on-foot share, roll and stun seconds, horse losses, remount count and
 median duration, rising-edge running-mount success, cross-stance win rate, post-spook death rate,
-and exact 15-point bolt-notification coverage. These are observational evidence only: M4 owns Spur
-credit and M5 owns score and match outcomes.
+and exact 15-point bolt-notification coverage.
+
+### M4 Spur economy and Charge value
+
+The same secret-free interval stream records authority-awarded points by locked source, Charge and
+full-meter exposure ticks, contextual spends, and charged/uncharged duel outcomes. Discrete spend
+rows preserve the first-Charge tick without player identifiers. The aggregator groups sorted actor
+slots per session to report median and p75 Charge counts, median minutes to first Charge, Charges per
+15 player-minutes, movement-style share, full-meter hoarding, instant-Return choice share, and Charge
+win-rate delta. These are observational evidence only: M5 owns score and match outcomes.
 
 Kill criteria (redesign, not tune): dive elim share >25% (dominant) for 2 consecutive
 milestones, or usage <1/match after two buff passes (players have voted it's not fun).

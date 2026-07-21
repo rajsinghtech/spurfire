@@ -13,6 +13,8 @@ func _ready() -> void:
 	_check_m3_loadout_projection(failures)
 	_check_m3_input_buffer(failures)
 	_check_m3_horse_presentation_path(failures)
+	_check_m4_remote_charge_proxy(failures)
+	_check_m4_follower_charge_snapshot(failures)
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
@@ -175,6 +177,56 @@ func _check_m3_horse_presentation_path(failures: Array[String]) -> void:
 	):
 		failures.append("M3 remote horse proxy did not instantiate its interpolated return visual")
 	presentation_root.free()
+
+func _check_m4_remote_charge_proxy(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	bridge.set("_m3_horse_classes", {PLAYER_B: "mustang"})
+	bridge.set("_actor_states", {PLAYER_B: {
+		"tick": 9, "position": Vector3.ZERO, "velocity": Vector3.ZERO,
+		"yaw_degrees": 0.0, "stance_id": 1, "dive_id": -1,
+		"charge_active": true, "charge_started_tick": 9, "charge_end_tick": 369,
+	}})
+	bridge.call("_simulate_remote_actor", PLAYER_B, {
+		"tick": 10, "throttle_milli": 1000, "steer_milli": 1000, "buttons": 0,
+	}, 10)
+	var state := (bridge.get("_actor_states") as Dictionary).get(PLAYER_B, {}) as Dictionary
+	if not is_equal_approx((state.velocity as Vector3).length(), 14.5):
+		failures.append("M4 remote Mustang Charge did not use archetype sprint speed")
+	if not is_equal_approx(float(state.yaw_degrees), 117.0 / 60.0):
+		failures.append("M4 remote Charge did not apply the +30% proxy turn row")
+	bridge.call("_simulate_remote_actor", PLAYER_B, {
+		"tick": 11, "throttle_milli": 0, "steer_milli": 0, "buttons": 1,
+	}, 11)
+	bridge.call("_simulate_remote_actor", PLAYER_B, {
+		"tick": 59, "throttle_milli": 0, "steer_milli": 0, "buttons": 0,
+	}, 59)
+	state = (bridge.get("_actor_states") as Dictionary).get(PLAYER_B, {}) as Dictionary
+	if int(state.previous_stance_id) != 2 or int(state.stance_id) != 1:
+		failures.append("M4 remote Mustang jump did not produce its 48-tick clean landing edge")
+	bridge.free()
+
+func _check_m4_follower_charge_snapshot(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	add_child(bridge)
+	bridge.local_player_id = PLAYER_A
+	bridge.local_rider = CharacterBody3D.new()
+	bridge.local_horse = ClassDB.instantiate(&"HorseController") as CharacterBody3D
+	add_child(bridge.local_rider)
+	add_child(bridge.local_horse)
+	bridge.call("_apply_m3_snapshot", JSON.stringify({
+		"i": PLAYER_A, "p": [0, 0, 0], "v": [0, 0, 0], "y": 0, "s": "mounted",
+		"o": {"p": [0, 0, 0], "v": [0, 0, 0], "y": 0, "h": 200,
+			"s": "available", "c": "courser"},
+		"r": "horse_present", "u": 0, "b": 10, "e": 370,
+	}), 20)
+	var state := (bridge.get("_actor_states") as Dictionary).get(PLAYER_A, {}) as Dictionary
+	if not bool(state.get("charge_active", false)):
+		failures.append("M4 follower snapshot did not reconstruct the authority Charge window")
+	if bridge.local_horse == null or not bool(bridge.local_horse.get("majestic_charge_active")):
+		failures.append("M4 follower snapshot did not apply Charge to local locomotion")
+	bridge.local_rider.free()
+	bridge.local_horse.free()
+	bridge.free()
 
 func _check_secret_storage_contract(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")

@@ -401,6 +401,18 @@ impl M3CombatAuthority {
         Ok(output)
     }
 
+    /// Issues one validated M4 award through the composed authority owner.
+    pub fn issue_spur_credit(
+        &mut self,
+        rider_player_id: PlayerId,
+        tick: SimulationTick,
+        kind: SpurCreditKind,
+    ) -> Result<Option<u8>, M3CombatAuthorityError> {
+        self.actors
+            .issue_spur_credit(rider_player_id, tick, kind)
+            .map_err(Into::into)
+    }
+
     /// Records locked horse hit geometry for rewind. Hittability derives from
     /// authority vitality; callers cannot keep a spooked/despawned horse active.
     pub fn record_horse_pose(

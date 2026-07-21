@@ -83,13 +83,19 @@ func _ready() -> void:
 	var hud: Control = loaded.hud
 	add_child(hud)
 	hud.bind_controller(controller)
-	for path in ["%Crosshair", "%HitMarker", "%ReloadRing", "%WeaponName", "%Ammo", "%State", "%Gait"]:
+	for path in ["%Crosshair", "%HitMarker", "%ReloadRing", "%WeaponName", "%Ammo", "%State", "%Gait", "%SpurBar", "%SpurLabel"]:
 		if hud.get_node_or_null(path) == null:
 			failures.append("HUD missing %s" % path)
-	for method in ["bind_controller", "refresh_stats", "set_spread", "set_gait", "show_reload_rejection"]:
+	for method in ["bind_controller", "refresh_stats", "set_spread", "set_gait", "set_spur_state", "show_reload_rejection"]:
 		if not hud.has_method(method):
 			failures.append("HUD lacks %s" % method)
 	hud.set_spread(2.6, "gallop", true)
+	hud.set_spur_state(80, false, -1, 10)
+	if float(hud.get_node("%SpurBar").value) != 80.0 or "80" not in str(hud.get_node("%SpurLabel").text):
+		failures.append("HUD did not render authority Spur state")
+	hud.set_spur_state(0, true, 370, 10)
+	if "MAJESTIC CHARGE" not in str(hud.get_node("%SpurLabel").text):
+		failures.append("HUD did not render the exact Charge countdown")
 	controller.request_reload()
 	if not hud.get_node("%ReloadRing").visible or float(hud.get_node("%ReloadRing").value) != 50.0:
 		failures.append("HUD reload ring did not follow native tick progress")

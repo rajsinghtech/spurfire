@@ -148,6 +148,9 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
     m3: Counter[str] = Counter()
     m3_remount_ticks: list[int] = []
     m3_bolt_notifications = 0
+    m4_charge_starts_by_actor: Counter[tuple[str, int]] = Counter()
+    m4_actor_first_tick: dict[tuple[str, int], int] = {}
+    m4_first_charge_tick: dict[tuple[str, int], int] = {}
     render: dict[int, dict[str, Any]] = defaultdict(
         lambda: {"frame_deltas_ms": [], "linear_jerk": [], "angular_jerk": [], "repeated": 0}
     )
@@ -235,6 +238,22 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
             )
             bucket["repeated"] += int(bool(record.get("repeated_transform", False)))
         elif event == "m3_interval":
+            actor_slot = _integer(
+                record.get("actor_slot", -1), f"{source}: actor_slot", minimum=-1
+            )
+            interval_start = _integer(
+                record.get("tick_start", 0), f"{source}: tick_start", minimum=0
+            )
+            if actor_slot >= 0:
+                actor_key = (session_id, actor_slot)
+                m4_actor_first_tick[actor_key] = min(
+                    m4_actor_first_tick.get(actor_key, interval_start), interval_start
+                )
+                m4_charge_starts_by_actor[actor_key] += _integer(
+                    record.get("charge_starts", 0),
+                    f"{source}: charge_starts",
+                    minimum=0,
+                )
             for field in (
                 "mounted_ticks",
                 "on_foot_ticks",
@@ -248,8 +267,33 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
                 "on_foot_vs_mounted_duels",
                 "on_foot_vs_mounted_wins",
                 "post_spook_deaths",
+                "charge_ticks",
+                "full_spur_ticks",
+                "charge_starts",
+                "instant_returns",
+                "charged_duels",
+                "charged_duel_wins",
+                "uncharged_duels",
+                "uncharged_duel_wins",
+                "spur_points_jump",
+                "spur_points_clean_landing",
+                "spur_points_near_miss",
+                "spur_points_mounted_hit",
+                "spur_points_mounted_elimination",
+                "spur_points_saddle_dive_elimination",
             ):
                 m3[field] += _integer(record.get(field, 0), f"{source}: {field}", minimum=0)
+        elif event == "m4_spend":
+            if str(record.get("kind", "")).strip().lower() == "majestic_charge":
+                actor_slot = _integer(
+                    record.get("actor_slot", -1), f"{source}: actor_slot", minimum=-1
+                )
+                tick = _integer(record.get("tick"), f"{source}: tick", minimum=0)
+                if actor_slot >= 0:
+                    actor_key = (session_id, actor_slot)
+                    m4_first_charge_tick[actor_key] = min(
+                        m4_first_charge_tick.get(actor_key, tick), tick
+                    )
         elif event == "m3_remount":
             ticks = _integer(
                 record.get("lose_horse_to_remount_ticks", -1),
@@ -325,6 +369,35 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
     m3_cross_duels = m3["on_foot_vs_mounted_duels"]
     m3_horse_losses = m3["horse_losses"]
     m3_running_attempts = m3["running_mount_attempts"]
+    m4_sources = {
+        name: m3[f"spur_points_{name}"]
+        for name in (
+            "jump",
+            "clean_landing",
+            "near_miss",
+            "mounted_hit",
+            "mounted_elimination",
+            "saddle_dive_elimination",
+        )
+    }
+    m4_total_points = sum(m4_sources.values())
+    m4_spends = m3["charge_starts"] + m3["instant_returns"]
+    m4_charge_counts = [
+        m4_charge_starts_by_actor[key] for key in sorted(m4_actor_first_tick)
+    ]
+    m4_first_charge_minutes = [
+        (tick - m4_actor_first_tick[key]) / TICK_RATE / 60.0
+        for key, tick in sorted(m4_first_charge_tick.items())
+        if key in m4_actor_first_tick and tick >= m4_actor_first_tick[key]
+    ]
+    charged_win_rate = (
+        m3["charged_duel_wins"] / m3["charged_duels"] if m3["charged_duels"] else None
+    )
+    uncharged_win_rate = (
+        m3["uncharged_duel_wins"] / m3["uncharged_duels"]
+        if m3["uncharged_duels"]
+        else None
+    )
 
     render_rows: list[dict[str, Any]] = []
     for refresh_hz in sorted(render):
@@ -422,6 +495,51 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
             "bolt_notification_rows": m3_bolt_notifications,
             "bolt_notification_coverage": _rounded(
                 m3_bolt_notifications / m3_horse_losses if m3_horse_losses else None
+            ),
+        },
+        "m4_metrics": {
+            "spur_points_total": m4_total_points,
+            "spur_points_by_source": m4_sources,
+            "movement_style_point_share": _rounded(
+                (m4_sources["jump"] + m4_sources["clean_landing"]) / m4_total_points
+                if m4_total_points
+                else None
+            ),
+            "charge_starts": m3["charge_starts"],
+            "charge_starts_per_actor_median": _rounded(
+                statistics.median(m4_charge_counts) if m4_charge_counts else None
+            ),
+            "charge_starts_per_actor_p75": _rounded(
+                _percentile(m4_charge_counts, 0.75)
+            ),
+            "first_charge_minutes_median": _rounded(
+                statistics.median(m4_first_charge_minutes)
+                if m4_first_charge_minutes
+                else None
+            ),
+            "instant_returns": m3["instant_returns"],
+            "charges_per_15_player_minutes": _rounded(
+                m3["charge_starts"] * TICK_RATE * 900 / m3_observed_ticks
+                if m3_observed_ticks
+                else None
+            ),
+            "charge_time_share": _rounded(
+                m3["charge_ticks"] / m3_observed_ticks if m3_observed_ticks else None
+            ),
+            "full_meter_hoard_time_share": _rounded(
+                m3["full_spur_ticks"] / m3_observed_ticks if m3_observed_ticks else None
+            ),
+            "instant_return_spend_share": _rounded(
+                m3["instant_returns"] / m4_spends if m4_spends else None
+            ),
+            "charged_duels": m3["charged_duels"],
+            "charged_duel_win_rate": _rounded(charged_win_rate),
+            "uncharged_duels": m3["uncharged_duels"],
+            "uncharged_duel_win_rate": _rounded(uncharged_win_rate),
+            "charge_win_rate_delta": _rounded(
+                charged_win_rate - uncharged_win_rate
+                if charged_win_rate is not None and uncharged_win_rate is not None
+                else None
             ),
         },
         "render_metrics": render_rows,

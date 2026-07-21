@@ -15,6 +15,7 @@ var _phase := 0.0
 var _was_airborne := false
 var _landing_flash := 0.0
 var _bad_landing_flash := 0.0
+var _majestic_charge_active := false
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -49,6 +50,10 @@ func _on_dive_landed(_dive_id: int, bad: bool, _slope: float, _terrain: String) 
 	_bad_landing_flash = 1.0 if bad else 0.0
 	queue_redraw()
 
+func set_majestic_charge_active(active: bool) -> void:
+	_majestic_charge_active = active
+	queue_redraw()
+
 func _process(delta: float) -> void:
 	_phase = fmod(_phase + delta * lerpf(0.4, 2.4, _speed_fraction), 1.0)
 	_landing_flash = move_toward(_landing_flash, 0.0, delta * 2.8)
@@ -63,7 +68,7 @@ func _draw() -> void:
 	_draw_dust_puffs()
 
 func _draw_speed_lines() -> void:
-	var strength := smoothstep(0.42, 1.0, _speed_fraction)
+	var strength := maxf(smoothstep(0.42, 1.0, _speed_fraction), 0.9 if _majestic_charge_active else 0.0)
 	var count := int(round(strength * maximum_line_count))
 	for index in count:
 		var seed := fmod(float(index) * 0.6180339 + _phase, 1.0)
@@ -72,7 +77,7 @@ func _draw_speed_lines() -> void:
 		var y := size.y * fmod(float(index) * 0.371 + _phase * 0.45, 0.88)
 		var length := lerpf(18.0, 70.0, strength) * lerpf(0.7, 1.2, seed)
 		var direction := Vector2(side * 0.18, 1.0).normalized()
-		var color := line_color
+		var color := Color("ffd166") if _majestic_charge_active else line_color
 		color.a = maximum_opacity * strength * lerpf(0.45, 1.0, seed)
 		draw_line(Vector2(x, y), Vector2(x, y) + direction * length, color, lerpf(2.0, 4.0, strength), true)
 

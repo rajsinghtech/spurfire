@@ -28,6 +28,7 @@ var _jump_buffer_until_tick := -1
 var _crouch_buffer_until_tick := -1
 var _m3_metrics: Dictionary = {}
 var _m3_actor_slots: Dictionary = {}
+var _m3_horse_classes: Dictionary = {}
 var _m3_telemetry_file: FileAccess
 var _m3_telemetry_session := ""
 var _m3_telemetry_closed := false
@@ -87,8 +88,15 @@ func apply_projection(response: Dictionary) -> bool:
 	var sorted_roster := Array(roster_ids)
 	sorted_roster.sort()
 	_m3_actor_slots.clear()
+	_m3_horse_classes.clear()
 	for index in range(sorted_roster.size()):
 		_m3_actor_slots[str(sorted_roster[index])] = index
+	for value in roster_value:
+		if value is Dictionary:
+			var roster_player := value as Dictionary
+			_m3_horse_classes[str(roster_player.get("player_id", ""))] = str(
+				roster_player.get("horse_selection", "courser")
+			)
 	# Authority changes are epoch transitions inside one signed session. They
 	# must not recreate replay/liveness state.
 	var binding_key := "%s|%s" % [lobby_id, ",".join(sorted_roster)]
@@ -262,6 +270,10 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		state["charge_active"] = bool(actor_tick.get("charge_active", false))
 		state["charge_started_tick"] = int(actor_tick.get("charge_started_tick", -1))
 		state["charge_end_tick"] = int(actor_tick.get("charge_end_tick", -1))
+		if player_id == local_player_id and local_horse.has_method("set_majestic_charge_active"):
+			local_horse.call("set_majestic_charge_active", bool(state.charge_active))
+		if player_id == local_player_id:
+			_apply_local_m4_presentation(state, tick)
 		if bool(actor_tick.get("on_foot_active", false)):
 			state["stance_id"] = 6
 			var on_foot_velocity := actor_tick.get("on_foot_velocity", Vector2.ZERO) as Vector2
@@ -276,6 +288,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 				)
 				state["velocity"] = resolved_velocity
 		_update_authority_horse_presentation(player_id, state, actor_tick, tick)
+		_record_m4_movement_style(player_id, state, tick)
 		_record_m3_actor_tick(player_id, actor_tick, state, input, tick)
 		_record_authority_combat_state(player_id, state)
 		_record_m3_horse_state(player_id, state, tick)
@@ -375,6 +388,13 @@ func _m3_metric_for(player_id: String, tick: int) -> Dictionary:
 			"remounts": 0, "running_mount_attempts": 0, "running_remounts": 0,
 			"duel_wins": 0, "on_foot_vs_mounted_duels": 0,
 			"on_foot_vs_mounted_wins": 0, "post_spook_deaths": 0,
+			"charge_ticks": 0, "full_spur_ticks": 0, "charge_starts": 0,
+			"instant_returns": 0, "charged_duels": 0, "charged_duel_wins": 0,
+			"uncharged_duels": 0, "uncharged_duel_wins": 0,
+			"spur_points_jump": 0, "spur_points_clean_landing": 0,
+			"spur_points_near_miss": 0, "spur_points_mounted_hit": 0,
+			"spur_points_mounted_elimination": 0,
+			"spur_points_saddle_dive_elimination": 0,
 			"last_horse_state": -1, "horse_loss_tick": -1,
 			"interact_was_down": false,
 		}
@@ -391,6 +411,17 @@ func _record_m3_actor_tick(
 			4: metric.roll_ticks = int(metric.roll_ticks) + 1
 	else:
 		metric.mounted_ticks = int(metric.mounted_ticks) + 1
+	if bool(actor_tick.get("charge_active", false)):
+		metric.charge_ticks = int(metric.charge_ticks) + 1
+	if int(actor_tick.get("spur_meter", 0)) >= 100:
+		metric.full_spur_ticks = int(metric.full_spur_ticks) + 1
+	var spend_id := int(actor_tick.get("spur_spend_id", 0))
+	if spend_id == 1:
+		metric.charge_starts = int(metric.charge_starts) + 1
+		_store_m4_spend(player_id, tick, "majestic_charge")
+	elif spend_id == 2:
+		metric.instant_returns = int(metric.instant_returns) + 1
+		_store_m4_spend(player_id, tick, "instant_majestic_return")
 	var horse_state := int(actor_tick.get("horse_state_id", 0))
 	if int(metric.last_horse_state) == 0 and horse_state == 1:
 		metric.horse_losses = int(metric.horse_losses) + 1
@@ -428,6 +459,59 @@ func _record_m3_actor_tick(
 		})
 		metric.horse_loss_tick = -1
 
+func _record_m4_movement_style(player_id: String, state: Dictionary, tick: int) -> void:
+	var previous_stance := int(state.get("previous_stance_id", state.stance_id))
+	var stance := int(state.stance_id)
+	if previous_stance == 1 and stance == 2:
+		var awarded := int(peer_session.issue_m4_spur_credit(player_id, tick, 0, 0, 0))
+		_record_m4_award(player_id, tick, "jump", awarded)
+	elif previous_stance == 2 and stance == 1:
+		var collision_free := true
+		if player_id == local_player_id:
+			for index in range(local_horse.get_slide_collision_count()):
+				var collision := local_horse.get_slide_collision(index)
+				if collision and collision.get_normal().y < 0.7:
+					collision_free = false
+					break
+		var awarded := int(peer_session.issue_m4_spur_credit(
+			player_id, tick, 1, 1 if collision_free else 0, 0 if collision_free else 1000
+		))
+		_record_m4_award(player_id, tick, "clean_landing", awarded)
+
+func _record_m4_award(player_id: String, tick: int, source: String, points: int) -> void:
+	if points <= 0:
+		return
+	var metric := _m3_metric_for(player_id, tick)
+	var field := "spur_points_%s" % source
+	if metric.has(field):
+		metric[field] = int(metric[field]) + points
+	_store_m3_telemetry({
+		"event_type": "m4_spur_award", "tick": tick,
+		"authority_epoch": int(peer_session.get("authority_epoch")),
+		"actor_slot": int(_m3_actor_slots.get(player_id, -1)),
+		"source": source, "points": points,
+	})
+
+func _store_m4_spend(player_id: String, tick: int, kind: String) -> void:
+	_store_m3_telemetry({
+		"event_type": "m4_spend", "tick": tick,
+		"authority_epoch": int(peer_session.get("authority_epoch")),
+		"actor_slot": int(_m3_actor_slots.get(player_id, -1)), "kind": kind,
+	})
+
+func _apply_local_m4_presentation(state: Dictionary, tick: int) -> void:
+	if combat_router:
+		var hud = combat_router.get("combat_hud")
+		if hud and hud.has_method("set_spur_state"):
+			hud.call(
+				"set_spur_state", int(state.spur_meter), bool(state.charge_active),
+				int(state.charge_end_tick), tick
+			)
+	var course := local_horse.get_parent()
+	var feedback := course.get_node_or_null("FeedbackLayer/StylizedFeedback") if course else null
+	if feedback and feedback.has_method("set_majestic_charge_active"):
+		feedback.call("set_majestic_charge_active", bool(state.charge_active))
+
 func _record_m3_duel_outcome(shooter: String, resolved: Dictionary, tick: int) -> void:
 	var target := str(resolved.get("eliminated_rider_player_id", ""))
 	if shooter.is_empty() or target.is_empty():
@@ -443,6 +527,19 @@ func _record_m3_duel_outcome(shooter: String, resolved: Dictionary, tick: int) -
 	if shooter_on_foot and not target_on_foot:
 		shooter_metric.on_foot_vs_mounted_wins = int(shooter_metric.on_foot_vs_mounted_wins) + 1
 	var target_metric := _m3_metric_for(target, tick)
+	var shooter_charged := bool(resolved.get("shooter_charge_active", false))
+	var target_state := _actor_states.get(target, {}) as Dictionary
+	var target_charged := bool(target_state.get("charge_active", false))
+	if shooter_charged:
+		shooter_metric.charged_duels = int(shooter_metric.charged_duels) + 1
+		shooter_metric.charged_duel_wins = int(shooter_metric.charged_duel_wins) + 1
+	else:
+		shooter_metric.uncharged_duels = int(shooter_metric.uncharged_duels) + 1
+		shooter_metric.uncharged_duel_wins = int(shooter_metric.uncharged_duel_wins) + 1
+	if target_charged:
+		target_metric.charged_duels = int(target_metric.charged_duels) + 1
+	else:
+		target_metric.uncharged_duels = int(target_metric.uncharged_duels) + 1
 	if int(target_metric.horse_loss_tick) >= 0:
 		target_metric.post_spook_deaths = int(target_metric.post_spook_deaths) + 1
 	_store_m3_telemetry({
@@ -482,12 +579,31 @@ func _flush_m3_metrics(tick: int, terminal: bool) -> void:
 			"on_foot_vs_mounted_duels": int(metric.on_foot_vs_mounted_duels),
 			"on_foot_vs_mounted_wins": int(metric.on_foot_vs_mounted_wins),
 			"post_spook_deaths": int(metric.post_spook_deaths), "terminal": terminal,
+			"charge_ticks": int(metric.charge_ticks),
+			"full_spur_ticks": int(metric.full_spur_ticks),
+			"charge_starts": int(metric.charge_starts),
+			"instant_returns": int(metric.instant_returns),
+			"charged_duels": int(metric.charged_duels),
+			"charged_duel_wins": int(metric.charged_duel_wins),
+			"uncharged_duels": int(metric.uncharged_duels),
+			"uncharged_duel_wins": int(metric.uncharged_duel_wins),
+			"spur_points_jump": int(metric.spur_points_jump),
+			"spur_points_clean_landing": int(metric.spur_points_clean_landing),
+			"spur_points_near_miss": int(metric.spur_points_near_miss),
+			"spur_points_mounted_hit": int(metric.spur_points_mounted_hit),
+			"spur_points_mounted_elimination": int(metric.spur_points_mounted_elimination),
+			"spur_points_saddle_dive_elimination": int(metric.spur_points_saddle_dive_elimination),
 		})
 		for field in [
 			"mounted_ticks", "on_foot_ticks", "roll_ticks", "spook_stun_ticks",
 			"horse_losses", "remounts", "running_mount_attempts", "running_remounts",
 			"duel_wins", "on_foot_vs_mounted_duels",
 			"on_foot_vs_mounted_wins", "post_spook_deaths",
+			"charge_ticks", "full_spur_ticks", "charge_starts", "instant_returns",
+			"charged_duels", "charged_duel_wins", "uncharged_duels",
+			"uncharged_duel_wins", "spur_points_jump", "spur_points_clean_landing",
+			"spur_points_near_miss", "spur_points_mounted_hit",
+			"spur_points_mounted_elimination", "spur_points_saddle_dive_elimination",
 		]:
 			metric[field] = 0
 		metric.interval_start_tick = tick + 1
@@ -782,11 +898,47 @@ func _resolve_and_broadcast_command(payload: Dictionary) -> void:
 		shooter = str((decoded as Dictionary).get("shooter_peer_id", ""))
 	if not m3_resolution.is_empty():
 		_record_m3_duel_outcome(shooter, m3_resolution, tick)
+		_record_m4_award(
+			shooter, tick, str(m3_resolution.get("spur_award_source", "")),
+			int(m3_resolution.get("spur_awarded_points", 0))
+		)
+		if decoded is Dictionary:
+			_record_m4_near_misses(shooter, decoded as Dictionary, m3_resolution, tick)
 	_apply_shot_result_once({
 		"authority_epoch": int(peer_session.get("authority_epoch")),
 		"tick": tick, "result_json": result_json,
 		"shooter_player_id": shooter,
 	})
+
+func _record_m4_near_misses(
+	shooter: String, resolved: Dictionary, authority: Dictionary, tick: int
+) -> void:
+	if str(resolved.get("outcome", "")) != "miss":
+		return
+	var origin_value = authority.get("authority_origin")
+	if not origin_value is Vector3:
+		return
+	var direction_row := resolved.get("resolved_direction", {}) as Dictionary
+	var origin := origin_value as Vector3
+	var direction := Vector3(
+		float(direction_row.get("x", 0)), float(direction_row.get("y", 0)),
+		float(direction_row.get("z", 0))
+	) / 1000000.0
+	if direction.length_squared() < 0.99:
+		return
+	direction = direction.normalized()
+	for player_id: String in _actor_states:
+		if player_id == shooter:
+			continue
+		var state := _actor_states[player_id] as Dictionary
+		if int(state.get("stance_id", 0)) not in [1, 2]:
+			continue
+		var target := (state.position as Vector3) + Vector3.UP
+		var along := clampf((target - origin).dot(direction), 0.0, 250.0)
+		var distance_mm := roundi(target.distance_to(origin + direction * along) * 1000.0)
+		if distance_mm <= 1500:
+			var awarded := int(peer_session.issue_m4_spur_credit(player_id, tick, 2, 1, distance_mm))
+			_record_m4_award(player_id, tick, "near_miss", awarded)
 
 func _apply_shot_result_once(payload: Dictionary) -> void:
 	var shot_key := "%s:%s:%s" % [
@@ -906,6 +1058,12 @@ func _apply_m3_snapshot(snapshot_json: String, snapshot_tick: int) -> void:
 	var rider_velocity := _mm_vector(velocity as Array)
 	var stance_name := str(row.get("s", row.get("stance", "on_foot_standing")))
 	var stance_id := _legacy_stance_from_m3(stance_name)
+	var charge_started_tick := int(row.get("b", row.get("charge_started_tick", -1)))
+	var charge_end_tick := int(row.get("e", row.get("charge_end_tick", -1)))
+	var charge_active := (
+		charge_started_tick >= 0 and snapshot_tick >= charge_started_tick
+		and snapshot_tick < charge_end_tick
+	)
 	_actor_states[player_id] = {
 		"tick": snapshot_tick,
 		"position": rider_position, "velocity": rider_velocity,
@@ -920,13 +1078,17 @@ func _apply_m3_snapshot(snapshot_json: String, snapshot_tick: int) -> void:
 		"horse_class": str(horse.get("c", horse.get("class", "courser"))),
 		"recall_state": str(row.get("r", row.get("recall_state", "horse_present"))),
 		"spur_meter": int(row.get("u", row.get("spur_meter", 0))),
-		"charge_started_tick": int(row.get("b", row.get("charge_started_tick", -1))),
-		"charge_end_tick": int(row.get("e", row.get("charge_end_tick", -1))),
+		"charge_active": charge_active,
+		"charge_started_tick": charge_started_tick,
+		"charge_end_tick": charge_end_tick,
 	}
 	if player_id == local_player_id:
 		var correction := rider_position - local_rider.global_position
 		local_rider.global_position += correction if correction.length() >= 2.0 else correction * 0.35
 		local_rider.velocity = rider_velocity
+		if local_horse.has_method("set_majestic_charge_active"):
+			local_horse.call("set_majestic_charge_active", charge_active)
+		_apply_local_m4_presentation(_actor_states[player_id] as Dictionary, snapshot_tick)
 	else:
 		var rider := _remote_rider_for(player_id)
 		if rider and rider.has_method("push_snapshot"):
@@ -958,10 +1120,13 @@ func actor_states() -> Dictionary:
 	return _actor_states.duplicate(true)
 
 func _record_actor_state(player_id: String, rider: CharacterBody3D, tick: int) -> void:
+	var previous_stance := int((_actor_states.get(player_id, {}) as Dictionary).get(
+		"stance_id", int(rider.get("stance_id"))
+	))
 	_actor_states[player_id] = {
 		"tick": tick, "position": rider.global_position, "velocity": rider.velocity,
 		"yaw_degrees": rad_to_deg(rider.rotation.y), "stance_id": int(rider.get("stance_id")),
-		"dive_id": int(rider.get("dive_id")),
+		"previous_stance_id": previous_stance, "dive_id": int(rider.get("dive_id")),
 	}
 
 func _record_authority_combat_state(player_id: String, state: Dictionary) -> void:
@@ -994,20 +1159,39 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 	}) as Dictionary
 	var throttle := 0.0 if stale else clampf(float(input.get("throttle_milli", 0)) / 1000.0, -1.0, 1.0)
 	var steer := 0.0 if stale else clampf(float(input.get("steer_milli", 0)) / 1000.0, -1.0, 1.0)
-	var yaw := float(state.yaw_degrees) + steer * 90.0 / 60.0
+	var charge_active := bool(state.get("charge_active", false))
+	var horse_class := str(_m3_horse_classes.get(player_id, state.get("horse_class", "courser")))
+	var sprint_speed := float(
+		{"courser": 16.5, "warhorse": 13.5, "mustang": 14.5}.get(horse_class, 16.5)
+	)
+	var turn_rate := 117.0 if charge_active else 90.0
+	var yaw := float(state.yaw_degrees) + steer * turn_rate / 60.0
 	var forward := Vector3.FORWARD.rotated(Vector3.UP, deg_to_rad(yaw))
-	var velocity := forward * throttle * 13.0
+	var velocity := forward * throttle * (sprint_speed if charge_active else 13.0)
 	var position := (state.position as Vector3) + velocity / 60.0
 	var stance := int(state.stance_id)
+	var airborne_until_tick := int(state.get("mounted_airborne_until_tick", -1))
+	if stance == 2 and airborne_until_tick >= 0 and tick >= airborne_until_tick:
+		stance = 1
+		airborne_until_tick = -1
 	var buttons := 0 if stale else int(input.get("buttons", 0))
 	if buttons & 1 and stance == 1:
 		stance = 2
+		var airtime_ticks := int(
+			{"courser": 42, "warhorse": 30, "mustang": 48}.get(horse_class, 42)
+		)
+		airborne_until_tick = tick + airtime_ticks
 	if buttons & 2:
 		stance = 6 if stance == 1 else (1 if stance == 6 else stance)
 	_actor_states[player_id] = {
 		"tick": tick, "position": position, "velocity": velocity,
-		"yaw_degrees": yaw, "stance_id": stance,
-		"dive_id": int(state.get("dive_id", -1)),
+		"yaw_degrees": yaw, "stance_id": stance, "previous_stance_id": int(state.stance_id),
+		"dive_id": int(state.get("dive_id", -1)), "horse_class": horse_class,
+		"spur_meter": int(state.get("spur_meter", 0)),
+		"charge_active": charge_active,
+		"charge_started_tick": int(state.get("charge_started_tick", -1)),
+		"charge_end_tick": int(state.get("charge_end_tick", -1)),
+		"mounted_airborne_until_tick": airborne_until_tick,
 	}
 
 func _on_route_updated(peer_ip: String, route: String) -> void:
@@ -1075,6 +1259,7 @@ func _apply_remote_horse_snapshot(player_id: String, tick: int, state: Dictionar
 	horse.visible = horse_state in ["available", "bolting"] or returning
 	var cue := horse.get_node_or_null("M3PhaseCue") as Label3D
 	if cue:
+		var charging := tick < int(state.get("charge_end_tick", -1))
 		match horse_state:
 			"bolting": cue.text = "SPOOK!"
 			_:
@@ -1082,7 +1267,7 @@ func _apply_remote_horse_snapshot(player_id: String, tick: int, state: Dictionar
 					"dust_reveal": cue.text = "DUST ON THE HORIZON"
 					"gallop_in": cue.text = "MAJESTIC RETURN"
 					"mount_window": cue.text = "RUNNING MOUNT"
-					_: cue.text = ""
+					_: cue.text = "MAJESTIC CHARGE" if charging else ""
 	if horse.has_method("push_snapshot"):
 		horse.call(
 			"push_snapshot", tick, state.horse_position, state.horse_velocity,
