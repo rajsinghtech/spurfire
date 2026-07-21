@@ -186,8 +186,10 @@ authority epochs, and migrates the canonical roster atomically; `M3GameplayContr
 owner to Godot with a headless spook-to-running-remount regression. `M3CombatAuthority` adds a
 rewindable horizontal horse-body capsule/head sphere and commits ammo, target health, horse
 vitality, and fatal-spook effects transactionally without misreporting a horse bolt as a rider
-elimination. M3 changes signed actor input/snapshot/checkpoint canonicalization, so the foundation
-declares wire 2.0 without changing the active 1.2 transport. M3 remains incomplete until the
+elimination. `M3MatchCheckpointV2` binds that gameplay bank to the existing sorted combat roster,
+ammo, health, command receipts, authority epoch, and canonical digest. M3 changes signed actor
+input/snapshot/checkpoint canonicalization, so the foundation declares wire 2.0 without changing
+the active 1.2 transport. M3 remains incomplete until the
 paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
 scene adapter, remote horse presentation, wire-v2 replication, and playtest instrumentation consume
 this state end to end.

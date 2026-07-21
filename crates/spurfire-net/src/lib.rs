@@ -10,9 +10,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    canonical_envelope_digest, canonical_manifest_digest, LobbyId, NodeKey, PlayerId, RiderStance,
-    RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
-    SessionSignature, ShotCommand, ShotResult, WeaponId, WireVersion, CURRENT_WIRE_VERSION,
+    canonical_envelope_digest, canonical_manifest_digest, LobbyId, M3AuthorityCheckpointV2,
+    NodeKey, PlayerId, RiderStance, RosterHash, RosterManifest, SessionBinding,
+    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult, WeaponId,
+    WireVersion, CURRENT_WIRE_VERSION, M3_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -117,6 +118,53 @@ impl MatchCheckpoint {
             .collect::<BTreeSet<_>>();
         let receipts = self.resolved_shots.iter().copied().collect::<BTreeSet<_>>();
         rider_ids.len() == self.riders.len() && receipts.len() == self.resolved_shots.len()
+    }
+}
+
+/// Complete wire-v2 migration candidate. The active wire-1.2 transport does
+/// not encode this type until M3 input/snapshot activation is atomic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M3MatchCheckpointV2 {
+    /// Exact M3 schema boundary.
+    pub wire_version: WireVersion,
+    /// Existing movement/combat/ammo/receipt state.
+    pub combat: MatchCheckpoint,
+    /// Complete horse/on-foot/recall actor bank.
+    pub gameplay: M3AuthorityCheckpointV2,
+    /// Next authority-global horse damage receipt sequence.
+    pub next_horse_damage_sequence: u64,
+}
+
+impl M3MatchCheckpointV2 {
+    /// Canonical digest signed by the future wire-v2 migration envelope.
+    #[must_use]
+    pub fn hash(&self) -> [u8; 32] {
+        let bytes = serde_json::to_vec(self).expect("checkpoint serialization cannot fail");
+        Sha256::digest(bytes).into()
+    }
+
+    /// Validates schema, epoch, bounded canonical rosters, and sequence state.
+    #[must_use]
+    pub fn is_bounded_and_canonical(&self) -> bool {
+        if self.wire_version != M3_WIRE_VERSION
+            || self.gameplay.wire_version() != M3_WIRE_VERSION
+            || self.combat.source_epoch != self.gameplay.source_authority_epoch()
+            || self.next_horse_damage_sequence == 0
+            || !self.combat.is_bounded_and_canonical()
+            || self.gameplay.actors().is_empty()
+            || self.gameplay.actors().len() != self.combat.riders.len()
+        {
+            return false;
+        }
+        self.combat
+            .riders
+            .iter()
+            .map(|rider| rider.rider_player_id)
+            .eq(self
+                .gameplay
+                .actors()
+                .iter()
+                .map(|actor| actor.rider_player_id))
     }
 }
 
@@ -927,6 +975,7 @@ pub fn canonical_payload_bytes(payload: &PeerPayload) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spurfire_protocol::{EntityId, HorseVitalityClass, M3AuthorityBank};
 
     fn lobby() -> LobbyId {
         LobbyId::parse("00000000-0000-4000-8000-000000000001").unwrap()
@@ -949,6 +998,54 @@ mod tests {
             decode(&vec![b'x'; MAX_DATAGRAM_BYTES + 1]),
             Err(CodecError::TooLarge)
         );
+    }
+
+    #[test]
+    fn m3_checkpoint_binds_combat_and_gameplay_rosters_epochs_and_digest() {
+        let mut gameplay = M3AuthorityBank::new(3);
+        assert!(gameplay.register_actor(player(1), EntityId(201), HorseVitalityClass::Courser,));
+        assert!(gameplay.register_actor(player(2), EntityId(202), HorseVitalityClass::Warhorse,));
+        let rider = |rider_player_id| RiderCheckpoint {
+            rider_player_id,
+            position_mm: [0; 3],
+            velocity_mmps: [0; 3],
+            yaw_millidegrees: 0,
+            stance: RiderStance::Mounted,
+            health: 100,
+            weapon_id: 0,
+            ammo_magazine: 30,
+            ammo_reserve: 120,
+            last_input_tick: 10,
+            last_shot_tick: None,
+            last_command_tick: None,
+            shot_index: 0,
+        };
+        let checkpoint = M3MatchCheckpointV2 {
+            wire_version: M3_WIRE_VERSION,
+            combat: MatchCheckpoint {
+                source_epoch: 3,
+                tick: 10,
+                riders: vec![rider(player(1)), rider(player(2))],
+                resolved_shots: Vec::new(),
+            },
+            gameplay: gameplay.checkpoint(),
+            next_horse_damage_sequence: 4,
+        };
+        assert!(checkpoint.is_bounded_and_canonical());
+        let encoded = serde_json::to_vec(&checkpoint).unwrap();
+        let decoded: M3MatchCheckpointV2 = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, checkpoint);
+        assert_eq!(decoded.hash(), checkpoint.hash());
+
+        let mut wrong_epoch = checkpoint.clone();
+        wrong_epoch.combat.source_epoch = 2;
+        assert!(!wrong_epoch.is_bounded_and_canonical());
+        let mut wrong_order = checkpoint.clone();
+        wrong_order.combat.riders.swap(0, 1);
+        assert!(!wrong_order.is_bounded_and_canonical());
+        let mut zero_sequence = checkpoint;
+        zero_sequence.next_horse_damage_sequence = 0;
+        assert!(!zero_sequence.is_bounded_and_canonical());
     }
 
     fn secure_fixture(local: PlayerId) -> (SecureSession, SigningKey, SocketAddr) {

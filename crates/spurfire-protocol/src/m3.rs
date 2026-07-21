@@ -1474,6 +1474,26 @@ pub struct M3AuthorityCheckpointV2 {
     actors: Vec<M3AuthorityActorCheckpoint>,
 }
 
+impl M3AuthorityCheckpointV2 {
+    /// Exact schema version carried by this authority handoff.
+    #[must_use]
+    pub const fn wire_version(&self) -> WireVersion {
+        self.wire_version
+    }
+
+    /// Epoch that authored this state.
+    #[must_use]
+    pub const fn source_authority_epoch(&self) -> u64 {
+        self.source_authority_epoch
+    }
+
+    /// Canonically player-sorted actor rows.
+    #[must_use]
+    pub fn actors(&self) -> &[M3AuthorityActorCheckpoint] {
+        &self.actors
+    }
+}
+
 #[derive(Deserialize)]
 struct RawM3AuthorityCheckpointV2 {
     wire_version: WireVersion,
