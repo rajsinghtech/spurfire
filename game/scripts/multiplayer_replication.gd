@@ -95,10 +95,14 @@ func _start_demo() -> void:
 			if _demo_qualify:
 				get_tree().quit.call_deferred(1)
 			return
-	if not peer_session.configure_session(
+	var roster_player_ids := PackedStringArray()
+	for node_name in _demo_nodes:
+		roster_player_ids.append(str(DEMO_PLAYERS[node_name]))
+	if not peer_session.configure_roster_session(
 		DEMO_LOBBY,
 		DEMO_PLAYERS[_demo_node],
 		DEMO_PLAYERS["a"],
+		roster_player_ids,
 		Time.get_ticks_msec()
 	):
 		push_error("P2P demo session configuration failed")
