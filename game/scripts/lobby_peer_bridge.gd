@@ -23,6 +23,8 @@ var _actor_states: Dictionary = {}
 var _applied_shot_results: Dictionary = {}
 var _migration_pending := false
 var _last_migration_poll_ms := 0
+var _jump_buffer_until_tick := -1
+var _crouch_buffer_until_tick := -1
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -30,6 +32,7 @@ const M3_INPUT_SPRINT := 1 << 2
 const M3_INPUT_CROUCH := 1 << 3
 const M3_INPUT_RELOAD := 1 << 4
 const M3_INPUT_ADS := 1 << 5
+const M3_INPUT_BUFFER_TICKS := 9
 
 func configure(nodes: Dictionary, player_id: String) -> bool:
 	peer_session = nodes.get("peer_session") as Node
@@ -186,7 +189,7 @@ func _send_periodic_probe(tick: int) -> void:
 		peer_session.send_packet(probe, str(peer.address), int(peer.port))
 
 func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
-	var local_input := _sample_m3_input()
+	var local_input := _sample_m3_input(tick)
 	if not local_is_authority:
 		var packet: PackedByteArray = peer_session.make_m3_actor_input(
 			tick,
@@ -231,6 +234,22 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		) as Dictionary
 		if not bool(actor_tick.get("advanced", false)):
 			continue
+		state["reload_active_ticks"] = int(actor_tick.get("reload_active_ticks", 0))
+		state["reload_required_ticks"] = int(actor_tick.get("reload_required_ticks", 0))
+		state["reload_paused"] = bool(actor_tick.get("reload_pause_started", false))
+		if bool(actor_tick.get("on_foot_active", false)):
+			state["stance_id"] = 6
+			var on_foot_velocity := actor_tick.get("on_foot_velocity", Vector2.ZERO) as Vector2
+			var resolved_velocity := Vector3(on_foot_velocity.x, 0.0, on_foot_velocity.y)
+			if player_id != local_player_id:
+				# Replace the provisional mounted proxy step with the native
+				# stance-curve step for this exact authority tick.
+				var provisional_velocity := state.velocity as Vector3
+				state["position"] = (
+					(state.position as Vector3)
+					- provisional_velocity / 60.0 + resolved_velocity / 60.0
+				)
+				state["velocity"] = resolved_velocity
 		_record_authority_combat_state(player_id, state)
 		_record_m3_horse_state(player_id, state, tick)
 		if tick % 2 == 0 or (player_id == local_player_id and stance_changed):
@@ -243,18 +262,18 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 			if not snapshot.is_empty():
 				_send_to_all(snapshot)
 
-func _sample_m3_input() -> Dictionary:
+func _sample_m3_input(tick: int) -> Dictionary:
 	var throttle := roundi(Input.get_axis(&"move_back", &"move_forward") * 1000.0)
 	var steer := roundi(Input.get_axis(&"steer_left", &"steer_right") * 1000.0)
-	var buttons := 0
-	if Input.is_action_just_pressed(&"jump"):
-		buttons |= M3_INPUT_JUMP
+	var buttons := _buffered_m3_buttons(
+		tick, Input.is_action_just_pressed(&"jump"),
+		Input.is_action_just_pressed(&"on_foot_crouch"),
+		Input.is_action_pressed(&"on_foot_crouch")
+	)
 	if Input.is_action_just_pressed(&"combat_interact"):
 		buttons |= M3_INPUT_INTERACT
 	if Input.is_action_pressed(&"on_foot_sprint"):
 		buttons |= M3_INPUT_SPRINT
-	if Input.is_action_pressed(&"on_foot_crouch"):
-		buttons |= M3_INPUT_CROUCH
 	if Input.is_action_pressed(&"combat_reload"):
 		buttons |= M3_INPUT_RELOAD
 	if Input.is_action_pressed(&"combat_aim"):
@@ -267,6 +286,20 @@ func _sample_m3_input() -> Dictionary:
 		"move_x_milli": roundi(on_foot_move.x), "move_z_milli": roundi(on_foot_move.y),
 		"buttons": buttons,
 	}
+
+func _buffered_m3_buttons(
+	tick: int, jump_just_pressed: bool, crouch_just_pressed: bool, crouch_held: bool
+) -> int:
+	var buttons := 0
+	if jump_just_pressed:
+		_jump_buffer_until_tick = tick + M3_INPUT_BUFFER_TICKS - 1
+	if crouch_just_pressed:
+		_crouch_buffer_until_tick = tick + M3_INPUT_BUFFER_TICKS - 1
+	if tick <= _jump_buffer_until_tick:
+		buttons |= M3_INPUT_JUMP
+	if crouch_held or tick <= _crouch_buffer_until_tick:
+		buttons |= M3_INPUT_CROUCH
+	return buttons
 
 func _zero_m3_input() -> Dictionary:
 	return {

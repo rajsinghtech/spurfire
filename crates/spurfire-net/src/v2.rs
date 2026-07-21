@@ -1166,8 +1166,8 @@ mod tests {
     use super::*;
     use crate::{MatchCheckpoint, RiderCheckpoint};
     use spurfire_protocol::{
-        ActorM3TickInput, M3AuthorityBank, OnFootTickInput, QuantizedOrigin, RiderStance,
-        RosterHash, RosterManifestEntry, SessionSignature,
+        ActorM3TickInput, M3AuthorityBank, M3ReloadCheckpointV2, OnFootTickInput, QuantizedOrigin,
+        RiderStance, RosterHash, RosterManifestEntry, SessionSignature,
     };
 
     fn lobby() -> LobbyId {
@@ -1278,6 +1278,16 @@ mod tests {
                 resolved_shots: Vec::new(),
             },
             gameplay: gameplay.checkpoint(),
+            reloads: players
+                .iter()
+                .copied()
+                .map(|rider_player_id| M3ReloadCheckpointV2 {
+                    rider_player_id,
+                    current_tick: Some(tick),
+                    reload_held: false,
+                    reload: None,
+                })
+                .collect(),
             next_horse_damage_sequence: 1,
         }
     }

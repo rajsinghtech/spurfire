@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
     canonical_envelope_digest, canonical_manifest_digest, LobbyId, M3AuthorityCheckpointV2,
-    NodeKey, PlayerId, RiderStance, RosterHash, RosterManifest, SessionBinding,
-    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
-    SimulationTick, WeaponId, WireVersion, CURRENT_WIRE_VERSION, M3_WIRE_VERSION,
+    M3ReloadCheckpointV2, NodeKey, PlayerId, RiderStance, RosterHash, RosterManifest,
+    SessionBinding, SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand,
+    ShotResult, SimulationTick, WeaponId, WireVersion, CURRENT_WIRE_VERSION, M3_TICK_RATE_HZ,
+    M3_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -135,6 +136,9 @@ pub struct M3MatchCheckpointV2 {
     /// Complete horse/on-foot/recall actor bank.
     #[serde(rename = "g", alias = "gameplay")]
     pub gameplay: M3AuthorityCheckpointV2,
+    /// Authority-owned reload clocks in the same canonical roster order.
+    #[serde(rename = "r", alias = "reloads")]
+    pub reloads: Vec<M3ReloadCheckpointV2>,
     /// Next authority-global horse damage receipt sequence.
     #[serde(rename = "n", alias = "next_horse_damage_sequence")]
     pub next_horse_damage_sequence: u64,
@@ -158,6 +162,7 @@ impl M3MatchCheckpointV2 {
             || !self.combat.is_bounded_and_canonical()
             || self.gameplay.actors().is_empty()
             || self.gameplay.actors().len() != self.combat.riders.len()
+            || self.reloads.len() != self.combat.riders.len()
             || self
                 .gameplay
                 .actors()
@@ -169,9 +174,20 @@ impl M3MatchCheckpointV2 {
         self.combat
             .riders
             .iter()
-            .zip(self.gameplay.actors())
-            .all(|(rider, actor)| {
+            .zip(self.gameplay.actors().iter().zip(&self.reloads))
+            .all(|(rider, (actor, reload))| {
+                let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok();
                 rider.rider_player_id == actor.rider_player_id
+                    && reload.rider_player_id == rider.rider_player_id
+                    && reload.current_tick == Some(SimulationTick::new(self.combat.tick))
+                    && reload.reload.is_none_or(|state| {
+                        weapon == Some(state.weapon_id)
+                            && state.active_ticks < state.required_ticks
+                            && state.required_ticks
+                                == state.weapon_id.stats().reload_ticks(M3_TICK_RATE_HZ)
+                            && rider.ammo_magazine < state.weapon_id.stats().magazine_capacity
+                            && rider.ammo_reserve > 0
+                    })
                     && match actor.actor.mode() {
                         spurfire_protocol::ActorM3Mode::Mounted => matches!(
                             rider.stance,
@@ -1085,6 +1101,15 @@ mod tests {
                 resolved_shots: Vec::new(),
             },
             gameplay: gameplay.checkpoint(),
+            reloads: [player(1), player(2)]
+                .into_iter()
+                .map(|rider_player_id| M3ReloadCheckpointV2 {
+                    rider_player_id,
+                    current_tick: Some(tick),
+                    reload_held: false,
+                    reload: None,
+                })
+                .collect(),
             next_horse_damage_sequence: 4,
         };
         assert!(checkpoint.is_bounded_and_canonical());
@@ -1102,6 +1127,9 @@ mod tests {
         let mut wrong_tick = checkpoint.clone();
         wrong_tick.combat.tick = 11;
         assert!(!wrong_tick.is_bounded_and_canonical());
+        let mut wrong_reload = checkpoint.clone();
+        wrong_reload.reloads[0].rider_player_id = player(2);
+        assert!(!wrong_reload.is_bounded_and_canonical());
         let mut wrong_stance = checkpoint.clone();
         wrong_stance.combat.riders[0].stance = RiderStance::Unknown(0);
         assert!(!wrong_stance.is_bounded_and_canonical());

@@ -1554,6 +1554,39 @@ impl PeerSession {
         result.set("stamina_ticks", i64::from(actor.on_foot().stamina_ticks()));
         result.set("horse_despawned", output.horse_despawned);
         result.set("remounted", output.remounted);
+        if let Some(on_foot) = output.on_foot {
+            result.set("on_foot_active", true);
+            result.set(
+                "on_foot_velocity",
+                Vector2::new(
+                    on_foot.requested_velocity_mmps[0] as f32 / 1_000.0,
+                    on_foot.requested_velocity_mmps[1] as f32 / 1_000.0,
+                ),
+            );
+            result.set("on_foot_can_fire", on_foot.can_fire);
+            result.set("reload_pause_started", on_foot.reload_pause_started);
+            result.set(
+                "sway_multiplier_milli",
+                i64::from(on_foot.sway_multiplier_milli + on_foot.roll_exit_sway_milli),
+            );
+        } else {
+            result.set("on_foot_active", false);
+        }
+        if let Some(reload) = authority.reload(player_id) {
+            result.set("reloading", true);
+            result.set(
+                "reload_active_ticks",
+                i64::try_from(reload.active_ticks).unwrap_or(i64::MAX),
+            );
+            result.set(
+                "reload_required_ticks",
+                i64::try_from(reload.required_ticks).unwrap_or(i64::MAX),
+            );
+        } else {
+            result.set("reloading", false);
+            result.set("reload_active_ticks", 0);
+            result.set("reload_required_ticks", 0);
+        }
         result
     }
 
@@ -2961,6 +2994,7 @@ impl PeerSession {
             wire_version: M3_WIRE_VERSION,
             combat,
             gameplay: authority.actors().checkpoint(),
+            reloads: authority.reload_checkpoints(),
             next_horse_damage_sequence: authority.next_horse_damage_sequence(),
         };
         checkpoint.is_bounded_and_canonical().then_some(checkpoint)
@@ -3020,6 +3054,7 @@ impl PeerSession {
             targets,
             actors,
             rider_entities,
+            checkpoint.reloads.clone(),
             checkpoint.next_horse_damage_sequence,
         )
         .ok()
@@ -3393,6 +3428,7 @@ mod tests {
                 resolved_shots: Vec::new(),
             },
             gameplay: authority.actors().checkpoint(),
+            reloads: authority.reload_checkpoints(),
             next_horse_damage_sequence: authority.next_horse_damage_sequence(),
         };
         let restored = PeerSession::restore_m3_checkpoint(&checkpoint, 2).unwrap();

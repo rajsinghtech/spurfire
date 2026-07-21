@@ -198,9 +198,13 @@ immutable loadout graph from the control-authoritative roster horse choices and 
 and activates it before secure manifest binding. `PeerSession` keeps the RustScale worker
 wire-opaque, while `SpurfireLobbyPeerBridge` advances and rewinds rider/horse state through
 `M3CombatAuthority`, emits complete actor snapshots, and uses fragmented atomic migration. Legacy
-wire 1.2 remains only as the M2 proof/demo codec. M3 remains incomplete until paused reload,
-jump/crouch input buffering at the scene boundary, per-stance acceleration/deceleration, remote
-horse/spook/return presentation, and playtest instrumentation consume this state end to end.
+wire 1.2 remains only as the M2 proof/demo codec. The composed authority now owns a separate
+rollback-safe reload clock: an admitted reload pauses across stun/roll, resumes without losing
+progress, completes against canonical ammo, and migrates in an exact player-sorted wire-v2 row.
+The live scene boundary latches jump/crouch for exactly nine 60 Hz ticks, and the native on-foot
+kernel checkpoints explicit walk/sprint/crouch acceleration and deceleration. M3 remains incomplete
+until remote horse/spook/return presentation and playtest instrumentation consume this state end to
+end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

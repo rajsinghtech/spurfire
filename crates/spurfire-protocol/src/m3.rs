@@ -18,6 +18,18 @@ pub const ON_FOOT_WALK_SPEED_MMPS: u32 = 2_000;
 pub const ON_FOOT_SPRINT_SPEED_MMPS: u32 = 4_500;
 /// Crouched movement speed.
 pub const ON_FOOT_CROUCH_SPEED_MMPS: u32 = 1_200;
+/// Upright walk acceleration.
+pub const ON_FOOT_WALK_ACCEL_MMPS2: u32 = 12_000;
+/// Upright walk release/reversal deceleration.
+pub const ON_FOOT_WALK_DECEL_MMPS2: u32 = 16_000;
+/// Sprint acceleration.
+pub const ON_FOOT_SPRINT_ACCEL_MMPS2: u32 = 15_000;
+/// Sprint release/reversal deceleration.
+pub const ON_FOOT_SPRINT_DECEL_MMPS2: u32 = 18_000;
+/// Crouched acceleration.
+pub const ON_FOOT_CROUCH_ACCEL_MMPS2: u32 = 8_000;
+/// Crouched release/reversal deceleration.
+pub const ON_FOOT_CROUCH_DECEL_MMPS2: u32 = 12_000;
 /// Full continuous sprint capacity.
 pub const ON_FOOT_STAMINA_TICKS: u32 = 4 * M3_TICK_RATE_HZ;
 /// Empty-to-full stamina regeneration duration.
@@ -541,6 +553,8 @@ pub struct OnFootKernel {
     roll_exit_tick: Option<SimulationTick>,
     #[serde(rename = "u", alias = "spook_stun_until")]
     spook_stun_until: Option<SimulationTick>,
+    #[serde(default, rename = "v", alias = "velocity_mmps")]
+    velocity_mmps: [i32; 2],
 }
 
 impl Default for OnFootKernel {
@@ -556,6 +570,7 @@ impl Default for OnFootKernel {
             roll_cooldown_until: SimulationTick::new(0),
             roll_exit_tick: None,
             spook_stun_until: None,
+            velocity_mmps: [0, 0],
         }
     }
 }
@@ -585,17 +600,19 @@ impl OnFootKernel {
         self.spook_stun_until = Some(tick.saturating_add(SPOOK_STUN_TICKS));
         self.buffered_roll_until = None;
         self.roll_started_tick = None;
+        self.velocity_mmps = [0, 0];
         true
     }
 
     /// Advances one strict tick.
     pub fn advance_tick(&mut self, input: OnFootTickInput) -> Result<OnFootTickOutput, M3Error> {
-        if self
-            .current_tick
-            .is_some_and(|current| input.tick <= current)
-        {
+        let previous_tick = self.current_tick;
+        if previous_tick.is_some_and(|current| input.tick <= current) {
             return Err(M3Error::TickReplay);
         }
+        let elapsed_ticks = previous_tick
+            .and_then(|current| input.tick.checked_duration_since(current))
+            .unwrap_or(1);
         self.current_tick = Some(input.tick);
         let crouch_edge = input.crouch_pressed && !self.previous_crouch_level;
         self.previous_crouch_level = input.crouch_pressed;
@@ -606,6 +623,7 @@ impl OnFootKernel {
         if self.state == OnFootState::SpookStunned {
             let stun_until = self.spook_stun_until.ok_or(M3Error::InvalidState)?;
             if input.tick < stun_until {
+                self.velocity_mmps = [0, 0];
                 return Ok(OnFootTickOutput {
                     state: self.state,
                     stance: self.state.stance(),
@@ -627,12 +645,14 @@ impl OnFootKernel {
         }
 
         let mut reload_pause_started = false;
+        let mut roll_ended = false;
         if self.state == OnFootState::Rolling {
             let started = self.roll_started_tick.ok_or(M3Error::InvalidState)?;
             if input.tick.checked_duration_since(started).unwrap_or(0) >= TACTICAL_ROLL_TICKS {
                 self.state = OnFootState::Standing;
                 self.roll_started_tick = None;
                 self.roll_exit_tick = Some(started.saturating_add(TACTICAL_ROLL_TICKS));
+                roll_ended = true;
             }
         }
 
@@ -686,9 +706,35 @@ impl OnFootKernel {
                 1_200,
             ),
         };
-        let requested_velocity_mmps = movement_direction
+        let target_velocity_mmps = movement_direction
             .map(|value| scale_planar_direction(value, speed_mmps))
             .unwrap_or([0, 0]);
+        self.velocity_mmps = match self.state {
+            OnFootState::SpookStunned => [0, 0],
+            OnFootState::Rolling => target_velocity_mmps,
+            _ if roll_ended => [0, 0],
+            OnFootState::Standing => approach_planar_velocity(
+                self.velocity_mmps,
+                target_velocity_mmps,
+                ON_FOOT_WALK_ACCEL_MMPS2,
+                ON_FOOT_WALK_DECEL_MMPS2,
+                elapsed_ticks,
+            ),
+            OnFootState::Sprinting => approach_planar_velocity(
+                self.velocity_mmps,
+                target_velocity_mmps,
+                ON_FOOT_SPRINT_ACCEL_MMPS2,
+                ON_FOOT_SPRINT_DECEL_MMPS2,
+                elapsed_ticks,
+            ),
+            OnFootState::Crouched => approach_planar_velocity(
+                self.velocity_mmps,
+                target_velocity_mmps,
+                ON_FOOT_CROUCH_ACCEL_MMPS2,
+                ON_FOOT_CROUCH_DECEL_MMPS2,
+                elapsed_ticks,
+            ),
+        };
         let roll_exit_sway_milli = self
             .roll_exit_tick
             .and_then(|exit| input.tick.checked_duration_since(exit))
@@ -698,7 +744,7 @@ impl OnFootKernel {
             state: self.state,
             stance: self.state.stance(),
             speed_mmps,
-            requested_velocity_mmps,
+            requested_velocity_mmps: self.velocity_mmps,
             stamina_ticks: self.stamina_ticks(),
             can_fire,
             reload_pause_started,
@@ -708,7 +754,10 @@ impl OnFootKernel {
     }
 
     fn state_is_valid(&self) -> bool {
-        if self.stamina_units > ON_FOOT_STAMINA_TICKS * ON_FOOT_STAMINA_REGEN_TICKS {
+        if self.stamina_units > ON_FOOT_STAMINA_TICKS * ON_FOOT_STAMINA_REGEN_TICKS
+            || i64::from(self.velocity_mmps[0]).pow(2) + i64::from(self.velocity_mmps[1]).pow(2)
+                > i64::from(TACTICAL_ROLL_SPEED_MMPS).pow(2)
+        {
             return false;
         }
         (match self.state {
@@ -745,6 +794,43 @@ fn scale_planar_direction(direction: QuantizedDirection, speed_mmps: u32) -> [i3
         (i64::from(direction.z) * speed / scale).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
             as i32,
     ]
+}
+
+fn approach_planar_velocity(
+    current: [i32; 2],
+    target: [i32; 2],
+    acceleration_mmps2: u32,
+    deceleration_mmps2: u32,
+    elapsed_ticks: u64,
+) -> [i32; 2] {
+    let accelerating = i64::from(current[0]) * i64::from(target[0])
+        + i64::from(current[1]) * i64::from(target[1])
+        >= 0
+        && i64::from(target[0]).pow(2) + i64::from(target[1]).pow(2)
+            > i64::from(current[0]).pow(2) + i64::from(current[1]).pow(2);
+    let rate = if accelerating {
+        acceleration_mmps2
+    } else {
+        deceleration_mmps2
+    };
+    let max_delta = u64::from(rate)
+        .saturating_mul(elapsed_ticks)
+        .div_ceil(u64::from(M3_TICK_RATE_HZ));
+    let max_delta = i32::try_from(max_delta).unwrap_or(i32::MAX);
+    [
+        move_toward(current[0], target[0], max_delta),
+        move_toward(current[1], target[1], max_delta),
+    ]
+}
+
+fn move_toward(current: i32, target: i32, max_delta: i32) -> i32 {
+    if current < target {
+        current.saturating_add(max_delta).min(target)
+    } else if current > target {
+        current.saturating_sub(max_delta).max(target)
+    } else {
+        current
+    }
 }
 
 fn roll_exit_sway(elapsed_ticks: u64) -> u16 {
@@ -2299,7 +2385,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(exit.state, OnFootState::Standing);
+        assert_eq!(exit.requested_velocity_mmps, [0, 0]);
         assert_eq!(exit.roll_exit_sway_milli, ROLL_EXIT_SWAY_IMPULSE_MILLI);
+    }
+
+    #[test]
+    fn each_on_foot_stance_uses_its_explicit_acceleration_and_deceleration() {
+        let advance = |kernel: &mut OnFootKernel, tick, sprint, crouch, direction| {
+            kernel
+                .advance_tick(OnFootTickInput {
+                    tick: SimulationTick::new(tick),
+                    move_direction: direction,
+                    sprint_pressed: sprint,
+                    crouch_pressed: crouch,
+                    reload_active: false,
+                })
+                .unwrap()
+        };
+
+        let mut walking = OnFootKernel::default();
+        assert_eq!(
+            advance(&mut walking, 1, false, false, Some(forward())).requested_velocity_mmps,
+            [0, -200]
+        );
+        assert_eq!(
+            advance(&mut walking, 2, false, false, Some(forward())).requested_velocity_mmps,
+            [0, -400]
+        );
+        assert_eq!(
+            advance(&mut walking, 3, false, false, None).requested_velocity_mmps,
+            [0, -133]
+        );
+
+        let mut sprinting = OnFootKernel::default();
+        assert_eq!(
+            advance(&mut sprinting, 1, true, false, Some(forward())).requested_velocity_mmps,
+            [0, -250]
+        );
+
+        let mut crouched = OnFootKernel::default();
+        assert_eq!(
+            advance(&mut crouched, 1, false, true, Some(forward())).requested_velocity_mmps,
+            [0, -134]
+        );
     }
 
     #[test]

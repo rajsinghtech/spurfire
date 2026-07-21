@@ -698,10 +698,15 @@ impl CombatKernel {
             self.holster();
         }
         self.recoil.recover(elapsed_ticks, self.tick_rate);
+        let outcome = self.advance_reload_by(elapsed_ticks, riding.sprint_gallop);
+        self.last_advanced_tick = tick;
+        Ok(outcome)
+    }
 
+    fn advance_reload_by(&mut self, elapsed_ticks: u64, paused: bool) -> AdvanceOutcome {
         let mut outcome = AdvanceOutcome::default();
         if let Some(mut reload) = self.reload {
-            if !riding.sprint_gallop {
+            if !paused {
                 reload.active_ticks = reload.active_ticks.saturating_add(elapsed_ticks);
             }
             if reload.active_ticks >= reload.required_ticks {
@@ -719,8 +724,66 @@ impl CombatKernel {
                 self.reload = Some(reload);
             }
         }
-        self.last_advanced_tick = tick;
-        Ok(outcome)
+        outcome
+    }
+
+    fn begin_reload(&mut self) -> Result<ReloadSnapshot, ReloadStartError> {
+        if self.holstered {
+            return Err(ReloadStartError::Holstered);
+        }
+        if self.reload.is_some() {
+            return Err(ReloadStartError::AlreadyReloading);
+        }
+        let stats = *self.equipped.stats();
+        let ammo = self.equipped_ammo();
+        if ammo.magazine >= stats.magazine_capacity {
+            return Err(ReloadStartError::MagazineFull);
+        }
+        if ammo.reserve == 0 {
+            return Err(ReloadStartError::NoReserve);
+        }
+        let reload = ReloadSnapshot {
+            weapon_id: self.equipped,
+            active_ticks: 0,
+            required_ticks: stats.reload_ticks(self.tick_rate),
+        };
+        self.reload = Some(reload);
+        Ok(reload)
+    }
+
+    /// Starts the composed M3 authority reload without moving the shot-command
+    /// clock. Actor inputs and rollback shot commands deliberately have
+    /// separate monotonic clocks.
+    pub(crate) fn request_m3_reload(&mut self) -> Result<ReloadSnapshot, ReloadStartError> {
+        if self.has_open_dive_context() {
+            return Err(ReloadStartError::Airborne);
+        }
+        self.begin_reload()
+    }
+
+    /// Advances only M3 reload time. This cannot make a subsequently arriving
+    /// historical shot command fail solely because actor simulation is newer.
+    pub(crate) fn advance_m3_reload(&mut self, elapsed_ticks: u64, paused: bool) -> AdvanceOutcome {
+        self.advance_reload_by(elapsed_ticks, paused)
+    }
+
+    /// Restores an authenticated M3 reload snapshot after ammo/loadout state.
+    pub(crate) fn restore_m3_reload(&mut self, reload: Option<ReloadSnapshot>) -> bool {
+        if let Some(reload) = reload {
+            let stats = *self.equipped.stats();
+            let ammo = self.equipped_ammo();
+            if self.holstered
+                || reload.weapon_id != self.equipped
+                || reload.required_ticks != stats.reload_ticks(self.tick_rate)
+                || reload.active_ticks >= reload.required_ticks
+                || ammo.magazine >= stats.magazine_capacity
+                || ammo.reserve == 0
+            {
+                return false;
+            }
+        }
+        self.reload = reload;
+        true
     }
 
     /// Starts a reload at an absolute tick.
@@ -745,27 +808,7 @@ impl CombatKernel {
         }
         self.advance_to(tick, riding)
             .map_err(|_| ReloadStartError::TickReplay)?;
-        if self.holstered {
-            return Err(ReloadStartError::Holstered);
-        }
-        if self.reload.is_some() {
-            return Err(ReloadStartError::AlreadyReloading);
-        }
-        let stats = *self.equipped.stats();
-        let ammo = self.equipped_ammo();
-        if ammo.magazine >= stats.magazine_capacity {
-            return Err(ReloadStartError::MagazineFull);
-        }
-        if ammo.reserve == 0 {
-            return Err(ReloadStartError::NoReserve);
-        }
-        let reload = ReloadSnapshot {
-            weapon_id: self.equipped,
-            active_ticks: 0,
-            required_ticks: stats.reload_ticks(self.tick_rate),
-        };
-        self.reload = Some(reload);
-        Ok(reload)
+        self.begin_reload()
     }
 
     /// Requests a shot using the kernel-derived seed and the unchanged wire

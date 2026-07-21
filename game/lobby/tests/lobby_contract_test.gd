@@ -11,6 +11,7 @@ func _ready() -> void:
 	_check_roster_projection(failures)
 	_check_peer_roster_binding(failures)
 	_check_m3_loadout_projection(failures)
+	_check_m3_input_buffer(failures)
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
@@ -121,6 +122,16 @@ func _check_m3_loadout_projection(failures: Array[String]) -> void:
 		failures.append("M3 lobby loadout graph accepted an unknown horse selection")
 	bridge.free()
 
+func _check_m3_input_buffer(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	var pressed := int(bridge.call("_buffered_m3_buttons", 100, true, true, false))
+	var final_buffered := int(bridge.call("_buffered_m3_buttons", 108, false, false, false))
+	var expired := int(bridge.call("_buffered_m3_buttons", 109, false, false, false))
+	var held := int(bridge.call("_buffered_m3_buttons", 200, false, false, true))
+	if pressed != 9 or final_buffered != 9 or expired != 0 or held != 8:
+		failures.append("M3 jump/crouch input latch was not exactly nine 60 Hz ticks")
+	bridge.free()
+
 func _check_secret_storage_contract(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
 	var scene_source := FileAccess.get_file_as_string("res://lobby/lobby_shell.tscn")
@@ -160,6 +171,8 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"_migration_pending or not local_is_authority", "dive_id",
 		"activate_m3_wire", "make_m3_actor_input", "make_m3_actor_snapshot_from_pose",
 		"poll_m3_migration", "record_m3_horse_pose", "actor_snapshot",
+		"M3_INPUT_BUFFER_TICKS := 9", "_jump_buffer_until_tick",
+		"_crouch_buffer_until_tick", "reload_active_ticks",
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)

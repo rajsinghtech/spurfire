@@ -9,8 +9,9 @@ use crate::{
     ActorGameplayKernel, ActorM3TickInput, ActorM3TickOutput, AuthorityShot, CombatAuthority,
     EntityId, HorseDamageCommand, HorseDamageId, HorseTargetPoseSnapshot, HorseVitalityClass,
     HorseVitalityState, M3AuthorityBank, M3AuthorityError, M3AuthorityHorseDamage, PlayerId,
-    QuantizedDirection, QuantizedOrigin, RiderSnapshot, ShotCommand, ShotOutcome, SimulationTick,
-    TargetDefinition, TargetPoseSnapshot, TargetRegistry, TargetRegistryError, TeamId, WeaponId,
+    QuantizedDirection, QuantizedOrigin, ReloadSnapshot, RiderSnapshot, ShotCommand, ShotOutcome,
+    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TargetRegistryError,
+    TeamId, WeaponId,
 };
 
 /// Prototype rider health registered alongside each M3 horse target.
@@ -44,6 +45,39 @@ pub struct M3AuthorityShot {
     pub shot: AuthorityShot,
     /// Present exactly when an accepted hit damaged a registered horse.
     pub horse_damage: Option<M3AuthorityHorseDamage>,
+}
+
+/// Authority-owned reload state bound into a wire-v2 migration checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M3ReloadCheckpointV2 {
+    /// Roster shooter owning this clock.
+    #[serde(rename = "p", alias = "rider_player_id")]
+    pub rider_player_id: PlayerId,
+    /// Last actor tick applied to reload progress.
+    #[serde(
+        default,
+        rename = "t",
+        alias = "current_tick",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_tick: Option<SimulationTick>,
+    /// Previous R-button level for deterministic rising-edge admission.
+    #[serde(rename = "h", alias = "reload_held")]
+    pub reload_held: bool,
+    /// Retained progress, including a roll-paused reload.
+    #[serde(
+        default,
+        rename = "r",
+        alias = "reload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reload: Option<ReloadSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct M3ReloadClock {
+    current_tick: Option<SimulationTick>,
+    reload_held: bool,
 }
 
 /// Fail-closed composed M3 combat operation.
@@ -80,6 +114,7 @@ pub struct M3CombatAuthority {
     targets: TargetRegistry,
     actors: M3AuthorityBank,
     rider_entities: BTreeMap<PlayerId, EntityId>,
+    reload_clocks: BTreeMap<PlayerId, M3ReloadClock>,
     next_horse_damage_sequence: u64,
 }
 
@@ -102,6 +137,7 @@ impl M3CombatAuthority {
             targets,
             actors: M3AuthorityBank::new(authority_epoch),
             rider_entities: BTreeMap::new(),
+            reload_clocks: BTreeMap::new(),
             next_horse_damage_sequence: 1,
         })
     }
@@ -109,23 +145,26 @@ impl M3CombatAuthority {
     /// Reassembles a migrated authority only when combat, rider targets,
     /// horse targets, actor ownership, health, and epochs form one exact graph.
     pub fn restore_components(
-        combat: CombatAuthority,
+        mut combat: CombatAuthority,
         targets: TargetRegistry,
         actors: M3AuthorityBank,
         rider_entities: BTreeMap<PlayerId, EntityId>,
+        reloads: Vec<M3ReloadCheckpointV2>,
         next_horse_damage_sequence: u64,
     ) -> Result<Self, M3CombatAuthorityError> {
         let actor_rows = actors.checkpoint();
         if next_horse_damage_sequence == 0
             || combat.authority_epoch() != actors.authority_epoch()
             || actor_rows.actors().len() != rider_entities.len()
+            || actor_rows.actors().len() != reloads.len()
             || combat.shooter_count() != actor_rows.actors().len()
             || targets.len() != actor_rows.actors().len().saturating_mul(2)
         {
             return Err(M3CombatAuthorityError::CrossKernelInvariant);
         }
         let mut seen_entities = BTreeMap::new();
-        for row in actor_rows.actors() {
+        let mut reload_clocks = BTreeMap::new();
+        for (row, reload) in actor_rows.actors().iter().zip(reloads) {
             let player = row.rider_player_id;
             let Some(rider_entity) = rider_entities.get(&player).copied() else {
                 return Err(M3CombatAuthorityError::CrossKernelInvariant);
@@ -150,15 +189,31 @@ impl M3CombatAuthority {
                 || horse_definition.team_id != rider_definition.team_id
                 || horse_definition.max_health != actor.horse().max_health()
                 || targets.health(horse_entity) != Some(actor.horse().health())
+                || reload.rider_player_id != player
+                || actor.current_tick() != reload.current_tick
             {
                 return Err(M3CombatAuthorityError::CrossKernelInvariant);
             }
+            let Some(kernel) = combat.shooter_kernel_mut(player) else {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            };
+            if !kernel.restore_m3_reload(reload.reload) {
+                return Err(M3CombatAuthorityError::CrossKernelInvariant);
+            }
+            reload_clocks.insert(
+                player,
+                M3ReloadClock {
+                    current_tick: reload.current_tick,
+                    reload_held: reload.reload_held,
+                },
+            );
         }
         Ok(Self {
             combat,
             targets,
             actors,
             rider_entities,
+            reload_clocks,
             next_horse_damage_sequence,
         })
     }
@@ -209,6 +264,9 @@ impl M3CombatAuthority {
         candidate
             .rider_entities
             .insert(rider_player_id, rider_entity_id);
+        candidate
+            .reload_clocks
+            .insert(rider_player_id, M3ReloadClock::default());
         *self = candidate;
         true
     }
@@ -237,6 +295,37 @@ impl M3CombatAuthority {
         self.next_horse_damage_sequence
     }
 
+    /// Current retained reload state for HUD and authority tests.
+    #[must_use]
+    pub fn reload(&self, rider_player_id: PlayerId) -> Option<ReloadSnapshot> {
+        self.combat
+            .shooter_kernel(rider_player_id)
+            .and_then(crate::CombatKernel::reload)
+    }
+
+    /// Canonical player-sorted reload rows for the combined wire-v2 handoff.
+    #[must_use]
+    pub fn reload_checkpoints(&self) -> Vec<M3ReloadCheckpointV2> {
+        self.actors
+            .checkpoint()
+            .actors()
+            .iter()
+            .map(|row| {
+                let clock = self
+                    .reload_clocks
+                    .get(&row.rider_player_id)
+                    .copied()
+                    .unwrap_or_default();
+                M3ReloadCheckpointV2 {
+                    rider_player_id: row.rider_player_id,
+                    current_tick: clock.current_tick,
+                    reload_held: clock.reload_held,
+                    reload: self.reload(row.rider_player_id),
+                }
+            })
+            .collect()
+    }
+
     /// Immutable actor state for one roster member.
     #[must_use]
     pub fn actor(&self, rider_player_id: PlayerId) -> Option<&ActorGameplayKernel> {
@@ -248,10 +337,45 @@ impl M3CombatAuthority {
     pub fn advance_actor(
         &mut self,
         rider_player_id: PlayerId,
-        input: ActorM3TickInput,
+        mut input: ActorM3TickInput,
     ) -> Result<ActorM3TickOutput, M3CombatAuthorityError> {
         let mut candidate = self.clone();
+        let reload_pressed = input.on_foot.reload_active;
+        let reload_was_active = candidate.reload(rider_player_id).is_some();
+        input.on_foot.reload_active = reload_was_active;
         let output = candidate.actors.advance_actor(rider_player_id, input)?;
+        let clock = candidate
+            .reload_clocks
+            .get(&rider_player_id)
+            .copied()
+            .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?;
+        let elapsed = clock.current_tick.map_or(0, |tick| {
+            input.tick.checked_duration_since(tick).unwrap_or(0)
+        });
+        let on_foot = output.on_foot;
+        let paused = on_foot.is_some_and(|state| !state.can_fire);
+        let reload_outcome = candidate
+            .combat
+            .shooter_kernel_mut(rider_player_id)
+            .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?
+            .advance_m3_reload(elapsed, paused);
+        let reload_edge = reload_pressed && !clock.reload_held;
+        if reload_edge && !paused && !reload_outcome.reload_completed {
+            let kernel = candidate
+                .combat
+                .shooter_kernel_mut(rider_player_id)
+                .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?;
+            if kernel.reload().is_none() {
+                let _ = kernel.request_m3_reload();
+            }
+        }
+        candidate.reload_clocks.insert(
+            rider_player_id,
+            M3ReloadClock {
+                current_tick: Some(input.tick),
+                reload_held: reload_pressed,
+            },
+        );
         let horse_entity_id = candidate
             .actors
             .horse_entity_id(rider_player_id)
@@ -398,7 +522,9 @@ impl M3CombatAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OnFootTickInput, QuantizedDirection, RecallState, RidingState, DIRECTION_UNITS};
+    use crate::{
+        OnFootTickInput, QuantizedDirection, RecallState, RidingState, WeaponAmmo, DIRECTION_UNITS,
+    };
 
     fn player(number: u64) -> PlayerId {
         PlayerId::parse(&format!("00000000-0000-4000-8000-{number:012x}")).unwrap()
@@ -420,6 +546,15 @@ mod tests {
             return_horse_position: QuantizedOrigin::default(),
             return_horse_moving: false,
         }
+    }
+
+    fn on_foot_input(tick: u64, sprint: bool, crouch: bool, reload: bool) -> ActorM3TickInput {
+        let mut input = actor_input(tick);
+        input.on_foot.move_direction = Some(QuantizedDirection::new(0, 0, -DIRECTION_UNITS));
+        input.on_foot.sprint_pressed = sprint;
+        input.on_foot.crouch_pressed = crouch;
+        input.on_foot.reload_active = reload;
+        input
     }
 
     fn authority() -> M3CombatAuthority {
@@ -509,6 +644,7 @@ mod tests {
             authority.targets.clone(),
             authority.actors.clone(),
             authority.rider_entities.clone(),
+            authority.reload_checkpoints(),
             authority.next_horse_damage_sequence,
         )
         .unwrap();
@@ -522,6 +658,7 @@ mod tests {
                 wrong_health,
                 authority.actors.clone(),
                 authority.rider_entities.clone(),
+                authority.reload_checkpoints(),
                 authority.next_horse_damage_sequence,
             ),
             Err(M3CombatAuthorityError::CrossKernelInvariant)
@@ -535,10 +672,107 @@ mod tests {
                 authority.targets.clone(),
                 authority.actors.clone(),
                 missing_rider,
+                authority.reload_checkpoints(),
                 authority.next_horse_damage_sequence,
             ),
             Err(M3CombatAuthorityError::CrossKernelInvariant)
         );
+    }
+
+    #[test]
+    fn roll_pauses_reload_and_migration_retains_exact_progress() {
+        let mut authority = authority();
+        assert!(authority
+            .combat
+            .shooter_kernel_mut(player(1))
+            .unwrap()
+            .set_ammo(
+                WeaponId::Dustwalker,
+                WeaponAmmo {
+                    magazine: 5,
+                    reserve: 40,
+                },
+            ));
+        authority.advance_actor(player(1), actor_input(1)).unwrap();
+        let fatal = authority
+            .actors
+            .apply_horse_damage(
+                EntityId(201),
+                HorseDamageCommand {
+                    id: HorseDamageId {
+                        authority_epoch: 7,
+                        tick: SimulationTick::new(1),
+                        sequence: 1,
+                    },
+                    amount: 200,
+                    horse_position: QuantizedOrigin::default(),
+                    damage_source_position: QuantizedOrigin::new(1_000, 0, 0),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        authority
+            .targets
+            .synchronize_health(EntityId(201), fatal.effects.application.health_after)
+            .unwrap();
+
+        authority
+            .advance_actor(player(1), on_foot_input(37, false, false, false))
+            .unwrap();
+        authority
+            .advance_actor(player(1), on_foot_input(38, false, false, true))
+            .unwrap();
+        authority
+            .advance_actor(player(1), on_foot_input(48, false, false, false))
+            .unwrap();
+        assert_eq!(authority.reload(player(1)).unwrap().active_ticks, 10);
+
+        let roll = authority
+            .advance_actor(player(1), on_foot_input(49, true, true, false))
+            .unwrap();
+        assert!(roll.on_foot.unwrap().reload_pause_started);
+        authority
+            .advance_actor(player(1), on_foot_input(60, false, false, false))
+            .unwrap();
+        assert_eq!(authority.reload(player(1)).unwrap().active_ticks, 10);
+
+        let reloads = authority.reload_checkpoints();
+        let restored = M3CombatAuthority::restore_components(
+            authority.combat.clone(),
+            authority.targets.clone(),
+            authority.actors.clone(),
+            authority.rider_entities.clone(),
+            reloads.clone(),
+            authority.next_horse_damage_sequence,
+        )
+        .unwrap();
+        assert_eq!(restored.reload(player(1)).unwrap().active_ticks, 10);
+
+        let mut forged = reloads;
+        let row = forged
+            .iter_mut()
+            .find(|row| row.rider_player_id == player(1))
+            .unwrap();
+        let required_ticks = row.reload.unwrap().required_ticks;
+        row.reload.as_mut().unwrap().active_ticks = required_ticks;
+        assert_eq!(
+            M3CombatAuthority::restore_components(
+                authority.combat.clone(),
+                authority.targets.clone(),
+                authority.actors.clone(),
+                authority.rider_entities.clone(),
+                forged,
+                authority.next_horse_damage_sequence,
+            ),
+            Err(M3CombatAuthorityError::CrossKernelInvariant)
+        );
+
+        for tick in 61..=79 {
+            authority
+                .advance_actor(player(1), on_foot_input(tick, false, false, false))
+                .unwrap();
+        }
+        assert_eq!(authority.reload(player(1)).unwrap().active_ticks, 11);
     }
 
     #[test]
