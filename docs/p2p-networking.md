@@ -54,10 +54,10 @@ RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke re
 a local teardown warning only after traffic succeeds.
 
 `just p2p-game-live` separately launches eight real headless Godot processes on a disposable child
-tailnet. It fails unless all 56 directed gameplay paths deliver snapshots and each gameplay-HUD
-route/RTT row exactly matches the independent measurement emitted by that client. This is an
-insecure practice-wire integration qualification and must not be represented as the secure
-game-client lobby lifecycle acceptance test.
+tailnet. It fails unless all 56 directed paths report telemetry, all seven follower-input paths and
+seven authority-snapshot paths deliver, and each gameplay-HUD route/RTT row exactly matches the
+independent measurement emitted by that client. This is an insecure practice-wire integration
+qualification and must not be represented as the secure game-client lobby lifecycle acceptance test.
 
 ## Security boundaries
 

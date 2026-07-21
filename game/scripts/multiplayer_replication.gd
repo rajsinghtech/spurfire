@@ -28,6 +28,7 @@ var _demo_nodes: Array[String] = []
 var _peers: Dictionary = {}
 var _remote_riders: Dictionary = {}
 var _seen_snapshot_senders: Dictionary = {}
+var _seen_input_senders: Dictionary = {}
 
 const DEMO_LOBBY := "00000000-0000-4000-8000-000000000001"
 const DEMO_PLAYERS := {
@@ -151,7 +152,10 @@ func _try_finish_demo_qualification(now: int) -> void:
 	if not _demo_qualification_emitted:
 		if _peers.size() != _demo_nodes.size() - 1:
 			return
-		if _seen_snapshot_senders.size() != _demo_nodes.size() - 1:
+		if local_is_authority:
+			if _seen_input_senders.size() != _demo_nodes.size() - 1:
+				return
+		elif not _seen_snapshot_senders.has(str(DEMO_PLAYERS["a"])):
 			return
 		for peer: Dictionary in _peers.values():
 			if str(peer.route).to_upper() == "UNKNOWN" or int(peer.rtt_ms) < 0 or int(peer.last_seen_ms) <= 0:
@@ -227,7 +231,7 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	if peer_session == null or local_rider == null or (_peers.is_empty() and destination_ip.is_empty()):
 		return
 	var packet := PackedByteArray()
-	if (_demo_mode or local_is_authority) and (simulation_tick % 2 == 0 or stance_changed):
+	if local_is_authority and (simulation_tick % 2 == 0 or stance_changed):
 		packet = peer_session.make_rider_snapshot(
 			simulation_tick,
 			str(peer_session.get("local_player_id")),
@@ -248,7 +252,12 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	elif simulation_tick % 6 == 0:
 		packet = peer_session.make_heartbeat(simulation_tick)
 	if not packet.is_empty():
-		_send_to_all(packet)
+		if _demo_mode and not local_is_authority:
+			var authority_peer := _peers.get("a", {}) as Dictionary
+			if not authority_peer.is_empty():
+				peer_session.send_packet(packet, str(authority_peer.ip), int(authority_peer.port))
+		else:
+			_send_to_all(packet)
 		if _demo_mode:
 			_demo_sent_count += 1
 
@@ -298,9 +307,15 @@ func _on_packet_received(
 				peer_session.send_packet(reply, source_ip, source_port)
 		"rider_snapshot":
 			_apply_remote_snapshot(payload, now)
+		"rider_input":
+			if _demo_mode and local_is_authority:
+				var input_sender := str(payload.get("sender", ""))
+				if not _seen_input_senders.has(input_sender):
+					_seen_input_senders[input_sender] = true
+					print("SPURFIRE_GODOT_P2P_INPUT local=%s sender=%s" % [_demo_node, input_sender])
 
 func _apply_remote_snapshot(payload: Dictionary, now: int) -> void:
-	var sender := str(payload.get("sender", ""))
+	var sender := str(payload.get("rider_player_id", payload.get("sender", "")))
 	var rider := _remote_rider_for(sender)
 	if rider == null:
 		return

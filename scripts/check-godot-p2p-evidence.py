@@ -20,6 +20,7 @@ PAIR = re.compile(
 )
 READY = re.compile(r"SPURFIRE_GODOT_P2P_READY local=(\w+) peers=(\d+)")
 SNAPSHOT = re.compile(r"SPURFIRE_GODOT_P2P_SNAPSHOT local=(\w+) sender=([0-9a-f-]+)")
+INPUT = re.compile(r"SPURFIRE_GODOT_P2P_INPUT local=(\w+) sender=([0-9a-f-]+)")
 QUALIFIED = re.compile(r"SPURFIRE_GODOT_P2P_QUALIFIED local=(\w+) peers=(\d+) snapshots=(\d+)")
 
 
@@ -45,6 +46,7 @@ def validate(log_dir: Path, nodes: list[str]) -> str:
     ready: dict[str, int] = {}
     qualified: dict[str, tuple[int, int]] = {}
     snapshots: set[tuple[str, str]] = set()
+    inputs: set[tuple[str, str]] = set()
     measured: dict[tuple[str, str], tuple[str, int]] = {}
     hud: dict[tuple[str, str], tuple[str, int]] = {}
 
@@ -61,6 +63,10 @@ def validate(log_dir: Path, nodes: list[str]) -> str:
             sender = player_to_node.get(match[2])
             if sender is not None:
                 snapshots.add((match[1], sender))
+        for match in INPUT.finditer(text):
+            sender = player_to_node.get(match[2])
+            if sender is not None:
+                inputs.add((match[1], sender))
         for match in PAIR.finditer(text):
             destination = measured if match[1] == "MEASURED" else hud
             key = (match[2], match[3])
@@ -78,11 +84,21 @@ def validate(log_dir: Path, nodes: list[str]) -> str:
         raise EvidenceError(f"measured matrix is missing {sorted(expected - set(measured))}")
     if set(hud) != expected:
         raise EvidenceError(f"HUD matrix is missing {sorted(expected - set(hud))}")
-    if snapshots != expected:
-        raise EvidenceError(f"snapshot matrix is missing {sorted(expected - snapshots)}")
+    expected_snapshots = {(node, nodes[0]) for node in nodes[1:]}
+    expected_inputs = {(nodes[0], node) for node in nodes[1:]}
+    if snapshots != expected_snapshots:
+        raise EvidenceError(
+            f"authority snapshot flow is incomplete: missing={sorted(expected_snapshots - snapshots)} "
+            f"extra={sorted(snapshots - expected_snapshots)}"
+        )
+    if inputs != expected_inputs:
+        raise EvidenceError(
+            f"follower input flow is incomplete: missing={sorted(expected_inputs - inputs)} "
+            f"extra={sorted(inputs - expected_inputs)}"
+        )
     if set(qualified) != set(nodes) or any(
-        peers != peer_count or count < peer_count for peers, count in qualified.values()
-    ):
+        peers != peer_count for peers, _ in qualified.values()
+    ) or any(qualified[node][1] < 1 for node in nodes[1:]):
         raise EvidenceError(f"incomplete qualification barrier: {qualified}")
     for pair in sorted(expected):
         if measured[pair] != hud[pair]:
@@ -101,7 +117,8 @@ def validate(log_dir: Path, nodes: list[str]) -> str:
     return (
         f"SPURFIRE_GODOT_P2P_MATRIX_OK peers={len(nodes)} "
         f"directed_routes={len(expected)} hud_matches={len(expected)} "
-        f"snapshot_directions={len(expected)} direct_median_rtt_ms={direct_median} "
+        f"authority_snapshot_receivers={len(expected_snapshots)} "
+        f"authority_input_senders={len(expected_inputs)} direct_median_rtt_ms={direct_median} "
         f"route_classes={classes}"
     )
 

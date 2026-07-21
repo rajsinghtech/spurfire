@@ -208,14 +208,15 @@ For a bounded, headless qualification of the same arena and gameplay HUD, run:
 just p2p-game-live
 ```
 
-This enrolls eight independent Godot processes, requires every one of the 56 directed peer
-relationships to deliver rider snapshots and measured route/RTT telemetry, compares each displayed
-HUD route and RTT with that client's measurement, and uses a file barrier so early clients remain
-online until the entire matrix is complete. A direct-path median of 80 ms or more fails. Success
-prints one aggregate marker:
+This enrolls eight independent Godot processes, requires all 56 directed relationships to deliver
+measured route/RTT telemetry, all seven followers to deliver rider input to the authority, and all
+seven followers to receive an authoritative rider snapshot. It compares each displayed HUD route
+and RTT with that client's measurement and uses a file barrier so early clients remain online until
+the entire matrix is complete. A direct-path median of 80 ms or more fails. Success prints one
+aggregate marker:
 
 ```text
-SPURFIRE_GODOT_P2P_MATRIX_OK peers=8 directed_routes=56 hud_matches=56 snapshot_directions=56 direct_median_rtt_ms=<measured> route_classes=<measured>
+SPURFIRE_GODOT_P2P_MATRIX_OK peers=8 directed_routes=56 hud_matches=56 authority_snapshot_receivers=7 authority_input_senders=7 direct_median_rtt_ms=<measured> route_classes=<measured>
 ```
 
 The qualification mode is still the explicitly insecure wire-1 practice harness: it proves real

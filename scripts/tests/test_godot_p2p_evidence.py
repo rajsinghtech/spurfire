@@ -26,7 +26,11 @@ class GodotP2PEvidenceTests(unittest.TestCase):
                 "\n".join(
                     [
                         f"SPURFIRE_GODOT_P2P_READY local={local} peers=1",
-                        f"SPURFIRE_GODOT_P2P_SNAPSHOT local={local} sender={players[peer]}",
+                        (
+                            f"SPURFIRE_GODOT_P2P_INPUT local=a sender={players['b']}"
+                            if local == "a"
+                            else f"SPURFIRE_GODOT_P2P_SNAPSHOT local=b sender={players['a']}"
+                        ),
                         f"SPURFIRE_GODOT_P2P_MEASURED local={local} peer={peer} route=Direct rtt_ms={rtt}",
                         f"SPURFIRE_GODOT_P2P_HUD local={local} peer={peer} route=DIRECT rtt_ms={hud_rtt}",
                         f"SPURFIRE_GODOT_P2P_QUALIFIED local={local} peers=1 snapshots=4",
@@ -42,6 +46,7 @@ class GodotP2PEvidenceTests(unittest.TestCase):
             self.write_matrix(root)
             marker = EVIDENCE.validate(root, ["a", "b"])
         self.assertIn("peers=2 directed_routes=2 hud_matches=2", marker)
+        self.assertIn("authority_snapshot_receivers=1 authority_input_senders=1", marker)
         self.assertIn("direct_median_rtt_ms=11", marker)
 
     def test_hud_mismatch_fails_closed(self) -> None:
