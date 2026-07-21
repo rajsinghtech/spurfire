@@ -66,6 +66,8 @@ func _ready() -> void:
 	print("SPURFIRE_DIAG_COURSE loaded")
 	var course := packed.instantiate()
 	print("SPURFIRE_DIAG_COURSE instantiated")
+	await _check_frontier_arena_contract(course, failures)
+	print("SPURFIRE_DIAG_COURSE frontier_checked")
 	add_child(course)
 	print("SPURFIRE_DIAG_COURSE added")
 	for path in REQUIRED_NODES:
@@ -74,8 +76,6 @@ func _ready() -> void:
 	print("SPURFIRE_DIAG_COURSE nodes_checked")
 	await _check_capture_contract(course, failures)
 	print("SPURFIRE_DIAG_COURSE capture_checked")
-	await _check_frontier_arena_contract(course, failures)
-	print("SPURFIRE_DIAG_COURSE frontier_checked")
 	# The remaining deterministic simulation scenarios drive InputMap directly;
 	# explicitly open the presentation gate after its dedicated assertions.
 	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
@@ -305,9 +305,6 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 			failures.append("frontier arena moved smoke fixture: %s" % fixture)
 	arena.queue_free()
 	await get_tree().process_frame
-	# Let the physics server observe removal of the duplicate inherited course
-	# before the primary graybox course resumes deterministic simulation.
-	await _wait_physics_frames(5)
 
 func _check_render_interpolation(failures: Array[String]) -> void:
 	if int(Engine.physics_ticks_per_second) != 60:
