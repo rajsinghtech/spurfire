@@ -29,7 +29,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
-| M5 | Bounty Run scoring loop | **authority/migration integration in progress** | 15-min match, winner 400–800 pts, "play again" >= 70% |
+| M5 | Bounty Run scoring loop | **world loop integrated / results + playtest pending** | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
 Build order is strict: each milestone's tuning depends on the previous one's feel. The invited-
@@ -322,16 +322,20 @@ sit full — if hoarding dominates, add a gentle spend incentive before any deca
 
 ## M5 — Bounty Run scoring loop
 
-**Status: authority and migration integration in progress.** The pure Rust match kernel owns the exact 15-minute
+**Status: world loop integrated; results and playtest pending.** The pure Rust match kernel owns the exact 15-minute
 clock, canonical scoreboard and category breakdown, strict five-second assist window, respawn and
 speed-buff timers, deterministic Most Wanted reveals/survival payouts, dynamic-objective cadence,
 locked objective payouts, long-hit cap, winner tie-break, and fail-closed epoch checkpoint. Combat
 score producers update a cloned combat/match transaction, and the signed wire-2.0 checkpoint now
-restores both authorities only after exact epoch, tick, and roster validation. Spawn placement,
-objective world interactions, results, and acceptance telemetry remain. Authority-only MatchState
+restores both authorities only after exact epoch, tick, and roster validation. Authority-only MatchState
 keyframes are signed at 2 Hz, bind their epoch/tick/roster, stay within the 1,200-byte datagram cap
 for eight worst-case timer rows, and drive the follower match clock, local bounty, pressure banner,
-K/A/D scoreboard, respawn/buff status, and route health.
+K/A/D scoreboard, respawn/buff status, and route health. The Godot world resizes to the locked
+roster-scaled radius; integer placement derives edge-buffered objectives and separated outer-ring
+respawns from the lobby seed. Full rider/horse/combat respawns, the ten-second speed buff, all five
+objective interactions, the moving-bounty marker, and Most Wanted flare are wired. Ammo-wagon
+refill is atomic with its score award, and the horse station grants the locked 60-second +10% speed
+buff. End-of-match results and acceptance telemetry remain.
 
 **Goal:** full 15-min matches with score pressure, Most Wanted drama, and event-driven
 convergence. Fun verdict gate for the whole prototype.
@@ -358,7 +362,7 @@ end-of-match results.
 | Respawn | 5s, outer 70–85% of radius, min-distance placement, +20% move speed for 10s (kills the ride-back slog) |
 | Most Wanted reveal | leader, every 60s, 10s duration (map ping + flare + birds) |
 | Objective cadence | 1 event per 90s, 60s lifetime, >=150m from map edge |
-| Objective payouts | moving bounty 150 / supply herd 100 / ammo wagon 80 / signal tower 50 per 10s held (max 150) / horse-buff station 50 + 60s buff |
+| Objective payouts | moving bounty 150 / supply herd 100 / ammo wagon 80 + full equipped-ammo refill / signal tower 50 per 10s held (max 150) / horse-buff station 50 + 60s, +10% speed buff |
 | Score pacing target | winner 400–800, median 200–350 |
 
 **Acceptance checklist:**

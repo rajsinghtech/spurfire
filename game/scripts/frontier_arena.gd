@@ -35,6 +35,7 @@ var _materials: Dictionary = {}
 var _windmill_rotor: Node3D
 var _birds: Array[Node3D] = []
 var _bird_phase := 0.0
+var playable_radius_m := 450.0
 
 func _ready() -> void:
 	_build_environment()
@@ -103,27 +104,41 @@ func _build_flat_basin() -> void:
 	ground.position.y = -0.3
 	var visual := MeshInstance3D.new()
 	visual.name = "TerrainZones"
-	visual.mesh = _ground_zone_mesh()
+	visual.mesh = _ground_zone_mesh(playable_radius_m * 2.0)
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	ground.add_child(visual)
 	var collider := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(360.0, 0.5, 360.0)
+	shape.size = Vector3(playable_radius_m * 2.0, 0.5, playable_radius_m * 2.0)
 	collider.shape = shape
 	ground.add_child(collider)
 	add_child(ground)
 
-func _ground_zone_mesh() -> ArrayMesh:
+func set_playable_radius(radius_m: float) -> void:
+	playable_radius_m = clampf(radius_m, 450.0, 1500.0)
+	var ground := get_node_or_null("FrontierGround") as StaticBody3D
+	if ground == null:
+		return
+	var visual := ground.get_node_or_null("TerrainZones") as MeshInstance3D
+	if visual:
+		visual.mesh = _ground_zone_mesh(playable_radius_m * 2.0)
+	var collider := ground.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if collider and collider.shape is BoxShape3D:
+		(collider.shape as BoxShape3D).size = Vector3(
+			playable_radius_m * 2.0, 0.5, playable_radius_m * 2.0
+		)
+
+func _ground_zone_mesh(diameter: float) -> ArrayMesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	# A few broad, skewed zones avoid a tile-grid read while retaining a flat collider.
 	var cells := 7
 	for z in cells:
 		for x in cells:
-			var a := _ground_zone_point(x, z, cells)
-			var b := _ground_zone_point(x + 1, z, cells)
-			var c := _ground_zone_point(x + 1, z + 1, cells)
-			var d := _ground_zone_point(x, z + 1, cells)
+			var a := _ground_zone_point(x, z, cells, diameter)
+			var b := _ground_zone_point(x + 1, z, cells, diameter)
+			var c := _ground_zone_point(x + 1, z + 1, cells, diameter)
+			var d := _ground_zone_point(x, z + 1, cells, diameter)
 			var warm := 0.035 + 0.045 * (0.5 + 0.5 * sin(float(x) * 1.31 + float(z) * 0.73))
 			var first_color := SAND.lerp(SAND_DARK, warm)
 			var second_color := SAND.lerp(SAND_LIGHT, 0.025 + warm * 0.45)
@@ -139,9 +154,9 @@ func _ground_zone_mesh() -> ArrayMesh:
 	surface.set_material(material)
 	return surface.commit()
 
-func _ground_zone_point(x: int, z: int, cells: int) -> Vector3:
-	var spacing := 360.0 / float(cells)
-	var point := Vector3(-180.0 + float(x) * spacing, 0.25, -180.0 + float(z) * spacing)
+func _ground_zone_point(x: int, z: int, cells: int, diameter: float) -> Vector3:
+	var spacing := diameter / float(cells)
+	var point := Vector3(-diameter * 0.5 + float(x) * spacing, 0.25, -diameter * 0.5 + float(z) * spacing)
 	if x > 0 and x < cells:
 		point.x += sin(float(x) * 4.73 + float(z) * 2.11) * 13.0
 	if z > 0 and z < cells:

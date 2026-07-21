@@ -22,8 +22,9 @@ use spurfire_net::{
     AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, ActorM3Mode, ActorM3TickInput, BountyMatchKernel, CombatAuthority,
-    CombatGait, DiveId, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId,
+    bounty_respawn_world_point, canonical_keyreg_digest, playable_radius_m, ActorM3Mode,
+    ActorM3TickInput, BountyMatchKernel, BountyWorldPoint, CombatAuthority, CombatGait, DiveId,
+    DynamicObjectiveKind, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId,
     LobbySessionProjection, M3ActorStance, M3AuthorityBank, M3AuthorityShot, M3CombatAuthority,
     M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput, PlayerId, QuantizedDirection,
     QuantizedOrigin, RecallState, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
@@ -70,6 +71,12 @@ fn horse_entity_id(player_id: PlayerId) -> EntityId {
             .try_into()
             .expect("SHA-256 prefix is eight bytes"),
     ))
+}
+
+fn lobby_seed(lobby_id: LobbyId) -> u64 {
+    let bytes = lobby_id.as_bytes();
+    u64::from_be_bytes(bytes[..8].try_into().expect("UUID prefix is eight bytes"))
+        ^ u64::from_be_bytes(bytes[8..].try_into().expect("UUID suffix is eight bytes"))
 }
 
 #[derive(serde::Deserialize)]
@@ -433,6 +440,7 @@ pub struct PeerSession {
     combat_receipts: BTreeSet<(u64, PlayerId, u64)>,
     m3_combat_authority: Option<M3CombatAuthority>,
     m5_match_authority: Option<BountyMatchKernel>,
+    m5_lobby_seed: u64,
     lobby_client: LobbyClientState,
     creator_join_display: Option<String>,
     creator_join_lobby: Option<String>,
@@ -958,6 +966,7 @@ impl PeerSession {
             }
         }
         let authority_epoch = 1_u64;
+        self.m5_lobby_seed = lobby_seed(lobby_id);
         if let Some(mut rider) = self
             .base()
             .try_get_node_as::<SaddleDiveController>(&self.gameplay_rider_path)
@@ -998,6 +1007,7 @@ impl PeerSession {
         self.authority_rider_history.clear();
         self.combat_receipts.clear();
         self.m3_combat_authority = None;
+        self.m5_match_authority = None;
         let signal_player = self.local_player_id.clone();
         let signal_epoch = self.authority_epoch;
         self.signals()
@@ -1044,7 +1054,7 @@ impl PeerSession {
         };
         let Ok(bounty) = BountyMatchKernel::new(
             epoch,
-            0,
+            self.m5_lobby_seed,
             SimulationTick::new(0),
             self.allowed_players.iter().copied().collect(),
         ) else {
@@ -1115,7 +1125,7 @@ impl PeerSession {
             return result;
         };
         for player in &output.respawned_players {
-            if combat.respawn_rider(*player).is_err() {
+            if combat.respawn_rider(*player, tick).is_err() {
                 return VarDictionary::new();
             }
         }
@@ -1183,6 +1193,223 @@ impl PeerSession {
         }
         let state = M5MatchStateV2::from_snapshot(&bounty.snapshot());
         self.make_m3_packet(tick, M3PeerPayloadV2::MatchState { state })
+    }
+
+    /// Exact roster-scaled active-territory radius for world presentation.
+    #[func]
+    fn m5_playable_radius_m(&self) -> i64 {
+        i64::from(playable_radius_m(
+            u32::try_from(self.allowed_players.len()).unwrap_or(u32::MAX),
+        ))
+    }
+
+    /// Deterministic authority respawn point in the outer 70–85% ring.
+    #[func]
+    fn m5_respawn_position(
+        &self,
+        player_id: GString,
+        tick: i64,
+        occupied_positions: PackedVector3Array,
+    ) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return result;
+        }
+        let (Ok(player), Ok(tick)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+        ) else {
+            return result;
+        };
+        let Some(bounty) = self.m5_match_authority.as_ref() else {
+            return result;
+        };
+        let Some(row) = bounty.player(player) else {
+            return result;
+        };
+        if bounty.current_tick() != tick
+            || !row.alive
+            || row.deaths == 0
+            || row
+                .respawn_speed_buff_end_tick
+                .is_none_or(|end| end <= tick)
+        {
+            return result;
+        }
+        let mut occupied = Vec::with_capacity(occupied_positions.len());
+        for position in occupied_positions.as_slice() {
+            if !position.is_finite() {
+                return VarDictionary::new();
+            }
+            let x_mm = (f64::from(position.x) * 1_000.0).round();
+            let z_mm = (f64::from(position.z) * 1_000.0).round();
+            if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&x_mm)
+                || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&z_mm)
+            {
+                return VarDictionary::new();
+            }
+            occupied.push(BountyWorldPoint {
+                x_mm: x_mm as i32,
+                z_mm: z_mm as i32,
+            });
+        }
+        let point = bounty_respawn_world_point(
+            self.m5_lobby_seed,
+            player,
+            row.deaths,
+            tick,
+            u32::try_from(self.allowed_players.len()).unwrap_or(u32::MAX),
+            &occupied,
+        );
+        result.set("valid", true);
+        result.set(
+            "position",
+            Vector3::new(
+                point.x_mm as f32 / 1_000.0,
+                1.2,
+                point.z_mm as f32 / 1_000.0,
+            ),
+        );
+        result.set(
+            "speed_buff_end_tick",
+            i64::try_from(
+                row.respawn_speed_buff_end_tick
+                    .expect("validated respawn buff")
+                    .as_u64(),
+            )
+            .unwrap_or(i64::MAX),
+        );
+        result
+    }
+
+    /// Commit one authority-observed non-tower objective completion.
+    #[func]
+    fn complete_m5_objective(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        objective_id: i64,
+    ) -> VarDictionary {
+        let (Ok(player), Ok(tick), Ok(objective_id)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            u64::try_from(objective_id),
+        ) else {
+            return VarDictionary::new();
+        };
+        let mut result = VarDictionary::new();
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return result;
+        }
+        let (Some(bounty), Some(combat)) = (
+            self.m5_match_authority.as_ref(),
+            self.m3_combat_authority.as_ref(),
+        ) else {
+            return result;
+        };
+        if bounty.current_tick() != tick || !self.allowed_players.contains(&player) {
+            return result;
+        }
+        let Some(objective) = bounty.active_objective() else {
+            return result;
+        };
+        if objective.objective_id != objective_id {
+            return result;
+        }
+
+        let mut bounty = bounty.clone();
+        let mut combat = combat.clone();
+        let Ok(award) = bounty.complete_objective(tick, player, objective_id) else {
+            return result;
+        };
+        if objective.kind == DynamicObjectiveKind::AmmoWagon
+            && combat.refill_rider_ammo(player).is_err()
+        {
+            return result;
+        }
+
+        self.m5_match_authority = Some(bounty.clone());
+        self.m3_combat_authority = Some(combat);
+        result.set("accepted", true);
+        result.set(
+            "award_json",
+            serde_json::to_string(&award).unwrap_or_default(),
+        );
+        result.set(
+            "state_json",
+            serde_json::to_string(&M5MatchStateV2::from_snapshot(&bounty.snapshot()))
+                .unwrap_or_default(),
+        );
+        result
+    }
+
+    /// Commit at most one newly earned ten-second signal-tower interval.
+    #[func]
+    fn record_m5_signal_hold(
+        &mut self,
+        player_id: GString,
+        tick: i64,
+        objective_id: i64,
+        total_hold_ticks: i64,
+    ) -> VarDictionary {
+        let (Ok(player), Ok(tick), Ok(objective_id), Ok(total_hold_ticks)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            u64::try_from(objective_id),
+            u64::try_from(total_hold_ticks),
+        ) else {
+            return VarDictionary::new();
+        };
+        self.apply_m5_objective_event(player, tick, |bounty| {
+            bounty.record_signal_tower_hold(tick, player, objective_id, total_hold_ticks)
+        })
+    }
+
+    fn apply_m5_objective_event(
+        &mut self,
+        player: PlayerId,
+        tick: SimulationTick,
+        apply: impl FnOnce(
+            &mut BountyMatchKernel,
+        ) -> Result<
+            Option<spurfire_protocol::BountyAward>,
+            spurfire_protocol::BountyMatchError,
+        >,
+    ) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return result;
+        }
+        let Some(bounty) = self.m5_match_authority.as_ref() else {
+            return result;
+        };
+        if bounty.current_tick() != tick || !self.allowed_players.contains(&player) {
+            return result;
+        }
+        let mut bounty = bounty.clone();
+        let Ok(award) = apply(&mut bounty) else {
+            return result;
+        };
+        self.m5_match_authority = Some(bounty.clone());
+        result.set("accepted", true);
+        result.set(
+            "award_json",
+            award
+                .and_then(|row| serde_json::to_string(&row).ok())
+                .unwrap_or_default(),
+        );
+        result.set(
+            "state_json",
+            serde_json::to_string(&M5MatchStateV2::from_snapshot(&bounty.snapshot()))
+                .unwrap_or_default(),
+        );
+        result
     }
 
     /// Build a bounded, sequenced heartbeat datagram for `send_packet`.
@@ -2196,6 +2423,11 @@ impl PeerSession {
         result.set(
             "scoreboard_json",
             serde_json::to_string(&bounty.players().collect::<Vec<_>>()).unwrap_or_default(),
+        );
+        result.set(
+            "state_json",
+            serde_json::to_string(&M5MatchStateV2::from_snapshot(&bounty.snapshot()))
+                .unwrap_or_default(),
         );
         if let Some(snapshot) = shooter_snapshot {
             let origin = snapshot.muzzle_origin.to_meters();
@@ -3288,6 +3520,7 @@ impl PeerSession {
         self.combat_receipts.clear();
         self.m3_combat_authority = None;
         self.m5_match_authority = None;
+        self.m5_lobby_seed = 0;
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
@@ -3585,6 +3818,7 @@ impl INode for PeerSession {
             combat_receipts: BTreeSet::new(),
             m3_combat_authority: None,
             m5_match_authority: None,
+            m5_lobby_seed: 0,
             lobby_client: LobbyClientState::default(),
             creator_join_display: None,
             creator_join_lobby: None,

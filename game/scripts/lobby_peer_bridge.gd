@@ -33,6 +33,9 @@ var _m3_telemetry_file: FileAccess
 var _m3_telemetry_session := ""
 var _m3_telemetry_closed := false
 var _m5_state: Dictionary = {}
+var _m5_objective_hold_ticks: Dictionary = {}
+var _m5_objective_node: Node3D
+var _m5_most_wanted_node: Node3D
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -153,9 +156,13 @@ func apply_projection(response: Dictionary) -> bool:
 			lobby_id, JSON.stringify(projection), Time.get_ticks_msec()
 		):
 			return false
+	if get_parent().has_method("set_playable_radius"):
+		get_parent().call("set_playable_radius", float(peer_session.m5_playable_radius_m()))
 	return true
 
 func _process(_delta: float) -> void:
+	_sync_m5_objective_presentation()
+	_sync_m5_most_wanted_presentation()
 	if peer_session == null or _peers.is_empty() or _quiesced:
 		return
 	var now := Time.get_ticks_msec()
@@ -228,6 +235,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		if not packet.is_empty():
 			_send_to_all(packet)
 		return
+	_latest_inputs[local_player_id] = local_input
 
 	_record_actor_state(local_player_id, local_rider, tick)
 	var local_state := _actor_states[local_player_id] as Dictionary
@@ -236,7 +244,10 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 	local_state["horse_yaw_degrees"] = rad_to_deg(local_horse.rotation.y)
 	for player_id: String in _peers:
 		var input := _latest_inputs.get(player_id, _zero_m3_input()) as Dictionary
-		_simulate_remote_actor(player_id, input, tick)
+		if _m5_player_alive(player_id):
+			_simulate_remote_actor(player_id, input, tick)
+		elif _actor_states.has(player_id):
+			(_actor_states[player_id] as Dictionary)["velocity"] = Vector3.ZERO
 		var state := _actor_states[player_id] as Dictionary
 		if not state.has("horse_position"):
 			state["horse_position"] = state.position
@@ -250,6 +261,8 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		var input := local_input if player_id == local_player_id else (
 			_latest_inputs.get(player_id, _zero_m3_input()) as Dictionary
 		)
+		if not _m5_player_alive(player_id):
+			input = _zero_m3_input()
 		var buttons := int(input.get("buttons", 0))
 		var movement := Vector2(
 			float(input.get("move_x_milli", 0)) / 1000.0,
@@ -305,6 +318,8 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 	var match_tick := peer_session.advance_m5_match(tick) as Dictionary
 	if bool(match_tick.get("advanced", false)):
 		_install_m5_state_json(str(match_tick.get("state_json", "")))
+		_apply_m5_respawns(match_tick.get("respawned_players", PackedStringArray()), tick)
+		_advance_m5_objective_interactions(tick)
 		if tick % 30 == 0:
 			var match_packet: PackedByteArray = peer_session.make_m5_match_state(tick)
 			if not match_packet.is_empty():
@@ -362,9 +377,15 @@ func _install_m5_state_json(state_json: String) -> void:
 			"started_tick": int(objective_row.get("s", objective_row.get("started_tick", 0))),
 			"end_tick": int(objective_row.get("e", objective_row.get("end_tick", 0))),
 			"completed": bool(objective_row.get("c", objective_row.get("completed", false))),
+			"position": Vector3(
+				float(objective_row.get("x", objective_row.get("x_mm", 0))) / 1000.0,
+				1.0,
+				float(objective_row.get("z", objective_row.get("z_mm", 0))) / 1000.0
+			),
 		}
 	_m5_state = {
 		"authority_epoch": int(source.get("e", source.get("authority_epoch", 0))),
+		"lobby_seed": int(source.get("g", source.get("lobby_seed", 0))),
 		"current_tick": int(source.get("t", source.get("current_tick", 0))),
 		"end_tick": int(source.get("n", source.get("end_tick", 0))),
 		"players": players,
@@ -373,9 +394,192 @@ func _install_m5_state_json(state_json: String) -> void:
 		"finished": bool(source.get("f", source.get("finished", false))),
 		"winner": str(source.get("x", source.get("winner", ""))),
 	}
+	_sync_m5_objective_presentation()
+	_apply_local_m5_life_state()
 
 func get_m5_state() -> Dictionary:
 	return _m5_state.duplicate(true)
+
+func _m5_player_alive(player_id: String) -> bool:
+	return bool(_m5_player_row(player_id).get("alive", true))
+
+func _m5_player_row(player_id: String) -> Dictionary:
+	for row: Dictionary in _m5_state.get("players", []):
+		if str(row.get("player_id", "")) == player_id:
+			return row
+	return {}
+
+func _apply_local_m5_life_state() -> void:
+	if local_horse == null:
+		return
+	var alive := _m5_player_alive(local_player_id)
+	if local_horse.has_method("set_match_input_enabled"):
+		local_horse.call("set_match_input_enabled", alive)
+	var buff_active := false
+	var horse_buff_active := false
+	var tick := int(_m5_state.get("current_tick", simulation_tick))
+	var row := _m5_player_row(local_player_id)
+	buff_active = int(row.get("speed_buff_end_tick", -1)) > tick
+	horse_buff_active = int(row.get("horse_buff_end_tick", -1)) > tick
+	if local_horse.has_method("set_respawn_speed_buff_active"):
+		local_horse.call("set_respawn_speed_buff_active", buff_active)
+	if local_horse.has_method("set_horse_station_buff_active"):
+		local_horse.call("set_horse_station_buff_active", horse_buff_active)
+
+func _apply_m5_respawns(respawned_value: Variant, tick: int) -> void:
+	var respawned := PackedStringArray(respawned_value)
+	if respawned.is_empty():
+		return
+	var occupied := PackedVector3Array()
+	for player_id: String in _actor_states:
+		if player_id not in respawned and _m5_player_alive(player_id):
+			occupied.append((_actor_states[player_id] as Dictionary).position as Vector3)
+	respawned.sort()
+	for player_id: String in respawned:
+		var placement := peer_session.m5_respawn_position(player_id, tick, occupied) as Dictionary
+		if not bool(placement.get("valid", false)):
+			continue
+		var position := placement.get("position", Vector3.ZERO) as Vector3
+		occupied.append(position)
+		var yaw := atan2(position.x, position.z)
+		var state := _actor_states.get(player_id, {}) as Dictionary
+		state["tick"] = tick
+		state["position"] = position
+		state["velocity"] = Vector3.ZERO
+		state["yaw_degrees"] = rad_to_deg(yaw)
+		state["stance_id"] = 1
+		state["horse_position"] = position
+		state["horse_velocity"] = Vector3.ZERO
+		state["horse_yaw_degrees"] = rad_to_deg(yaw)
+		state["horse_state_id"] = 0
+		state["recall_state_id"] = 0
+		_actor_states[player_id] = state
+		if player_id == local_player_id:
+			local_rider.global_position = position
+			local_rider.velocity = Vector3.ZERO
+			if local_horse.has_method("respawn_at"):
+				local_horse.call("respawn_at", position, yaw)
+		else:
+			var rider := _remote_rider_for(player_id)
+			if rider and rider.has_method("push_snapshot"):
+				rider.call("push_snapshot", tick, position, Vector3.ZERO, rad_to_deg(yaw), 1)
+
+func _advance_m5_objective_interactions(tick: int) -> void:
+	var objective := _m5_state.get("active_objective", {}) as Dictionary
+	if objective.is_empty() or bool(objective.get("completed", false)):
+		_m5_objective_hold_ticks.clear()
+		return
+	var objective_id := int(objective.get("objective_id", 0))
+	var kind := str(objective.get("kind", ""))
+	var position := _m5_objective_world_position(objective, tick)
+	for player_id: String in _actor_states:
+		if not _m5_player_alive(player_id):
+			continue
+		var state := _actor_states[player_id] as Dictionary
+		var within := (state.position as Vector3).distance_to(position) <= (12.0 if kind == "signal_tower" else 8.0)
+		if kind == "signal_tower":
+			var hold_key := "%d:%s" % [objective_id, player_id]
+			var held := int(_m5_objective_hold_ticks.get(hold_key, 0))
+			held = held + 1 if within else 0
+			_m5_objective_hold_ticks[hold_key] = held
+			if within:
+				var outcome := peer_session.record_m5_signal_hold(player_id, tick, objective_id, held) as Dictionary
+				if bool(outcome.get("accepted", false)):
+					_install_m5_state_json(str(outcome.get("state_json", "")))
+		elif within and (
+			kind == "moving_bounty"
+			or int((_latest_inputs.get(player_id, {}) as Dictionary).get("buttons", 0)) & M3_INPUT_INTERACT != 0
+		):
+			var outcome := peer_session.complete_m5_objective(player_id, tick, objective_id) as Dictionary
+			if bool(outcome.get("accepted", false)):
+				_install_m5_state_json(str(outcome.get("state_json", "")))
+				return
+
+func _sync_m5_objective_presentation() -> void:
+	var objective := _m5_state.get("active_objective", {}) as Dictionary
+	if objective.is_empty():
+		if _m5_objective_node:
+			_m5_objective_node.queue_free()
+			_m5_objective_node = null
+		return
+	if get_parent() == null:
+		return
+	if _m5_objective_node == null:
+		_m5_objective_node = Node3D.new()
+		_m5_objective_node.name = "M5DynamicObjective"
+		get_parent().add_child(_m5_objective_node)
+		var marker := MeshInstance3D.new()
+		var mesh := CylinderMesh.new()
+		mesh.top_radius = 3.0
+		mesh.bottom_radius = 3.0
+		mesh.height = 0.3
+		var material := StandardMaterial3D.new()
+		material.albedo_color = Color("ffd166")
+		material.emission_enabled = true
+		material.emission = Color("e7a84b")
+		mesh.material = material
+		marker.mesh = mesh
+		_m5_objective_node.add_child(marker)
+		var cue := Label3D.new()
+		cue.name = "Cue"
+		cue.position = Vector3(0, 4, 0)
+		cue.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		cue.font_size = 32
+		cue.outline_size = 10
+		cue.no_depth_test = true
+		_m5_objective_node.add_child(cue)
+	_m5_objective_node.global_position = _m5_objective_world_position(
+		objective, int(_m5_state.get("current_tick", simulation_tick))
+	)
+	var cue := _m5_objective_node.get_node("Cue") as Label3D
+	cue.text = str(objective.get("kind", "OBJECTIVE")).replace("_", " ").to_upper()
+	_m5_objective_node.visible = not bool(objective.get("completed", false))
+
+func _m5_objective_world_position(objective: Dictionary, tick: int) -> Vector3:
+	var base := objective.get("position", Vector3.ZERO) as Vector3
+	if str(objective.get("kind", "")) != "moving_bounty":
+		return base
+	var elapsed := maxi(0, tick - int(objective.get("started_tick", tick)))
+	var angle := float(elapsed) / 60.0 * 0.18 + float(int(objective.get("objective_id", 0)))
+	return base + Vector3(cos(angle), 0.0, sin(angle)) * 24.0
+
+func _sync_m5_most_wanted_presentation() -> void:
+	var reveal := _m5_state.get("active_reveal", {}) as Dictionary
+	var player_id := str(reveal.get("player_id", ""))
+	if reveal.is_empty() or not _actor_states.has(player_id):
+		if _m5_most_wanted_node:
+			_m5_most_wanted_node.visible = false
+		return
+	if get_parent() == null:
+		return
+	if _m5_most_wanted_node == null:
+		_m5_most_wanted_node = Node3D.new()
+		_m5_most_wanted_node.name = "M5MostWantedFlare"
+		get_parent().add_child(_m5_most_wanted_node)
+		var flare := MeshInstance3D.new()
+		var mesh := CylinderMesh.new()
+		mesh.top_radius = 0.22
+		mesh.bottom_radius = 1.4
+		mesh.height = 18.0
+		var material := StandardMaterial3D.new()
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.albedo_color = Color(0.94, 0.16, 0.12, 0.58)
+		material.emission_enabled = true
+		material.emission = Color("ef4f58")
+		mesh.material = material
+		flare.mesh = mesh
+		flare.position.y = 9.0
+		_m5_most_wanted_node.add_child(flare)
+		var cue := Label3D.new()
+		cue.position.y = 20.0
+		cue.text = "MOST WANTED"
+		cue.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		cue.font_size = 34
+		cue.outline_size = 10
+		cue.no_depth_test = true
+		_m5_most_wanted_node.add_child(cue)
+	_m5_most_wanted_node.global_position = (_actor_states[player_id] as Dictionary).position as Vector3
+	_m5_most_wanted_node.visible = true
 
 func _update_authority_horse_presentation(
 	player_id: String, state: Dictionary, actor_tick: Dictionary, tick: int
@@ -973,6 +1177,7 @@ func _resolve_and_broadcast_command(payload: Dictionary) -> void:
 	if decoded is Dictionary:
 		shooter = str((decoded as Dictionary).get("shooter_peer_id", ""))
 	if not m3_resolution.is_empty():
+		_install_m5_state_json(str(m3_resolution.get("state_json", "")))
 		_record_m3_duel_outcome(shooter, m3_resolution, tick)
 		_record_m4_award(
 			shooter, tick, str(m3_resolution.get("spur_award_source", "")),
@@ -1243,7 +1448,12 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 	var turn_rate := 117.0 if charge_active else 90.0
 	var yaw := float(state.yaw_degrees) + steer * turn_rate / 60.0
 	var forward := Vector3.FORWARD.rotated(Vector3.UP, deg_to_rad(yaw))
-	var velocity := forward * throttle * (sprint_speed if charge_active else 13.0)
+	var m5_row := _m5_player_row(player_id)
+	var m5_speed_multiplier := (
+		(1.2 if int(m5_row.get("speed_buff_end_tick", -1)) > tick else 1.0)
+		* (1.1 if int(m5_row.get("horse_buff_end_tick", -1)) > tick else 1.0)
+	)
+	var velocity := forward * throttle * (sprint_speed if charge_active else 13.0) * m5_speed_multiplier
 	var position := (state.position as Vector3) + velocity / 60.0
 	var stance := int(state.stance_id)
 	var airborne_until_tick := int(state.get("mounted_airborne_until_tick", -1))

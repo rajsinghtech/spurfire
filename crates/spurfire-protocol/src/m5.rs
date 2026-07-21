@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{PlayerId, SimulationTick, MAX_M3_AUTHORITY_ACTORS};
+use crate::{playable_radius_m, PlayerId, SimulationTick, MAX_M3_AUTHORITY_ACTORS};
 
 /// Shared authority rate used by every M5 duration.
 pub const M5_TICK_RATE_HZ: u64 = 60;
@@ -33,10 +33,146 @@ pub const LONG_HIT_DISTANCE_MM: u32 = 60_000;
 pub const LONG_HIT_BONUS_CAP: u16 = 50;
 /// Horse station buff duration.
 pub const HORSE_STATION_BUFF_TICKS: u64 = 60 * M5_TICK_RATE_HZ;
+/// Alpha horse-buff station reward: +10% mounted movement for sixty seconds.
+pub const HORSE_STATION_SPEED_MULTIPLIER_MILLI: u16 = 1_100;
 /// Signal tower pays once per ten seconds held.
 pub const SIGNAL_TOWER_INTERVAL_TICKS: u64 = 10 * M5_TICK_RATE_HZ;
 /// Maximum bounded score accepted in a checkpoint.
 pub const MAX_BOUNTY_SCORE: u32 = 1_000_000;
+/// Objectives must remain at least this far inside the active-territory edge.
+pub const OBJECTIVE_EDGE_BUFFER_M: u32 = 150;
+/// Alpha flat-ground respawns prefer this separation from every live rider.
+pub const RESPAWN_MIN_SEPARATION_M: u32 = 120;
+/// Bounded deterministic candidate count for one respawn placement.
+pub const RESPAWN_PLACEMENT_CANDIDATES: u64 = 32;
+
+/// Integer-millimetre world point shared by deterministic placement and Godot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BountyWorldPoint {
+    pub x_mm: i32,
+    pub z_mm: i32,
+}
+
+impl BountyWorldPoint {
+    #[must_use]
+    pub const fn squared_radius_mm(self) -> u128 {
+        let x = self.x_mm as i128;
+        let z = self.z_mm as i128;
+        (x * x + z * z) as u128
+    }
+
+    #[must_use]
+    pub const fn squared_distance_mm(self, other: Self) -> u128 {
+        let x = self.x_mm as i128 - other.x_mm as i128;
+        let z = self.z_mm as i128 - other.z_mm as i128;
+        (x * x + z * z) as u128
+    }
+}
+
+/// Derives one objective point from only migrated lobby seed, objective ID,
+/// and roster size. The point is always at least 150m inside the boundary.
+#[must_use]
+pub fn bounty_objective_world_point(
+    lobby_seed: u64,
+    objective_id: u64,
+    player_count: u32,
+) -> BountyWorldPoint {
+    let radius_mm = u64::from(playable_radius_m(player_count)) * 1_000;
+    let usable_mm = radius_mm.saturating_sub(u64::from(OBJECTIVE_EDGE_BUFFER_M) * 1_000);
+    let entropy = splitmix64(lobby_seed ^ objective_id.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    // The middle 45–75% of the usable disk converges riders without making
+    // every event a center-map repetition.
+    let fraction_percent = 45 + entropy % 31;
+    radial_point(entropy, usable_mm.saturating_mul(fraction_percent) / 100)
+}
+
+/// Chooses an outer-ring respawn deterministically. The first candidate at
+/// least 120m from every occupied point wins; if the ring is saturated, the
+/// candidate maximizing its nearest-rider distance wins.
+#[must_use]
+pub fn bounty_respawn_world_point(
+    lobby_seed: u64,
+    player: PlayerId,
+    deaths: u16,
+    respawn_tick: SimulationTick,
+    player_count: u32,
+    occupied: &[BountyWorldPoint],
+) -> BountyWorldPoint {
+    let radius_mm = u64::from(playable_radius_m(player_count)) * 1_000;
+    let mut player_words = [0_u8; 8];
+    player_words.copy_from_slice(&player.as_bytes()[..8]);
+    let base = lobby_seed
+        ^ u64::from_be_bytes(player_words)
+        ^ u64::from(deaths).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        ^ respawn_tick.as_u64().wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mut occupied = occupied.to_vec();
+    occupied.sort_unstable();
+    occupied.dedup();
+    let required_sq = u128::from(RESPAWN_MIN_SEPARATION_M * 1_000).pow(2);
+    let mut best = BountyWorldPoint::default();
+    let mut best_nearest_sq = 0_u128;
+    for index in 0..RESPAWN_PLACEMENT_CANDIDATES {
+        let entropy = splitmix64(base ^ index.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let ring_percent = 70 + entropy % 16;
+        let candidate = radial_point(entropy, radius_mm.saturating_mul(ring_percent) / 100);
+        let nearest_sq = occupied
+            .iter()
+            .map(|point| candidate.squared_distance_mm(*point))
+            .min()
+            .unwrap_or(u128::MAX);
+        if nearest_sq >= required_sq {
+            return candidate;
+        }
+        if nearest_sq > best_nearest_sq || (nearest_sq == best_nearest_sq && candidate < best) {
+            best = candidate;
+            best_nearest_sq = nearest_sq;
+        }
+    }
+    best
+}
+
+fn radial_point(entropy: u64, radius_mm: u64) -> BountyWorldPoint {
+    let next = splitmix64(entropy);
+    let raw_x = i64::from((entropy & 0x1f_ffff) as i32) - 0x0f_ffff;
+    let raw_z = i64::from((next & 0x1f_ffff) as i32) - 0x0f_ffff;
+    let (raw_x, raw_z) = if raw_x == 0 && raw_z == 0 {
+        (1_i64, 0_i64)
+    } else {
+        (raw_x, raw_z)
+    };
+    let norm = integer_sqrt_u128((raw_x * raw_x + raw_z * raw_z) as u128).max(1);
+    let radius = i128::from(radius_mm);
+    BountyWorldPoint {
+        x_mm: i32::try_from(i128::from(raw_x) * radius / i128::from(norm)).unwrap_or_default(),
+        z_mm: i32::try_from(i128::from(raw_z) * radius / i128::from(norm)).unwrap_or_default(),
+    }
+}
+
+const fn integer_sqrt_u128(value: u128) -> u64 {
+    if value < 2 {
+        return value as u64;
+    }
+    let mut low = 1_u128;
+    let mut high = value / 2 + 1;
+    let mut answer = 1_u128;
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        if middle <= value / middle {
+            answer = middle;
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+    answer as u64
+}
+
+const fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
 
 /// Stable M5 score categories for HUD and telemetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +371,7 @@ pub struct BountyObjectiveSnapshot {
     pub started_tick: SimulationTick,
     pub end_tick: SimulationTick,
     pub completed: bool,
+    pub world_point: BountyWorldPoint,
 }
 
 /// Authority-signed M5 state sent at two hertz for follower presentation.
@@ -243,6 +380,7 @@ pub struct BountyObjectiveSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BountyMatchSnapshot {
     pub authority_epoch: u64,
+    pub lobby_seed: u64,
     pub current_tick: SimulationTick,
     pub end_tick: SimulationTick,
     pub players: Vec<BountyPlayerState>,
@@ -299,6 +437,12 @@ impl BountyMatchSnapshot {
                         .started_tick
                         .saturating_add(OBJECTIVE_LIFETIME_TICKS)
                 || effective_tick >= objective.end_tick
+                || objective.world_point
+                    != bounty_objective_world_point(
+                        self.lobby_seed,
+                        objective.objective_id,
+                        u32::try_from(self.players.len()).unwrap_or(u32::MAX),
+                    )
         }) {
             return false;
         }
@@ -462,6 +606,7 @@ impl BountyMatchKernel {
     pub fn snapshot(&self) -> BountyMatchSnapshot {
         BountyMatchSnapshot {
             authority_epoch: self.authority_epoch,
+            lobby_seed: self.lobby_seed,
             current_tick: self.current_tick,
             end_tick: self.end_tick,
             players: self.players.values().cloned().collect(),
@@ -478,6 +623,11 @@ impl BountyMatchKernel {
                     started_tick: objective.started_tick,
                     end_tick: objective.end_tick,
                     completed: objective.completed,
+                    world_point: bounty_objective_world_point(
+                        self.lobby_seed,
+                        objective.objective_id,
+                        u32::try_from(self.players.len()).unwrap_or(u32::MAX),
+                    ),
                 }),
             finished: self.finished,
             winner: if self.finished { self.winner() } else { None },
@@ -1150,5 +1300,41 @@ mod tests {
         let mut false_winner = snapshot;
         false_winner.winner = Some(player(1));
         assert!(!false_winner.is_canonical());
+    }
+
+    #[test]
+    fn objective_and_respawn_world_points_obey_locked_territory_geometry() {
+        let objective = bounty_objective_world_point(91, 7, 8);
+        let objective_limit_mm =
+            u64::from((playable_radius_m(8) - OBJECTIVE_EDGE_BUFFER_M) * 1_000);
+        assert!(integer_sqrt_u128(objective.squared_radius_mm()) <= objective_limit_mm + 2);
+        assert_eq!(objective, bounty_objective_world_point(91, 7, 8));
+        assert_ne!(objective, bounty_objective_world_point(91, 8, 8));
+
+        let occupied = [
+            BountyWorldPoint {
+                x_mm: 450_000,
+                z_mm: 0,
+            },
+            BountyWorldPoint {
+                x_mm: -450_000,
+                z_mm: 0,
+            },
+        ];
+        let spawn =
+            bounty_respawn_world_point(91, player(2), 3, SimulationTick::new(600), 8, &occupied);
+        let radius_mm = u64::from(playable_radius_m(8) * 1_000);
+        let actual_radius_mm = integer_sqrt_u128(spawn.squared_radius_mm());
+        assert!(actual_radius_mm + 2 >= radius_mm.saturating_mul(70) / 100);
+        assert!(actual_radius_mm <= radius_mm.saturating_mul(85) / 100 + 2);
+        let min_separation_sq = u128::from(RESPAWN_MIN_SEPARATION_M * 1_000).pow(2);
+        assert!(occupied
+            .iter()
+            .all(|point| spawn.squared_distance_mm(*point) >= min_separation_sq));
+        let reversed = [occupied[1], occupied[0]];
+        assert_eq!(
+            spawn,
+            bounty_respawn_world_point(91, player(2), 3, SimulationTick::new(600), 8, &reversed,)
+        );
     }
 }

@@ -13,10 +13,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    canonical_envelope_digest, canonical_manifest_digest, BountyMatchSnapshot,
-    BountyObjectiveSnapshot, BountyRevealSnapshot, DynamicObjectiveKind, EntityId,
-    HorseVitalityClass, HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId,
-    QuantizedDirection, RecallState, RosterHash, RosterManifest, SessionBinding,
+    bounty_objective_world_point, canonical_envelope_digest, canonical_manifest_digest,
+    BountyMatchSnapshot, BountyObjectiveSnapshot, BountyRevealSnapshot, BountyWorldPoint,
+    DynamicObjectiveKind, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId, M3ActorStance,
+    NodeKey, PlayerId, QuantizedDirection, RecallState, RosterHash, RosterManifest, SessionBinding,
     SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
     SimulationTick, WeaponId, WireVersion, DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS,
     MAX_BOUNTY_SCORE, MAX_M3_AUTHORITY_ACTORS, MOST_WANTED_REVEAL_TICKS, OBJECTIVE_LIFETIME_TICKS,
@@ -374,6 +374,10 @@ pub struct M5ObjectiveV2 {
     pub end_tick: SimulationTick,
     #[serde(rename = "c", alias = "completed")]
     pub completed: bool,
+    #[serde(rename = "x", alias = "x_mm")]
+    pub x_mm: i32,
+    #[serde(rename = "z", alias = "z_mm")]
+    pub z_mm: i32,
 }
 
 /// Signed two-hertz M5 presentation keyframe.
@@ -381,6 +385,8 @@ pub struct M5ObjectiveV2 {
 pub struct M5MatchStateV2 {
     #[serde(rename = "e", alias = "authority_epoch")]
     pub authority_epoch: u64,
+    #[serde(rename = "g", alias = "lobby_seed")]
+    pub lobby_seed: u64,
     #[serde(rename = "t", alias = "current_tick")]
     pub current_tick: SimulationTick,
     #[serde(rename = "n", alias = "end_tick")]
@@ -417,6 +423,7 @@ impl M5MatchStateV2 {
     pub fn from_snapshot(snapshot: &BountyMatchSnapshot) -> Self {
         Self {
             authority_epoch: snapshot.authority_epoch,
+            lobby_seed: snapshot.lobby_seed,
             current_tick: snapshot.current_tick,
             end_tick: snapshot.end_tick,
             players: snapshot
@@ -452,12 +459,15 @@ impl M5MatchStateV2 {
                      started_tick,
                      end_tick,
                      completed,
+                     world_point,
                  }| M5ObjectiveV2 {
                     objective_id,
                     kind,
                     started_tick,
                     end_tick,
                     completed,
+                    x_mm: world_point.x_mm,
+                    z_mm: world_point.z_mm,
                 },
             ),
             finished: snapshot.finished,
@@ -508,6 +518,14 @@ impl M5MatchStateV2 {
                         .started_tick
                         .saturating_add(OBJECTIVE_LIFETIME_TICKS)
                 || effective_tick >= objective.end_tick
+                || BountyWorldPoint {
+                    x_mm: objective.x_mm,
+                    z_mm: objective.z_mm,
+                } != bounty_objective_world_point(
+                    self.lobby_seed,
+                    objective.objective_id,
+                    u32::try_from(self.players.len()).unwrap_or(u32::MAX),
+                )
         }) {
             return false;
         }
@@ -1281,6 +1299,7 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
         M3PeerPayloadV2::MatchState { state } => {
             out.push(11);
             out.extend_from_slice(&state.authority_epoch.to_be_bytes());
+            out.extend_from_slice(&state.lobby_seed.to_be_bytes());
             out.extend_from_slice(&state.current_tick.as_u64().to_be_bytes());
             out.extend_from_slice(&state.end_tick.as_u64().to_be_bytes());
             out.extend_from_slice(
@@ -1316,6 +1335,8 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
                     out.extend_from_slice(&objective.started_tick.as_u64().to_be_bytes());
                     out.extend_from_slice(&objective.end_tick.as_u64().to_be_bytes());
                     out.push(u8::from(objective.completed));
+                    out.extend_from_slice(&objective.x_mm.to_be_bytes());
+                    out.extend_from_slice(&objective.z_mm.to_be_bytes());
                 }
                 None => out.push(0),
             }

@@ -188,6 +188,11 @@ pub struct HorseController {
     presentation_input_enabled: bool,
     #[var(no_set)]
     majestic_charge_active: bool,
+    #[var(no_set)]
+    respawn_speed_buff_active: bool,
+    #[var(no_set)]
+    horse_station_buff_active: bool,
+    match_input_enabled: bool,
 
     kernel: HorseKernel,
     runout_kernel: HorseRunoutKernel,
@@ -331,6 +336,52 @@ impl HorseController {
         self.kernel.set_majestic_charge_active(active);
     }
 
+    /// Applies the exact M5 ten-second +20% ride-back speed window.
+    #[func]
+    pub fn set_respawn_speed_buff_active(&mut self, active: bool) {
+        self.respawn_speed_buff_active = active;
+        self.kernel.set_respawn_speed_buff_active(active);
+    }
+
+    /// Applies the M5 horse-station +10% movement reward.
+    #[func]
+    pub fn set_horse_station_buff_active(&mut self, active: bool) {
+        self.horse_station_buff_active = active;
+        self.kernel.set_horse_station_buff_active(active);
+    }
+
+    /// Stops local prediction while the M5 authority marks this rider dead.
+    #[func]
+    pub fn set_match_input_enabled(&mut self, enabled: bool) {
+        self.match_input_enabled = enabled;
+        if !enabled {
+            let position = from_godot_vector(self.base().get_global_position());
+            self.kernel
+                .resolve_motion(position, KernelVec3::ZERO, self.base().is_on_floor());
+            self.base_mut().set_velocity(Vector3::ZERO);
+        }
+    }
+
+    /// Teleports and fully resets mounted presentation at an authority-owned
+    /// M5 point without reusing the course's static reset marker.
+    #[func]
+    pub fn respawn_at(&mut self, position: Vector3, yaw_radians: f64) -> bool {
+        if !position.is_finite() || !yaw_radians.is_finite() {
+            return false;
+        }
+        self.kernel
+            .set_spawn(from_godot_vector(position), yaw_radians);
+        let transition = self.kernel.reset();
+        self.runout_kernel =
+            HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ).expect("M2 tick rate is nonzero");
+        self.last_external_tick = None;
+        self.assign_runout_properties();
+        self.apply_kernel_transform();
+        self.emit_transition(transition);
+        self.emit_telemetry();
+        true
+    }
+
     /// Restore the configured spawn marker synchronously. Course reset is an
     /// explicit censor/reset path, never normal horse retrieval.
     #[func]
@@ -424,6 +475,9 @@ impl ICharacterBody3D for HorseController {
             runout_distance_m: 0.0,
             presentation_input_enabled: false,
             majestic_charge_active: false,
+            respawn_speed_buff_active: false,
+            horse_station_buff_active: false,
+            match_input_enabled: true,
             kernel: HorseKernel::new(tuning, KernelVec3::ZERO, 0.0),
             runout_kernel: HorseRunoutKernel::new(SADDLE_DIVE_TICK_RATE_HZ)
                 .expect("M2 tick rate is nonzero"),
@@ -676,7 +730,7 @@ impl HorseController {
         // Do not even query just-pressed actions while the capture gate is
         // closed: a focus transition must not consume or apply stale horse
         // commands on either the ordinary or externally clocked 60 Hz path.
-        if !self.presentation_input_enabled {
+        if !self.presentation_input_enabled || !self.match_input_enabled {
             self.back_tap_elapsed = f64::INFINITY;
             self.back_double_tap_active = false;
             return InputFrame::default();

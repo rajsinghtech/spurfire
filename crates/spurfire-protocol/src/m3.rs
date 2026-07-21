@@ -1475,6 +1475,20 @@ impl ActorGameplayKernel {
         &self.spur
     }
 
+    /// Restores the mounted rider/horse lifecycle for an M5 respawn while
+    /// preserving the shared absolute tick and earned Spur economy.
+    pub fn respawn(&mut self) {
+        let current_tick = self.current_tick;
+        let class = self.horse.class;
+        let spur = self.spur.clone();
+        *self = Self::new(class);
+        self.current_tick = current_tick;
+        self.horse.current_tick = current_tick;
+        self.on_foot.current_tick = current_tick;
+        self.recall.current_tick = current_tick;
+        self.spur = spur;
+    }
+
     /// Idempotent fatal effects awaiting native adapter/network delivery.
     #[must_use]
     pub const fn pending_horse_loss_effects(&self) -> Option<HorseDamageEffects> {
@@ -1939,6 +1953,15 @@ impl M3AuthorityBank {
     #[must_use]
     pub fn actor(&self, rider_player_id: PlayerId) -> Option<&ActorGameplayKernel> {
         self.actors.get(&rider_player_id).map(|row| &row.actor)
+    }
+
+    /// Resets one roster actor's mounted lifecycle without changing identity.
+    pub fn respawn_actor(&mut self, rider_player_id: PlayerId) -> bool {
+        let Some(row) = self.actors.get_mut(&rider_player_id) else {
+            return false;
+        };
+        row.actor.respawn();
+        true
     }
 
     /// Horse combat entity owned by one roster actor.

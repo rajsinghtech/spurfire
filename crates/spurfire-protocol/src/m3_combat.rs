@@ -11,7 +11,7 @@ use crate::{
     HorseVitalityState, M3AuthorityBank, M3AuthorityError, M3AuthorityHorseDamage, PlayerId,
     QuantizedDirection, QuantizedOrigin, ReloadSnapshot, RiderSnapshot, RiderStance, ShotCommand,
     ShotOutcome, SimulationTick, SpurCreditKind, TargetDefinition, TargetPoseSnapshot,
-    TargetRegistry, TargetRegistryError, TeamId, WeaponId,
+    TargetRegistry, TargetRegistryError, TeamId, WeaponAmmo, WeaponId,
 };
 
 /// Prototype rider health registered alongside each M3 horse target.
@@ -413,10 +413,29 @@ impl M3CombatAuthority {
             .map_err(Into::into)
     }
 
+    /// Applies the M5 ammo-wagon reward without changing loadout or receipts.
+    pub fn refill_rider_ammo(
+        &mut self,
+        rider_player_id: PlayerId,
+    ) -> Result<WeaponAmmo, M3CombatAuthorityError> {
+        let mut candidate = self.clone();
+        let ammo = candidate
+            .combat
+            .shooter_kernel_mut(rider_player_id)
+            .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?
+            .refill_equipped_ammo();
+        if let Some(clock) = candidate.reload_clocks.get_mut(&rider_player_id) {
+            clock.reload_held = false;
+        }
+        *self = candidate;
+        Ok(ammo)
+    }
+
     /// Restores one eliminated rider to full health on the M5 respawn edge.
     pub fn respawn_rider(
         &mut self,
         rider_player_id: PlayerId,
+        tick: SimulationTick,
     ) -> Result<(), M3CombatAuthorityError> {
         let rider_entity = self
             .rider_entities
@@ -424,9 +443,27 @@ impl M3CombatAuthority {
             .copied()
             .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?;
         let mut candidate = self.clone();
-        candidate
-            .targets
-            .synchronize_health(rider_entity, M3_RIDER_MAX_HEALTH)?;
+        let horse_entity = candidate
+            .actors
+            .horse_entity_id(rider_player_id)
+            .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?;
+        if !candidate.actors.respawn_actor(rider_player_id)
+            || !candidate
+                .combat
+                .shooter_kernel_mut(rider_player_id)
+                .is_some_and(|kernel| kernel.respawn_at(tick))
+        {
+            return Err(M3CombatAuthorityError::UnknownActorOrTarget);
+        }
+        candidate.targets.respawn(rider_entity)?;
+        candidate.targets.respawn(horse_entity)?;
+        candidate.reload_clocks.insert(
+            rider_player_id,
+            M3ReloadClock {
+                current_tick: Some(tick),
+                reload_held: false,
+            },
+        );
         *self = candidate;
         Ok(())
     }
@@ -697,22 +734,78 @@ mod tests {
     }
 
     #[test]
-    fn m5_respawn_restores_only_the_rostered_rider_target() {
+    fn m5_respawn_restores_the_rostered_actor_graph_and_ammo() {
         let mut authority = authority();
         authority
             .targets
             .synchronize_health(EntityId(102), 0)
             .unwrap();
-        authority.respawn_rider(player(2)).unwrap();
+        authority
+            .combat
+            .shooter_kernel_mut(player(2))
+            .unwrap()
+            .grant_weapon(
+                WeaponId::Dustwalker,
+                WeaponAmmo {
+                    magazine: 0,
+                    reserve: 0,
+                },
+            );
+        authority
+            .respawn_rider(player(2), SimulationTick::new(40))
+            .unwrap();
         assert_eq!(
             authority.targets.health(EntityId(102)),
             Some(M3_RIDER_MAX_HEALTH)
         );
         assert_eq!(authority.targets.health(EntityId(202)), Some(320));
+        assert_eq!(
+            authority
+                .combat()
+                .shooter_kernel(player(2))
+                .unwrap()
+                .equipped_ammo(),
+            WeaponAmmo::full(*WeaponId::Dustwalker.stats())
+        );
 
         let before = authority.clone();
         assert_eq!(
-            authority.respawn_rider(player(3)),
+            authority.respawn_rider(player(3), SimulationTick::new(40)),
+            Err(M3CombatAuthorityError::UnknownActorOrTarget)
+        );
+        assert_eq!(authority, before);
+    }
+
+    #[test]
+    fn ammo_wagon_refill_preserves_loadout_and_rejects_unknown_riders_atomically() {
+        let mut authority = authority();
+        authority
+            .combat
+            .shooter_kernel_mut(player(2))
+            .unwrap()
+            .grant_weapon(
+                WeaponId::Dustwalker,
+                WeaponAmmo {
+                    magazine: 1,
+                    reserve: 2,
+                },
+            );
+        assert_eq!(
+            authority.refill_rider_ammo(player(2)).unwrap(),
+            WeaponAmmo::full(*WeaponId::Dustwalker.stats())
+        );
+        assert_eq!(
+            authority
+                .combat()
+                .shooter_kernel(player(2))
+                .unwrap()
+                .equipped_ammo(),
+            WeaponAmmo::full(*WeaponId::Dustwalker.stats())
+        );
+
+        let before = authority.clone();
+        assert_eq!(
+            authority.refill_rider_ammo(player(3)),
             Err(M3CombatAuthorityError::UnknownActorOrTarget)
         );
         assert_eq!(authority, before);

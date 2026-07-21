@@ -7,7 +7,10 @@
 use std::f64::consts::PI;
 use std::ops::{Add, AddAssign, Mul, Sub};
 
-use spurfire_protocol::{CHARGE_ACCEL_MULTIPLIER_MILLI, CHARGE_TURN_MULTIPLIER_MILLI};
+use spurfire_protocol::{
+    CHARGE_ACCEL_MULTIPLIER_MILLI, CHARGE_TURN_MULTIPLIER_MILLI,
+    HORSE_STATION_SPEED_MULTIPLIER_MILLI,
+};
 
 use crate::archetype::{HorseArchetype, HorseStats};
 
@@ -603,6 +606,8 @@ pub struct HorseKernel {
     spawn_position: Vec3,
     spawn_yaw_radians: f64,
     majestic_charge_active: bool,
+    respawn_speed_buff_active: bool,
+    horse_station_buff_active: bool,
 }
 
 impl HorseKernel {
@@ -622,6 +627,8 @@ impl HorseKernel {
             spawn_position,
             spawn_yaw_radians,
             majestic_charge_active: false,
+            respawn_speed_buff_active: false,
+            horse_station_buff_active: false,
         }
     }
 
@@ -699,6 +706,28 @@ impl HorseKernel {
     #[must_use]
     pub const fn majestic_charge_active(&self) -> bool {
         self.majestic_charge_active
+    }
+
+    pub fn set_respawn_speed_buff_active(&mut self, active: bool) {
+        self.respawn_speed_buff_active = active;
+    }
+
+    pub fn set_horse_station_buff_active(&mut self, active: bool) {
+        self.horse_station_buff_active = active;
+    }
+
+    fn m5_speed_multiplier(&self) -> f64 {
+        let respawn = if self.respawn_speed_buff_active {
+            1.2
+        } else {
+            1.0
+        };
+        let station = if self.horse_station_buff_active {
+            f64::from(HORSE_STATION_SPEED_MULTIPLIER_MILLI) / 1_000.0
+        } else {
+            1.0
+        };
+        respawn * station
     }
 
     pub fn set_spawn(&mut self, position: Vec3, yaw_radians: f64) {
@@ -937,10 +966,15 @@ impl HorseKernel {
     }
 
     fn clamp_canonical_motion(&mut self) {
+        let forward_cap = if self.majestic_charge_active {
+            self.archetype_stats().sprint_mps
+        } else {
+            self.target_speed(Gait::Gallop)
+        } * self.m5_speed_multiplier();
         self.state.forward_speed_mps = self
             .state
             .forward_speed_mps
-            .clamp(-self.reverse_speed(), self.target_speed(Gait::Gallop));
+            .clamp(-self.reverse_speed(), forward_cap);
         let sidestep_cap = self.archetype_stats().sidestep_mps;
         self.state.lateral_speed_mps = self
             .state
@@ -1125,11 +1159,12 @@ impl HorseKernel {
         }
 
         let (terrain_speed, terrain_acceleration) = self.terrain_multipliers(environment, delta);
-        let gait_cap = if self.majestic_charge_active {
+        let base_gait_cap = if self.majestic_charge_active {
             self.archetype_stats().sprint_mps
         } else {
             self.target_speed(self.state.gait) * terrain_speed
         };
+        let gait_cap = base_gait_cap * self.m5_speed_multiplier();
         let mut longitudinal = self.state.forward_speed_mps;
         let mut lateral = self.state.lateral_speed_mps;
         let settling_lateral = !sidestep_requested && lateral.abs() > SIDESTEP_EPSILON_MPS;
@@ -1752,6 +1787,55 @@ mod tests {
                 (0.55..=0.75).contains(&uphill_fraction),
                 "{hz} Hz uphill fraction {uphill_fraction}"
             );
+        }
+    }
+
+    #[test]
+    fn respawn_speed_buff_is_exactly_twenty_percent_without_charge_handling() {
+        for hz in HZ_VALUES {
+            let mut horse = kernel();
+            horse.set_respawn_speed_buff_active(true);
+            select_gallop(&mut horse, hz);
+            for _ in 0..(5 * hz) {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            let expected = horse.archetype_stats().gallop_mps * 1.2;
+            assert!((horse.state().horizontal_speed() - expected).abs() < 0.01);
+            horse.set_horse_station_buff_active(true);
+            for _ in 0..(2 * hz) {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert!((horse.state().horizontal_speed() - expected * 1.1).abs() < 0.01);
+            horse.set_respawn_speed_buff_active(false);
+            horse.set_horse_station_buff_active(false);
+            for _ in 0..(2 * hz) {
+                step(
+                    &mut horse,
+                    InputFrame {
+                        throttle: 1.0,
+                        ..InputFrame::default()
+                    },
+                    Environment::default(),
+                    hz,
+                );
+            }
+            assert!(horse.state().horizontal_speed() <= horse.archetype_stats().gallop_mps + 0.01);
         }
     }
 

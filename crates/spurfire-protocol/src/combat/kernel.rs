@@ -544,6 +544,24 @@ impl CombatKernel {
         self.dive_context
     }
 
+    /// Restores the selected Alpha loadout at an M5 respawn without resetting
+    /// replay receipts or the deterministic shot index.
+    pub fn respawn_at(&mut self, tick: SimulationTick) -> bool {
+        if tick < self.last_advanced_tick {
+            return false;
+        }
+        for (weapon, ammo) in &mut self.inventory {
+            *ammo = WeaponAmmo::full(*weapon.stats());
+        }
+        self.holstered = false;
+        self.reload = None;
+        self.recoil = RecoilState::default();
+        self.riding = RidingState::default();
+        self.dive_context = None;
+        self.last_advanced_tick = tick;
+        true
+    }
+
     const fn has_open_dive_context(&self) -> bool {
         matches!(self.dive_context, Some(context) if !context.closed_to_new_shots)
     }
@@ -649,6 +667,14 @@ impl CombatKernel {
     pub fn grant_weapon(&mut self, weapon_id: WeaponId, ammo: WeaponAmmo) {
         self.inventory
             .insert(weapon_id, ammo.clamped(*weapon_id.stats()));
+    }
+
+    /// Refills the equipped rifle from an authority-observed ammo-wagon reward.
+    pub fn refill_equipped_ammo(&mut self) -> WeaponAmmo {
+        let ammo = WeaponAmmo::full(*self.equipped.stats());
+        self.inventory.insert(self.equipped, ammo);
+        self.reload = None;
+        ammo
     }
 
     /// Selects an owned rifle and cancels any reload. Dive-airborne weapon

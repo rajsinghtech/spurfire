@@ -490,7 +490,8 @@ func _check_peer_session(failures: Array[String]) -> void:
 		"make_m3_actor_snapshot_from_pose", "m3_actor_state_json",
 		"poll_m3_migration", "advance_m3_actor", "record_m3_horse_pose",
 		"resolve_m3_shot_command", "issue_m4_spur_credit", "advance_m5_match",
-		"make_m5_match_state",
+		"make_m5_match_state", "m5_playable_radius_m", "m5_respawn_position",
+		"complete_m5_objective", "record_m5_signal_hold",
 	]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks M3 multiplayer method %s" % method)
@@ -606,6 +607,39 @@ func _check_peer_session(failures: Array[String]) -> void:
 			failures.append("PeerSession could not bind combat and private M3 checkpoint state")
 		if not (peer_session.call("make_rider_input", 11, 0, 0, 0) as PackedByteArray).is_empty():
 			failures.append("PeerSession emitted legacy wire input after M3 activation")
+		if int(peer_session.call("m5_playable_radius_m")) != 450:
+			failures.append("PeerSession did not expose the one-rider 450m territory floor")
+		var objective_actor := peer_session.call(
+			"advance_m3_actor",
+			"00000000-0000-4000-8000-000000000002", 5400, Vector2.ZERO,
+			false, false, false, false, false, true, Vector3.ZERO, Vector3.ZERO, false
+		) as Dictionary
+		var objective_tick := peer_session.call("advance_m5_match", 5400) as Dictionary
+		var objective_state = JSON.parse_string(str(objective_tick.get("state_json", "")))
+		if not bool(objective_actor.get("advanced", false)) or not objective_state is Dictionary:
+			failures.append("PeerSession did not advance to the first M5 objective window")
+		else:
+			var objective := (objective_state as Dictionary).get("o", {}) as Dictionary
+			var objective_id := int(objective.get("i", 0))
+			var objective_radius := Vector2(
+				float(objective.get("x", 0)), float(objective.get("z", 0))
+			).length() / 1000.0
+			if objective_id != 1 or objective_radius > 300.01:
+				failures.append("PeerSession objective placement violated ID or 150m edge buffer")
+			var objective_outcome := {}
+			if str(objective.get("k", "")) == "signal_tower":
+				for held in [600, 1200, 1800]:
+					objective_outcome = peer_session.call(
+						"record_m5_signal_hold",
+						"00000000-0000-4000-8000-000000000002", 5400, objective_id, held
+					) as Dictionary
+			else:
+				objective_outcome = peer_session.call(
+					"complete_m5_objective",
+					"00000000-0000-4000-8000-000000000002", 5400, objective_id
+				) as Dictionary
+			if not bool(objective_outcome.get("accepted", false)) or str(objective_outcome.get("award_json", "")).is_empty():
+				failures.append("PeerSession rejected an authority-observed M5 objective payout")
 	peer_session.free()
 
 func _check_m3_gameplay_controller(failures: Array[String]) -> void:
