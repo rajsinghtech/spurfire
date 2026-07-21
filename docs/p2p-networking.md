@@ -1,15 +1,16 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The Alpha
-validation branch currently pins both direct dependencies to v0.1.4-compatible refresh backport
-[#103](https://github.com/rajsinghtech/rustscale/pull/103) revision
-`ad92ab56474ac37adff5c48da1ae8eaaa50efb43`. It is the released v0.1.4 revision
-`272ee212c7c339c3d028ea474554154bc28ae381` plus only the reviewed periodic-refresh fix from
-[#101](https://github.com/rajsinghtech/rustscale/pull/101), merged to main as
-`7139bf384045a7e398320ae853e751c61c8218b9`. The narrow pin is temporary: the broader post-v0.1.4
-candidate reproducibly crashed Windows Godot startup, tracked in
-[RustScale issue #102](https://github.com/rajsinghtech/rustscale/issues/102). Move back to main only
-after that regression is fixed and the replacement exact revision passes the same consumer gates.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. Both direct
+dependencies are pinned reproducibly to merged RustScale main revision
+`7139bf384045a7e398320ae853e751c61c8218b9` (v0.1.5), which includes the reviewed periodic-refresh
+fix from [#101](https://github.com/rajsinghtech/rustscale/pull/101). The temporary v0.1.4-compatible
+backport [#103](https://github.com/rajsinghtech/rustscale/pull/103) was useful for isolating and
+live-qualifying that fix, but is no longer the consumer pin. A Windows exit-139 failure initially
+attributed to post-v0.1.4 RustScale later reproduced on the exact backport, moved between the
+integrated course and process teardown, and completed all standalone `PeerSession` work without
+starting a RustScale connection. It is tracked as a Spurfire/Godot lifecycle defect in
+[Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14), not as a reason to remain
+on the backport.
 
 ## Components
 
@@ -93,13 +94,14 @@ blocker until the reviewed fix passed the default run below.
 
 Merged RustScale PR #101 randomizes the periodic refresh per peer and limits that maintenance pass
 to the STUN endpoint work needed by magicsock. Its original exact candidate revision
-`eea0e4cd40d60a7c143ad7671439d66d2912df08` passed shortened and default eight-Godot soaks, but the
-broader dependency state at that revision failed the Windows Godot startup gate. The isolated
-v0.1.4 backport revision `ad92ab56474ac37adff5c48da1ae8eaaa50efb43` then passed RustScale's
-`rustscale-netcheck` and `rustscale-tsnet` gates, Spurfire's complete hosted CI, and the complete
-Client Preflight matrix including Windows startup/export/packaged launch, Linux x64/ARM64, macOS
-universal, and candidate assembly. Its shortened 360,000 ms live run peaked at 131 ms snapshot gap
-and 1 ms presentation desync.
+`eea0e4cd40d60a7c143ad7671439d66d2912df08` passed shortened and default eight-Godot soaks. The
+isolated v0.1.4 backport revision `ad92ab56474ac37adff5c48da1ae8eaaa50efb43` then passed
+RustScale's `rustscale-netcheck` and `rustscale-tsnet` gates, Spurfire's complete hosted CI, and one
+complete Client Preflight matrix including Windows startup/export/packaged launch, Linux
+x64/ARM64, macOS universal, and candidate assembly. A later exact-backport Windows run failed once
+with exit 139 and passed on retry; the same intermittent failure appeared at more than one
+RustScale revision and is tracked in Spurfire issue #14. The backport's shortened 360,000 ms live
+run peaked at 131 ms snapshot gap and 1 ms presentation desync.
 
 The subsequent default 900,000 ms run on that exact backport also passed. All eight Godot clients
 and 56 directed Direct routes remained live through three independently randomized maintenance
@@ -146,8 +148,8 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
 - RustScale's fixed-phase five-minute endpoint refresh in v0.1.4 can synchronize embedded peers and
   breach the 200 ms gameplay gap gate. The fix in PR
-  [#101](https://github.com/rajsinghtech/rustscale/pull/101), isolated as v0.1.4 backport PR
-  [#103](https://github.com/rajsinghtech/rustscale/pull/103), passed both the shortened six-minute
-  refresh-boundary regression and the full 15-minute gate at a 131 ms peak. Keep the exact backport
-  pin until the Windows regression in issue #102 is fixed on main; secure packaged-client and human
-  gates remain.
+  [#101](https://github.com/rajsinghtech/rustscale/pull/101), first isolated as v0.1.4 backport PR
+  [#103](https://github.com/rajsinghtech/rustscale/pull/103) and now consumed from exact merged main,
+  passed both the shortened six-minute refresh-boundary regression and the full 15-minute gate at a
+  131 ms peak. The independent Windows lifecycle flake remains tracked in Spurfire issue #14;
+  secure packaged-client and human gates also remain.

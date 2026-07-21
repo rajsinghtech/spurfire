@@ -256,13 +256,15 @@ endpoint refreshes. A two-worker-per-client follow-up reduced the boundary to 13
 failed one follower at 202 ms. See
 [RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The reviewed fix from
 RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
-`ad92ab56474ac37adff5c48da1ae8eaaa50efb43` because the broader post-v0.1.4 candidate crashed
-Windows Godot startup ([RustScale issue #102](https://github.com/rajsinghtech/rustscale/issues/102)).
-The exact backport passed a 360,000 ms refresh-boundary run with all eight Godot clients and all 56
-directed routes. The authority received at least 21,599 inputs from each follower; peak snapshot gap
-was 131 ms and peak presentation desync was 1 ms. Exact cleanup deleted the child tailnet. Do not
-treat that shortened regression proof or the successful static matrix as completion of the
-15-minute movement gate. The subsequent exact-backport default run completed the gate:
+`ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
+`7139bf384045a7e398320ae853e751c61c8218b9`, which is now the exact Spurfire pin. A Windows exit 139
+initially attributed to the broader dependency state later reproduced on the backport and is tracked
+as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
+a 360,000 ms refresh-boundary run with all eight Godot clients and all 56 directed routes. The
+authority received at least 21,599 inputs from each follower; peak snapshot gap was 131 ms and peak
+presentation desync was 1 ms. Exact cleanup deleted the child tailnet. Do not treat that shortened
+regression proof or the successful static matrix as completion of the 15-minute movement gate. The
+subsequent exact-backport default run completed the gate:
 
 ```text
 SPURFIRE_GODOT_P2P_SOAK_OK peers=8 duration_ms=900000 min_sender_inputs=53999 peak_gap_ms=131 max_last_age_ms=28 min_motion_span_mm=39999 min_presentation_samples=130435 peak_presentation_desync_ms=1

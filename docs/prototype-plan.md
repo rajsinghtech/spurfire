@@ -469,15 +469,15 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
 - [x] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
   eight-Godot run delivered all 18,000 snapshots per follower but failed at 225–334 ms during
   RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. RustScale
-  PR #101's fix was isolated onto v0.1.4 as PR #103 revision
-  `ad92ab56474ac37adff5c48da1ae8eaaa50efb43` after the broader candidate exposed the Windows Godot
-  startup regression tracked by [RustScale #102](https://github.com/rajsinghtech/rustscale/issues/102).
-  The exact backport passed the six-minute refresh-boundary regression and full 900,000 ms run across
-  all eight clients and 56 directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation
-  desync. The exact final child was deleted and absent afterward, but an older inert provider record
-  remains, so the separate leaked-state checkbox stays open. Track
-  merged RustScale PR #101 through a compatible release, while keeping
-  [RustScale #102](https://github.com/rajsinghtech/rustscale/issues/102) as the main-consumption
+  PR #101's fix was first isolated onto v0.1.4 as PR #103 revision
+  `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
+  `7139bf384045a7e398320ae853e751c61c8218b9`, which Spurfire now pins. The exact backport passed the
+  six-minute refresh-boundary regression and full 900,000 ms run across all eight clients and 56
+  directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact final
+  child was deleted and absent afterward, but an older inert provider record remains, so the
+  separate leaked-state checkbox stays open. An intermittent Windows course/teardown exit 139 also
+  reproduced on the backport and is tracked separately in
+  [Spurfire #14](https://github.com/rajsinghtech/spurfire/issues/14); it is not a RustScale main pin
   blocker. This checkbox is practice-wire transport/presentation evidence, not horse-physics or
   human-play qualification.
 - [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 23 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
