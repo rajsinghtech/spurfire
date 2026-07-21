@@ -1,7 +1,6 @@
 extends Node
 
 const CAMERA_RIG_SCRIPT := preload("res://scripts/camera_rig.gd")
-const COURSE_BUILDER_SCRIPT := preload("res://scripts/course_builder.gd")
 const RIDER_POSE_SCRIPT := preload("res://scripts/rider_pose.gd")
 
 const REQUIRED_ACTIONS := [
@@ -50,7 +49,6 @@ func _ready() -> void:
 		_finish(failures)
 		return
 
-	await _check_frontier_arena_contract(failures)
 	var packed := load("res://scenes/graybox_course.tscn") as PackedScene
 	if packed == null:
 		failures.append("graybox_course.tscn could not be loaded")
@@ -62,6 +60,11 @@ func _ready() -> void:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
 	await _check_capture_contract(course, failures)
+	remove_child(course)
+	await get_tree().process_frame
+	await _check_frontier_arena_contract(course, failures)
+	add_child(course)
+	await get_tree().process_frame
 	# The remaining deterministic simulation scenarios drive InputMap directly;
 	# explicitly open the presentation gate after its dedicated assertions.
 	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
@@ -208,8 +211,7 @@ func _check_capture_contract(course: Node, failures: Array[String]) -> void:
 	if not is_equal_approx(float(camera_rig.get("_world_yaw")), deg_to_rad(90.0)):
 		failures.append("camera forced recenter after player stopped aiming")
 
-func _check_frontier_arena_contract(failures: Array[String]) -> void:
-	var expected_transforms: Dictionary = COURSE_BUILDER_SCRIPT.frontier_fixture_transforms()
+func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> void:
 	var packed := load("res://scenes/frontier_arena.tscn") as PackedScene
 	if packed == null:
 		failures.append("frontier_arena.tscn could not be loaded")
@@ -275,9 +277,10 @@ func _check_frontier_arena_contract(failures: Array[String]) -> void:
 		var fixture_mesh := arena.get_node("TestCourse/" + fixture).get_child(0) as MeshInstance3D
 		if fixture_mesh.material_override != null:
 			failures.append("frontier restyle erased authored fixture color: %s" % fixture)
-	for fixture in expected_transforms:
+	for fixture in ["FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31", "JumpFence_0Rail", "BridgeDeck"]:
+		var expected := graybox.get_node("TestCourse/" + fixture) as Node3D
 		var actual := arena.get_node("TestCourse/" + fixture) as Node3D
-		if expected_transforms[fixture] != actual.transform:
+		if expected.transform != actual.transform:
 			failures.append("frontier arena moved smoke fixture: %s" % fixture)
 	arena.queue_free()
 	await get_tree().process_frame
