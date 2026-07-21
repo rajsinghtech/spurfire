@@ -131,7 +131,8 @@ if [[ "$needs_import" == true ]]; then
   import_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-import.XXXXXX")"
   mv "$descriptor" "$disabled_descriptor"
   import_status=0
-  run_bounded "$timeout_seconds" "${godot_command[@]}" \
+  # Import is a bounded editor task, not part of the runtime crash probe.
+  run_bounded "$timeout_seconds" "$godot_bin" \
     "${godot_runtime_args[@]}" \
     --headless \
     --display-driver headless \
