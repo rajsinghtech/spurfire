@@ -312,7 +312,14 @@ jobs:
           : > "$RUNNER_TEMP/godot-smoke.log"
           for attempt in 1 2 3 4 5; do
             echo "SPURFIRE_DIAG_WINDOWS_ATTEMPT $attempt" | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            set +e
             GODOT_BIN="$PWD/godot4.exe" scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            smoke_status="${PIPESTATUS[0]}"
+            set -e
+            if [[ "$smoke_status" -ne 0 ]]; then
+              wevtutil.exe qe Application /c:20 /rd:true /f:text || true
+              exit "$smoke_status"
+            fi
           done
           smoke_log="$(mktemp)"
           tr -d '\r' < "$RUNNER_TEMP/godot-smoke.log" > "$smoke_log"
