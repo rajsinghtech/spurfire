@@ -29,7 +29,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
-| M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
+| M5 | Bounty Run scoring loop | **authority foundation in progress** | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
 Build order is strict: each milestone's tuning depends on the previous one's feel. The invited-
@@ -321,6 +321,13 @@ sit full — if hoarding dominates, add a gentle spend incentive before any deca
 ---
 
 ## M5 — Bounty Run scoring loop
+
+**Status: authority foundation in progress.** The pure Rust match kernel owns the exact 15-minute
+clock, canonical scoreboard and category breakdown, strict five-second assist window, respawn and
+speed-buff timers, deterministic Most Wanted reveals/survival payouts, dynamic-objective cadence,
+locked objective payouts, long-hit cap, winner tie-break, and fail-closed epoch checkpoint. Combat
+producers, wire migration composition, spawn placement, objective world interactions, HUD/results,
+and acceptance telemetry remain.
 
 **Goal:** full 15-min matches with score pressure, Most Wanted drama, and event-driven
 convergence. Fun verdict gate for the whole prototype.
