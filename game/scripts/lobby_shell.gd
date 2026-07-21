@@ -119,6 +119,7 @@ func _connect_signals() -> void:
 	api.report_completed.connect(_on_report_completed)
 	api.start_completed.connect(_on_started)
 	api.heartbeat_completed.connect(_on_heartbeat)
+	api.results_completed.connect(_on_results_completed)
 	api.leave_completed.connect(_on_left)
 	api.end_completed.connect(_on_end_requested)
 	api.request_failed.connect(_on_request_failed)
@@ -212,6 +213,7 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	_bridge.name = "LobbyPeerBridge"
 	_course.add_child(_bridge)
 	_bridge.authority_departed.connect(_on_authority_departed)
+	_bridge.m5_match_choice.connect(_on_m5_match_choice)
 	if not _bridge.configure({
 		"peer_session": peer_session, "local_rider": rider, "local_horse": horse,
 		"remote_rider": remote, "combat_router": combat_router,
@@ -358,6 +360,19 @@ func _on_heartbeat(response_json: String) -> void:
 	var response := _public_response(response_json)
 	if not _leaving:
 		_lobby["state"] = str(response.get("state", _lobby.get("state", "IN_MATCH")))
+
+func _on_m5_match_choice(_play_again: bool, results_json: String) -> void:
+	if (
+		results_json.is_empty() or _lobby_id.is_empty() or _authority_input_hash.is_empty()
+		or _leaving
+	):
+		return
+	api.submit_results(_lobby_id, _authority_input_hash, results_json)
+
+func _on_results_completed(_response_json: String) -> void:
+	if _leaving:
+		return
+	_begin_leave()
 
 func _start_match() -> void:
 	if _course is Node3D:

@@ -289,6 +289,9 @@ pub struct M5ScoreRowV2 {
     pub respawn_at_tick: Option<SimulationTick>,
     pub respawn_speed_buff_end_tick: Option<SimulationTick>,
     pub horse_buff_end_tick: Option<SimulationTick>,
+    /// Elimination, assist, horse-bolt, dive, long-hit, objective,
+    /// Most-Wanted-elimination, and Most-Wanted-survival points.
+    pub score_breakdown: Option<[u32; 8]>,
 }
 
 impl Serialize for M5ScoreRowV2 {
@@ -296,7 +299,11 @@ impl Serialize for M5ScoreRowV2 {
     where
         S: Serializer,
     {
-        let mut row = serializer.serialize_tuple(9)?;
+        let mut row = serializer.serialize_tuple(if self.score_breakdown.is_some() {
+            10
+        } else {
+            9
+        })?;
         row.serialize_element(&self.player_id)?;
         row.serialize_element(&self.score)?;
         row.serialize_element(&self.eliminations)?;
@@ -306,6 +313,9 @@ impl Serialize for M5ScoreRowV2 {
         row.serialize_element(&self.respawn_at_tick)?;
         row.serialize_element(&self.respawn_speed_buff_end_tick)?;
         row.serialize_element(&self.horse_buff_end_tick)?;
+        if let Some(breakdown) = self.score_breakdown {
+            row.serialize_element(&breakdown)?;
+        }
         row.end()
     }
 }
@@ -315,6 +325,41 @@ impl<'de> Deserialize<'de> for M5ScoreRowV2 {
     where
         D: Deserializer<'de>,
     {
+        type ActiveRow = (
+            PlayerId,
+            u32,
+            u16,
+            u16,
+            u16,
+            bool,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+        );
+        type FinalRow = (
+            PlayerId,
+            u32,
+            u16,
+            u16,
+            u16,
+            bool,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+            [u32; 8],
+        );
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireRow {
+            Final(FinalRow),
+            Active(ActiveRow),
+        }
+        let (active, score_breakdown) = match WireRow::deserialize(deserializer)? {
+            WireRow::Active(row) => (row, None),
+            WireRow::Final((a, b, c, d, e, f, g, h, i, breakdown)) => {
+                ((a, b, c, d, e, f, g, h, i), Some(breakdown))
+            }
+        };
         let (
             player_id,
             score,
@@ -325,17 +370,7 @@ impl<'de> Deserialize<'de> for M5ScoreRowV2 {
             respawn_at_tick,
             respawn_speed_buff_end_tick,
             horse_buff_end_tick,
-        ) = <(
-            PlayerId,
-            u32,
-            u16,
-            u16,
-            u16,
-            bool,
-            Option<SimulationTick>,
-            Option<SimulationTick>,
-            Option<SimulationTick>,
-        )>::deserialize(deserializer)?;
+        ) = active;
         Ok(Self {
             player_id,
             score,
@@ -346,6 +381,7 @@ impl<'de> Deserialize<'de> for M5ScoreRowV2 {
             respawn_at_tick,
             respawn_speed_buff_end_tick,
             horse_buff_end_tick,
+            score_breakdown,
         })
     }
 }
@@ -439,6 +475,16 @@ impl M5MatchStateV2 {
                     respawn_at_tick: row.respawn_at_tick,
                     respawn_speed_buff_end_tick: row.respawn_speed_buff_end_tick,
                     horse_buff_end_tick: row.horse_buff_end_tick,
+                    score_breakdown: snapshot.finished.then_some([
+                        row.score.elimination,
+                        row.score.assist,
+                        row.score.horse_bolt,
+                        row.score.saddle_dive_bonus,
+                        row.score.mounted_long_hit,
+                        row.score.objective,
+                        row.score.most_wanted_elimination,
+                        row.score.most_wanted_survival,
+                    ]),
                 })
                 .collect(),
             active_reveal: snapshot.active_reveal.map(
@@ -491,6 +537,15 @@ impl M5MatchStateV2 {
             SimulationTick::new(self.current_tick.as_u64().min(self.end_tick.as_u64()));
         if self.players.iter().any(|row| {
             row.score > MAX_BOUNTY_SCORE
+                || row.score_breakdown.is_some() != self.finished
+                || row.score_breakdown.is_some_and(|breakdown| {
+                    row.score
+                        != breakdown
+                            .iter()
+                            .copied()
+                            .fold(0_u32, u32::saturating_add)
+                            .min(MAX_BOUNTY_SCORE)
+                })
                 || row.alive == row.respawn_at_tick.is_some()
                 || row
                     .respawn_at_tick
@@ -1317,6 +1372,15 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
                 option_tick(&mut out, row.respawn_at_tick);
                 option_tick(&mut out, row.respawn_speed_buff_end_tick);
                 option_tick(&mut out, row.horse_buff_end_tick);
+                match row.score_breakdown {
+                    Some(breakdown) => {
+                        out.push(1);
+                        for points in breakdown {
+                            out.extend_from_slice(&points.to_be_bytes());
+                        }
+                    }
+                    None => out.push(0),
+                }
             }
             match state.active_reveal {
                 Some(reveal) => {
@@ -1927,6 +1991,22 @@ mod tests {
         assert!(state.is_canonical());
         let mut packet = envelope(M3PeerPayloadV2::MatchState { state });
         packet.simulation_tick = 7_200;
+        let encoded = encode_m3(&packet).unwrap();
+        assert!(encoded.len() <= MAX_DATAGRAM_BYTES, "{}", encoded.len());
+        assert_eq!(decode_m3(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn eight_player_final_results_with_score_categories_stay_mtu_safe() {
+        let state = match_state(4, 54_000, 8);
+        assert!(state.finished);
+        assert!(state
+            .players
+            .iter()
+            .all(|row| row.score_breakdown.is_some()));
+        assert!(state.is_canonical());
+        let mut packet = envelope(M3PeerPayloadV2::MatchState { state });
+        packet.simulation_tick = 54_000;
         let encoded = encode_m3(&packet).unwrap();
         assert!(encoded.len() <= MAX_DATAGRAM_BYTES, "{}", encoded.len());
         assert_eq!(decode_m3(&encoded).unwrap(), packet);

@@ -278,6 +278,65 @@ class AggregateTests(unittest.TestCase):
                 "running_mount": True,
             },
             {**base_record("m3_horse_lost"), "actor_slot": 0, "notification_points": 15},
+            {
+                **base_record("m5_interval"),
+                "actor_slot": 0,
+                "tick_start": 0,
+                "tick_end": 1199,
+                "alive_ticks": 1000,
+                "dead_ticks": 200,
+                "reveal_ticks": 100,
+                "reveal_score_gain": 10,
+                "normal_score_gain": 90,
+                "encounter_ticks": 300,
+                "objective_proximity_ticks": 180,
+                "current_gap_ticks": 6000,
+                "max_gap_ticks": 6000,
+            },
+            {
+                **base_record("m5_match_result"),
+                "tick": 54000,
+                "match_duration_ticks": 54000,
+                "players": [
+                    {
+                        "actor_slot": 0,
+                        "score": 500,
+                        "eliminations": 3,
+                        "assists": 1,
+                        "deaths": 2,
+                        "score_breakdown": {
+                            "elimination": 300,
+                            "assist": 50,
+                            "horse_bolt": 0,
+                            "saddle_dive_bonus": 0,
+                            "mounted_long_hit": 0,
+                            "objective": 150,
+                            "most_wanted_elimination": 0,
+                            "most_wanted_survival": 0,
+                        },
+                        "winner": True,
+                    },
+                    {
+                        "actor_slot": 1,
+                        "score": 250,
+                        "eliminations": 1,
+                        "assists": 0,
+                        "deaths": 3,
+                        "score_breakdown": {
+                            "elimination": 100,
+                            "assist": 0,
+                            "horse_bolt": 0,
+                            "saddle_dive_bonus": 0,
+                            "mounted_long_hit": 0,
+                            "objective": 150,
+                            "most_wanted_elimination": 0,
+                            "most_wanted_survival": 0,
+                        },
+                        "winner": False,
+                    },
+                ],
+            },
+            {**base_record("m5_survey"), "would_play_again": True},
             {**base_record("session_ended"), "timestamp_ms": 900_000},
         ]
         for index, row in enumerate(rows, 1):
@@ -313,6 +372,15 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(m4["charge_starts_per_actor_median"], 1)
         self.assertEqual(m4["charge_starts_per_actor_p75"], 1)
         self.assertEqual(m4["first_charge_minutes_median"], 0.083333)
+        m5 = first["m5_metrics"]
+        self.assertEqual(m5["completed_matches"], 1)
+        self.assertEqual(m5["winner_score_median"], 500)
+        self.assertEqual(m5["winner_score_target_share"], 1.0)
+        self.assertEqual(m5["winner_non_elimination_categories_median"], 2)
+        self.assertEqual(m5["objective_score_share"], 0.4)
+        self.assertEqual(m5["max_convergence_gap_seconds"], 100.0)
+        self.assertEqual(m5["intervals_over_90s_convergence_gap"], 1)
+        self.assertEqual(m5["would_play_again_rate"], 1.0)
 
     def test_secret_field_rejected(self):
         with self.assertRaises(AGGREGATE.InputError):

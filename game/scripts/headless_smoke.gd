@@ -73,6 +73,22 @@ func _ready() -> void:
 	if roster_panel == null or not roster_panel.visible:
 		failures.append("TAB did not reveal the peer route/RTT roster")
 	Input.action_release(&"scoreboard")
+	var network_layer := course.get_node("NetworkLayer")
+	network_layer.call("_refresh_results", {
+		"winner": "rider-a",
+		"players": [{
+			"player_id": "rider-a", "score": 500, "eliminations": 3,
+			"assists": 1, "deaths": 2,
+			"score_breakdown": {"elimination": 300, "assist": 50, "objective": 150},
+		}],
+	}, "rider-a")
+	var results_panel := course.get_node_or_null("NetworkLayer/M5ResultsPanel") as Control
+	if results_panel == null or not results_panel.visible:
+		failures.append("finished M5 state did not reveal the results/play-again panel")
+	elif not str((network_layer.get("_results_rows") as Label).text).contains("OBJECTIVES 150"):
+		failures.append("M5 results omitted the final score-category breakdown")
+	if results_panel:
+		results_panel.visible = false
 
 	var horse := course.get_node_or_null("Horse") as CharacterBody3D
 	var rider := course.get_node_or_null("Rider") as CharacterBody3D
@@ -491,10 +507,12 @@ func _check_peer_session(failures: Array[String]) -> void:
 		"poll_m3_migration", "advance_m3_actor", "record_m3_horse_pose",
 		"resolve_m3_shot_command", "issue_m4_spur_credit", "advance_m5_match",
 		"make_m5_match_state", "m5_playable_radius_m", "m5_respawn_position",
-		"complete_m5_objective", "record_m5_signal_hold",
+		"complete_m5_objective", "record_m5_signal_hold", "submit_results",
 	]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks M3 multiplayer method %s" % method)
+	if not peer_session.has_signal("results_completed"):
+		failures.append("PeerSession lacks native results completion signal")
 	peer_session.call("set_insecure_demo_mode", true)
 	var configured := bool(peer_session.call(
 		"configure_session",

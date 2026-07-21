@@ -35,7 +35,7 @@ The recorder writes append-only schema-v1 JSONL under the client log directory. 
 scripts/aggregate-playtest.py --strict user-logs/*.jsonl > alpha-playtest-summary.json
 ```
 
-The output includes player-session exposure, dives per player per 15 minutes, airborne and gallop hit rates/uplift, landing-window deaths, clamp share, median remount time, all-four notification coverage, reload rejection modes, and per-refresh render/jerk summaries. Input order does not affect output. Duplicate dive terminals, incomplete strict sessions, malformed numbers, and prohibited secret/topology fields fail closed.
+The output includes player-session exposure; M2 dive, hit, landing, notification, and render metrics; M3 remount/duel metrics; M4 Spur/Charge metrics; and M5 winner pacing, score-category diversity, objective share, Most Wanted pressure, dead/encounter/objective time, worst convergence gap, and play-again rate. Input order does not affect output. Duplicate dive terminals or M5 results, inconsistent category totals, incomplete strict sessions, malformed numbers, and prohibited secret/topology fields fail closed.
 
 Prohibited data includes OAuth material, capabilities, invitations/join codes, enrollment/auth keys, seeds, raw endpoints, CGNAT/ULA addresses, bearer values, URLs, and credentials. Aggregation is local only; this tooling adds no upload path.
 

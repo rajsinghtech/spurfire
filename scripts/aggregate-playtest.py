@@ -151,6 +151,11 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
     m4_charge_starts_by_actor: Counter[tuple[str, int]] = Counter()
     m4_actor_first_tick: dict[tuple[str, int], int] = {}
     m4_first_charge_tick: dict[tuple[str, int], int] = {}
+    m5: Counter[str] = Counter()
+    m5_max_gap_ticks: list[int] = []
+    m5_results: list[list[dict[str, Any]]] = []
+    m5_result_sessions: set[str] = set()
+    m5_survey_choices: list[bool] = []
     render: dict[int, dict[str, Any]] = defaultdict(
         lambda: {"frame_deltas_ms": [], "linear_jerk": [], "angular_jerk": [], "repeated": 0}
     )
@@ -311,6 +316,69 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
             if points != 15:
                 raise InputError(f"{source}: M3 horse-loss notification must be 15 points")
             m3_bolt_notifications += 1
+        elif event == "m5_interval":
+            for field in (
+                "alive_ticks",
+                "dead_ticks",
+                "reveal_ticks",
+                "reveal_score_gain",
+                "normal_score_gain",
+                "encounter_ticks",
+                "objective_proximity_ticks",
+            ):
+                m5[field] += _integer(record.get(field, 0), f"{source}: {field}", minimum=0)
+            m5_max_gap_ticks.append(
+                _integer(record.get("max_gap_ticks", 0), f"{source}: max_gap_ticks", minimum=0)
+            )
+        elif event == "m5_match_result":
+            if session_id in m5_result_sessions:
+                raise InputError(f"{source}: duplicate M5 match result for session")
+            players = record.get("players", [])
+            if not isinstance(players, list) or not players:
+                raise InputError(f"{source}: M5 result players must be a non-empty array")
+            normalized_players: list[dict[str, Any]] = []
+            slots: set[int] = set()
+            winner_count = 0
+            for index, player in enumerate(players):
+                if not isinstance(player, dict):
+                    raise InputError(f"{source}: M5 player {index} must be an object")
+                slot = _integer(player.get("actor_slot", -1), f"{source}: actor_slot", minimum=0)
+                if slot in slots:
+                    raise InputError(f"{source}: duplicate M5 actor slot {slot}")
+                slots.add(slot)
+                score = _integer(player.get("score"), f"{source}: score", minimum=0)
+                breakdown = player.get("score_breakdown", {})
+                if not isinstance(breakdown, dict):
+                    raise InputError(f"{source}: score_breakdown must be an object")
+                categories = {
+                    name: _integer(breakdown.get(name, 0), f"{source}: {name}", minimum=0)
+                    for name in (
+                        "elimination",
+                        "assist",
+                        "horse_bolt",
+                        "saddle_dive_bonus",
+                        "mounted_long_hit",
+                        "objective",
+                        "most_wanted_elimination",
+                        "most_wanted_survival",
+                    )
+                }
+                if sum(categories.values()) != score:
+                    raise InputError(f"{source}: M5 score does not equal category total")
+                winner = bool(player.get("winner", False))
+                winner_count += int(winner)
+                normalized_players.append(
+                    {"score": score, "score_breakdown": categories, "winner": winner}
+                )
+            if winner_count != 1:
+                raise InputError(f"{source}: M5 result must contain exactly one winner")
+            m5_result_sessions.add(session_id)
+            m5_results.append(normalized_players)
+        elif event == "m5_survey":
+            choice = record.get("would_play_again")
+            if not isinstance(choice, bool):
+                raise InputError(f"{source}: would_play_again must be boolean")
+            m5_survey_choices.append(choice)
 
     incomplete = sorted(starts - set(finalized))
     terminal_without_start = sorted(set(finalized) - starts)
@@ -397,6 +465,47 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
         m3["uncharged_duel_wins"] / m3["uncharged_duels"]
         if m3["uncharged_duels"]
         else None
+    )
+    m5_observed_ticks = m5["alive_ticks"] + m5["dead_ticks"]
+    m5_reveal_rate = (
+        m5["reveal_score_gain"] * TICK_RATE * 60 / m5["reveal_ticks"]
+        if m5["reveal_ticks"]
+        else None
+    )
+    m5_normal_ticks = max(0, m5_observed_ticks - m5["reveal_ticks"])
+    m5_normal_rate = (
+        m5["normal_score_gain"] * TICK_RATE * 60 / m5_normal_ticks
+        if m5_normal_ticks
+        else None
+    )
+    m5_winner_scores = [
+        player["score"]
+        for match in m5_results
+        for player in match
+        if player["winner"]
+    ]
+    m5_non_elimination_categories = [
+        sum(
+            points > 0
+            for name, points in player["score_breakdown"].items()
+            if name != "elimination"
+        )
+        for match in m5_results
+        for player in match
+    ]
+    m5_winner_non_elimination_categories = [
+        sum(
+            points > 0
+            for name, points in player["score_breakdown"].items()
+            if name != "elimination"
+        )
+        for match in m5_results
+        for player in match
+        if player["winner"]
+    ]
+    m5_total_score = sum(player["score"] for match in m5_results for player in match)
+    m5_objective_score = sum(
+        player["score_breakdown"]["objective"] for match in m5_results for player in match
     )
 
     render_rows: list[dict[str, Any]] = []
@@ -539,6 +648,60 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
             "charge_win_rate_delta": _rounded(
                 charged_win_rate - uncharged_win_rate
                 if charged_win_rate is not None and uncharged_win_rate is not None
+                else None
+            ),
+        },
+        "m5_metrics": {
+            "completed_matches": len(m5_results),
+            "winner_score_median": _rounded(
+                statistics.median(m5_winner_scores) if m5_winner_scores else None
+            ),
+            "winner_score_target_share": _rounded(
+                sum(400 <= score <= 800 for score in m5_winner_scores) / len(m5_winner_scores)
+                if m5_winner_scores
+                else None
+            ),
+            "non_elimination_score_categories_per_player_median": _rounded(
+                statistics.median(m5_non_elimination_categories)
+                if m5_non_elimination_categories
+                else None
+            ),
+            "winner_non_elimination_categories_median": _rounded(
+                statistics.median(m5_winner_non_elimination_categories)
+                if m5_winner_non_elimination_categories
+                else None
+            ),
+            "objective_score_share": _rounded(
+                m5_objective_score / m5_total_score if m5_total_score else None
+            ),
+            "most_wanted_score_per_player_minute": _rounded(m5_reveal_rate),
+            "ordinary_score_per_player_minute": _rounded(m5_normal_rate),
+            "most_wanted_pressure_ratio": _rounded(
+                m5_reveal_rate / m5_normal_rate
+                if m5_reveal_rate is not None and m5_normal_rate not in (None, 0.0)
+                else None
+            ),
+            "dead_time_share": _rounded(
+                m5["dead_ticks"] / m5_observed_ticks if m5_observed_ticks else None
+            ),
+            "encounter_time_share": _rounded(
+                m5["encounter_ticks"] / m5_observed_ticks if m5_observed_ticks else None
+            ),
+            "objective_proximity_time_share": _rounded(
+                m5["objective_proximity_ticks"] / m5_observed_ticks
+                if m5_observed_ticks
+                else None
+            ),
+            "max_convergence_gap_seconds": _rounded(
+                max(m5_max_gap_ticks) / TICK_RATE if m5_max_gap_ticks else None
+            ),
+            "intervals_over_90s_convergence_gap": sum(
+                ticks > 90 * TICK_RATE for ticks in m5_max_gap_ticks
+            ),
+            "would_play_again_responses": len(m5_survey_choices),
+            "would_play_again_rate": _rounded(
+                sum(m5_survey_choices) / len(m5_survey_choices)
+                if m5_survey_choices
                 else None
             ),
         },

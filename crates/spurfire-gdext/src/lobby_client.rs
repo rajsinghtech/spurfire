@@ -74,6 +74,7 @@ pub(crate) enum LobbyOperation {
     Report,
     Start,
     Heartbeat,
+    Results,
     Leave,
     End,
 }
@@ -92,6 +93,7 @@ impl LobbyOperation {
             Self::Report => "report",
             Self::Start => "start",
             Self::Heartbeat => "heartbeat",
+            Self::Results => "results",
             Self::Leave => "leave",
             Self::End => "end",
         }
@@ -110,6 +112,7 @@ pub(crate) enum Route<'a> {
     Report(&'a str),
     Start(&'a str),
     Heartbeat(&'a str),
+    Results(&'a str),
     Leave(&'a str),
     End(&'a str),
 }
@@ -132,6 +135,7 @@ impl Route<'_> {
             Self::Report(id) => format!("/v1/lobbies/{}/network/reports", lobby(id)?),
             Self::Start(id) => format!("/v1/lobbies/{}/start", lobby(id)?),
             Self::Heartbeat(id) => format!("/v1/lobbies/{}/heartbeat", lobby(id)?),
+            Self::Results(id) => format!("/v1/lobbies/{}/results", lobby(id)?),
             Self::Leave(id) => format!("/v1/lobbies/{}/leave", lobby(id)?),
             Self::End(id) => format!("/v1/lobbies/{}", lobby(id)?),
         })
@@ -1331,6 +1335,7 @@ pub(crate) fn route_for(operation: LobbyOperation, lobby_id: &str) -> Route<'_> 
         LobbyOperation::Report => Route::Report(lobby_id),
         LobbyOperation::Start => Route::Start(lobby_id),
         LobbyOperation::Heartbeat => Route::Heartbeat(lobby_id),
+        LobbyOperation::Results => Route::Results(lobby_id),
         LobbyOperation::Leave => Route::Leave(lobby_id),
         LobbyOperation::End => Route::End(lobby_id),
         LobbyOperation::Readiness => Route::Readiness,

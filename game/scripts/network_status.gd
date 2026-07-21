@@ -12,6 +12,13 @@ extends CanvasLayer
 @onready var match_pressure: Label = $MatchPanel/Margin/Rows/MatchPressure
 
 var _refresh_accumulator := 0.0
+var _results_panel: PanelContainer
+var _results_title: Label
+var _results_rows: Label
+var _results_hint: Label
+var _play_again_button: Button
+var _done_button: Button
+var _result_choice_made := false
 
 func _ready() -> void:
 	if peer_session == null:
@@ -22,6 +29,7 @@ func _ready() -> void:
 	peer_session.disconnected.connect(_on_disconnected)
 	roster_panel.visible = false
 	match_panel.visible = false
+	_create_results_panel()
 	_refresh()
 
 func _process(delta: float) -> void:
@@ -102,6 +110,7 @@ func _refresh_match_banner() -> void:
 		var winner := str(state.get("winner", ""))
 		match_pressure.text = "MATCH COMPLETE  •  %s WINS" % ("YOU" if winner == local_id else winner.left(8).to_upper())
 		match_pressure.modulate = Color("ffd166")
+		_refresh_results(state, local_id)
 	elif not reveal.is_empty():
 		var wanted := str(reveal.get("player_id", ""))
 		var wanted_seconds := ceili(float(maxi(0, int(reveal.get("end_tick", tick)) - tick)) / 60.0)
@@ -114,6 +123,107 @@ func _refresh_match_banner() -> void:
 	else:
 		match_pressure.text = "RIDE • HUNT • CLAIM THE MOST BOUNTY"
 		match_pressure.modulate = Color.WHITE
+	if not bool(state.get("finished", false)) and _results_panel:
+		_results_panel.visible = false
+
+func _create_results_panel() -> void:
+	_results_panel = PanelContainer.new()
+	_results_panel.name = "M5ResultsPanel"
+	_results_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_results_panel.position = Vector2(-360, -250)
+	_results_panel.size = Vector2(720, 500)
+	_results_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_results_panel.visible = false
+	add_child(_results_panel)
+	var margin := MarginContainer.new()
+	for side in ["margin_left", "margin_top", "margin_right", "margin_bottom"]:
+		margin.add_theme_constant_override(side, 24)
+	_results_panel.add_child(margin)
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 14)
+	margin.add_child(rows)
+	_results_title = Label.new()
+	_results_title.add_theme_color_override("font_color", Color("ffd166"))
+	_results_title.add_theme_font_size_override("font_size", 30)
+	_results_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rows.add_child(_results_title)
+	_results_rows = Label.new()
+	_results_rows.add_theme_font_size_override("font_size", 16)
+	_results_rows.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rows.add_child(_results_rows)
+	_results_hint = Label.new()
+	_results_hint.text = "Would you ride with this posse again?"
+	_results_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rows.add_child(_results_hint)
+	var actions := HBoxContainer.new()
+	actions.alignment = BoxContainer.ALIGNMENT_CENTER
+	actions.add_theme_constant_override("separation", 16)
+	rows.add_child(actions)
+	_play_again_button = Button.new()
+	_play_again_button.text = "PLAY AGAIN"
+	_play_again_button.custom_minimum_size = Vector2(190, 46)
+	_play_again_button.pressed.connect(func() -> void: _record_result_choice(true))
+	actions.add_child(_play_again_button)
+	_done_button = Button.new()
+	_done_button.text = "DONE FOR NOW"
+	_done_button.custom_minimum_size = Vector2(190, 46)
+	_done_button.pressed.connect(func() -> void: _record_result_choice(false))
+	actions.add_child(_done_button)
+
+func _refresh_results(state: Dictionary, local_id: String) -> void:
+	if _results_panel == null:
+		return
+	_results_panel.visible = true
+	var winner := str(state.get("winner", ""))
+	_results_title.text = "YOU WIN — HIGH NOON, HIGH SCORE" if winner == local_id else "%s WINS THE BOUNTY" % winner.left(8).to_upper()
+	var scores: Array = (state.get("players", []) as Array).duplicate(true)
+	scores.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		return (
+			int(left.get("score", 0)) > int(right.get("score", 0))
+			or (
+				int(left.get("score", 0)) == int(right.get("score", 0))
+				and str(left.get("player_id", "")) < str(right.get("player_id", ""))
+			)
+		)
+	)
+	var lines: Array[String] = []
+	for index in range(scores.size()):
+		var row := scores[index] as Dictionary
+		var player_id := str(row.get("player_id", ""))
+		var name := "YOU" if player_id == local_id else player_id.left(8).to_upper()
+		var categories := _category_summary(row.get("score_breakdown", {}) as Dictionary)
+		lines.append("%d. %-10s  %4d BOUNTY   %dK / %dA / %dD\n    %s" % [
+			index + 1, name, int(row.get("score", 0)), int(row.get("eliminations", 0)),
+			int(row.get("assists", 0)), int(row.get("deaths", 0)), categories,
+		])
+	_results_rows.text = "\n".join(lines)
+
+func _category_summary(breakdown: Dictionary) -> String:
+	var labels := {
+		"elimination": "ELIMS", "assist": "ASSISTS", "horse_bolt": "BOLTS",
+		"saddle_dive_bonus": "DIVES", "mounted_long_hit": "LONG HITS",
+		"objective": "OBJECTIVES", "most_wanted_elimination": "WANTED ELIMS",
+		"most_wanted_survival": "WANTED SURVIVAL",
+	}
+	var parts: Array[String] = []
+	for key: String in labels:
+		var points := int(breakdown.get(key, 0))
+		if points > 0:
+			parts.append("%s %d" % [labels[key], points])
+	return "NO BOUNTY CLAIMED" if parts.is_empty() else " • ".join(parts)
+
+func _record_result_choice(play_again: bool) -> void:
+	if _result_choice_made or replication == null or not replication.has_method("record_m5_play_again"):
+		return
+	if not bool(replication.call("record_m5_play_again", play_again)):
+		return
+	_result_choice_made = true
+	_play_again_button.disabled = true
+	_done_button.disabled = true
+	_results_hint.text = (
+		"Ride-again choice recorded • closing this posse safely…"
+		if play_again else "Choice recorded • closing this posse safely…"
+	)
 
 func _refresh_scoreboard(state: Dictionary) -> void:
 	roster_title.text = "BOUNTY RUN // SCOREBOARD"

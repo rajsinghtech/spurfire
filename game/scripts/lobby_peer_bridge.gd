@@ -2,6 +2,7 @@ class_name SpurfireLobbyPeerBridge
 extends Node
 
 signal authority_departed
+signal m5_match_choice(play_again: bool, results_json: String)
 
 var peer_session: Node
 var local_rider: CharacterBody3D
@@ -36,6 +37,9 @@ var _m5_state: Dictionary = {}
 var _m5_objective_hold_ticks: Dictionary = {}
 var _m5_objective_node: Node3D
 var _m5_most_wanted_node: Node3D
+var _m5_metrics: Dictionary = {}
+var _m5_result_logged := false
+var _m5_choice_recorded := false
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -320,6 +324,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		_install_m5_state_json(str(match_tick.get("state_json", "")))
 		_apply_m5_respawns(match_tick.get("respawned_players", PackedStringArray()), tick)
 		_advance_m5_objective_interactions(tick)
+		_record_m5_tick(tick)
 		if tick % 30 == 0:
 			var match_packet: PackedByteArray = peer_session.make_m5_match_state(tick)
 			if not match_packet.is_empty():
@@ -335,7 +340,7 @@ func _install_m5_state_json(state_json: String) -> void:
 	var player_rows = source.get("p", source.get("players", []))
 	if player_rows is Array:
 		for value in player_rows:
-			if value is Array and (value as Array).size() == 9:
+			if value is Array and (value as Array).size() in [9, 10]:
 				var tuple := value as Array
 				players.append({
 					"player_id": str(tuple[0]), "score": int(tuple[1]),
@@ -344,6 +349,7 @@ func _install_m5_state_json(state_json: String) -> void:
 					"respawn_at_tick": -1 if tuple[6] == null else int(tuple[6]),
 					"speed_buff_end_tick": -1 if tuple[7] == null else int(tuple[7]),
 					"horse_buff_end_tick": -1 if tuple[8] == null else int(tuple[8]),
+					"score_breakdown": _m5_score_breakdown(tuple[9] if tuple.size() == 10 else []),
 				})
 			elif value is Dictionary:
 				var row := value as Dictionary
@@ -357,6 +363,9 @@ func _install_m5_state_json(state_json: String) -> void:
 					"respawn_at_tick": int(row.get("r", row.get("respawn_at_tick", -1))),
 					"speed_buff_end_tick": int(row.get("v", row.get("respawn_speed_buff_end_tick", -1))),
 					"horse_buff_end_tick": int(row.get("h", row.get("horse_buff_end_tick", -1))),
+					"score_breakdown": _m5_score_breakdown(
+						row.get("b", row.get("score_breakdown", []))
+					),
 				})
 	var reveal := {}
 	var reveal_value = source.get("w", source.get("active_reveal"))
@@ -400,6 +409,157 @@ func _install_m5_state_json(state_json: String) -> void:
 func get_m5_state() -> Dictionary:
 	return _m5_state.duplicate(true)
 
+func m5_results_json() -> String:
+	if not bool(_m5_state.get("finished", false)):
+		return ""
+	var rows: Array[Dictionary] = []
+	for player: Dictionary in _m5_state.get("players", []):
+		rows.append({
+			"player_id": str(player.get("player_id", "")),
+			"score": int(player.get("score", 0)),
+			"eliminations": int(player.get("eliminations", 0)),
+			"assists": int(player.get("assists", 0)),
+			"deaths": int(player.get("deaths", 0)),
+		})
+	return JSON.stringify({"final_scores": rows, "match_duration_s": 900})
+
+func record_m5_play_again(play_again: bool) -> bool:
+	if not bool(_m5_state.get("finished", false)) or _m5_choice_recorded:
+		return false
+	_m5_choice_recorded = true
+	_store_m3_telemetry({
+		"event_type": "m5_survey", "tick": int(_m5_state.get("current_tick", simulation_tick)),
+		"would_play_again": play_again,
+	})
+	m5_match_choice.emit(play_again, m5_results_json() if local_is_authority else "")
+	return true
+
+func _m5_score_breakdown(value: Variant) -> Dictionary:
+	var points := value as Array if value is Array else []
+	var keys := [
+		"elimination", "assist", "horse_bolt", "saddle_dive_bonus",
+		"mounted_long_hit", "objective", "most_wanted_elimination",
+		"most_wanted_survival",
+	]
+	var result := {}
+	for index in range(keys.size()):
+		result[keys[index]] = int(points[index]) if index < points.size() else 0
+	return result
+
+func _m5_metric_for(player_id: String, tick: int, score: int) -> Dictionary:
+	if not _m5_metrics.has(player_id):
+		_m5_metrics[player_id] = {
+			"interval_start_tick": tick, "last_score": score,
+			"alive_ticks": 0, "dead_ticks": 0, "reveal_ticks": 0,
+			"reveal_score_gain": 0, "normal_score_gain": 0,
+			"encounter_ticks": 0, "objective_proximity_ticks": 0,
+			"current_gap_ticks": 0, "max_gap_ticks": 0,
+		}
+	return _m5_metrics[player_id] as Dictionary
+
+func _record_m5_tick(tick: int) -> void:
+	var reveal_player := str(
+		(_m5_state.get("active_reveal", {}) as Dictionary).get("player_id", "")
+	)
+	var objective := _m5_state.get("active_objective", {}) as Dictionary
+	var objective_position := _m5_objective_world_position(objective, tick)
+	for row: Dictionary in _m5_state.get("players", []):
+		var player_id := str(row.get("player_id", ""))
+		var score := int(row.get("score", 0))
+		var metric := _m5_metric_for(player_id, tick, score)
+		var score_gain := maxi(0, score - int(metric.last_score))
+		metric.last_score = score
+		var alive := bool(row.get("alive", true))
+		if alive:
+			metric.alive_ticks = int(metric.alive_ticks) + 1
+		else:
+			metric.dead_ticks = int(metric.dead_ticks) + 1
+		if player_id == reveal_player:
+			metric.reveal_ticks = int(metric.reveal_ticks) + 1
+			metric.reveal_score_gain = int(metric.reveal_score_gain) + score_gain
+		else:
+			metric.normal_score_gain = int(metric.normal_score_gain) + score_gain
+		var near_rider := false
+		var state := _actor_states.get(player_id, {}) as Dictionary
+		if alive and state.has("position"):
+			for other_id: String in _actor_states:
+				if other_id == player_id or not _m5_player_alive(other_id):
+					continue
+				var other := _actor_states[other_id] as Dictionary
+				if other.has("position") and (state.position as Vector3).distance_to(
+					other.position as Vector3
+				) <= 60.0:
+					near_rider = true
+					break
+		var near_objective := (
+			alive and not objective.is_empty() and not bool(objective.get("completed", false))
+			and state.has("position")
+			and (state.position as Vector3).distance_to(objective_position) <= 60.0
+		)
+		if near_rider:
+			metric.encounter_ticks = int(metric.encounter_ticks) + 1
+		if near_objective:
+			metric.objective_proximity_ticks = int(metric.objective_proximity_ticks) + 1
+		if near_rider or near_objective:
+			metric.current_gap_ticks = 0
+		else:
+			metric.current_gap_ticks = int(metric.current_gap_ticks) + 1
+			metric.max_gap_ticks = maxi(
+				int(metric.max_gap_ticks), int(metric.current_gap_ticks)
+			)
+	_flush_m5_metrics(tick, bool(_m5_state.get("finished", false)))
+	if bool(_m5_state.get("finished", false)):
+		_store_m5_result(tick)
+
+func _flush_m5_metrics(tick: int, terminal: bool) -> void:
+	if not terminal and tick % 60 != 0:
+		return
+	var ids := _m5_metrics.keys()
+	ids.sort()
+	for player_id: String in ids:
+		var metric := _m5_metrics[player_id] as Dictionary
+		_store_m3_telemetry({
+			"event_type": "m5_interval", "authority_epoch": int(peer_session.get("authority_epoch")),
+			"tick_start": int(metric.interval_start_tick), "tick_end": tick,
+			"actor_slot": int(_m3_actor_slots.get(player_id, -1)), "terminal": terminal,
+			"alive_ticks": int(metric.alive_ticks), "dead_ticks": int(metric.dead_ticks),
+			"reveal_ticks": int(metric.reveal_ticks),
+			"reveal_score_gain": int(metric.reveal_score_gain),
+			"normal_score_gain": int(metric.normal_score_gain),
+			"encounter_ticks": int(metric.encounter_ticks),
+			"objective_proximity_ticks": int(metric.objective_proximity_ticks),
+			"current_gap_ticks": int(metric.current_gap_ticks),
+			"max_gap_ticks": int(metric.max_gap_ticks),
+		})
+		for field in [
+			"alive_ticks", "dead_ticks", "reveal_ticks", "reveal_score_gain",
+			"normal_score_gain", "encounter_ticks", "objective_proximity_ticks",
+			"max_gap_ticks",
+		]:
+			metric[field] = 0
+		metric.interval_start_tick = tick + 1
+
+func _store_m5_result(tick: int) -> void:
+	if _m5_result_logged:
+		return
+	_m5_result_logged = true
+	var rows: Array[Dictionary] = []
+	for player: Dictionary in _m5_state.get("players", []):
+		var player_id := str(player.get("player_id", ""))
+		rows.append({
+			"actor_slot": int(_m3_actor_slots.get(player_id, -1)),
+			"score": int(player.get("score", 0)),
+			"eliminations": int(player.get("eliminations", 0)),
+			"assists": int(player.get("assists", 0)),
+			"deaths": int(player.get("deaths", 0)),
+			"score_breakdown": player.get("score_breakdown", {}),
+			"winner": player_id == str(_m5_state.get("winner", "")),
+		})
+	_store_m3_telemetry({
+		"event_type": "m5_match_result", "authority_epoch": int(peer_session.get("authority_epoch")),
+		"tick": tick, "match_duration_ticks": 54000, "players": rows,
+	})
+
 func _m5_player_alive(player_id: String) -> bool:
 	return bool(_m5_player_row(player_id).get("alive", true))
 
@@ -412,7 +572,7 @@ func _m5_player_row(player_id: String) -> Dictionary:
 func _apply_local_m5_life_state() -> void:
 	if local_horse == null:
 		return
-	var alive := _m5_player_alive(local_player_id)
+	var alive := _m5_player_alive(local_player_id) and not bool(_m5_state.get("finished", false))
 	if local_horse.has_method("set_match_input_enabled"):
 		local_horse.call("set_match_input_enabled", alive)
 	var buff_active := false

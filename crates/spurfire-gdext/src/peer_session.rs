@@ -29,9 +29,9 @@ use spurfire_protocol::{
     M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput, PlayerId, QuantizedDirection,
     QuantizedOrigin, RecallState, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
     RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotOutcome, ShotResult, SimulationTick, SpurCreditKind, SpurSpendOutcome, TargetDefinition,
-    TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS,
-    M3_WIRE_VERSION,
+    ShotOutcome, ShotResult, SimulationTick, SpurCreditKind, SpurSpendOutcome,
+    SubmitResultsRequest, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
+    WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -536,6 +536,7 @@ impl PeerSession {
                         LobbyOperation::Heartbeat => {
                             self.signals().heartbeat_completed().emit(&json)
                         }
+                        LobbyOperation::Results => self.signals().results_completed().emit(&json),
                         LobbyOperation::Leave => self.signals().leave_completed().emit(&json),
                         LobbyOperation::End => self.signals().end_completed().emit(&json),
                         _ => {}
@@ -658,6 +659,8 @@ impl PeerSession {
     fn start_completed(public_json: GString);
     #[signal]
     fn heartbeat_completed(public_json: GString);
+    #[signal]
+    fn results_completed(public_json: GString);
     #[signal]
     fn leave_completed(public_json: GString);
     #[signal]
@@ -3349,6 +3352,53 @@ impl PeerSession {
             Some(body),
             false,
             false,
+        );
+    }
+
+    /// Submit the authority's final bounded scoreboard through the native
+    /// participant-capability boundary. Godot never receives that capability.
+    #[func]
+    fn submit_results(&self, lobby_id: GString, input_hash: GString, results_json: GString) {
+        let (Ok(mut body), Some(player)) = (
+            serde_json::from_str::<serde_json::Value>(&results_json.to_string()),
+            self.lobby_client.player_id(),
+        ) else {
+            self.lobby_client
+                .fail_now(LobbyOperation::Results, NativeLobbyError::Json);
+            return;
+        };
+        let serde_json::Value::Object(map) = &mut body else {
+            self.lobby_client
+                .fail_now(LobbyOperation::Results, NativeLobbyError::Json);
+            return;
+        };
+        map.insert(
+            "submitted_by".into(),
+            serde_json::Value::String(player.to_owned()),
+        );
+        map.insert("co_signers".into(), serde_json::Value::Array(Vec::new()));
+        map.insert(
+            "input_hash".into(),
+            serde_json::Value::String(input_hash.to_string()),
+        );
+        let Ok(validated) = serde_json::from_value::<SubmitResultsRequest>(body) else {
+            self.lobby_client
+                .fail_now(LobbyOperation::Results, NativeLobbyError::Json);
+            return;
+        };
+        let Ok(body) = serde_json::to_string(&validated) else {
+            self.lobby_client
+                .fail_now(LobbyOperation::Results, NativeLobbyError::Json);
+            return;
+        };
+        let id = lobby_id.to_string();
+        self.lobby_client.request_public(
+            LobbyOperation::Results,
+            Method::POST,
+            route_for(LobbyOperation::Results, &id),
+            Some(body),
+            false,
+            true,
         );
     }
 

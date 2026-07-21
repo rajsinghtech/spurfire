@@ -80,7 +80,7 @@ GitHub Actions then provides these credential-free gates:
 
 1. **CI:** `cargo check --locked --all-targets` and `just check` on Ubuntu, macOS, and Windows.
 2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite. `scripts/check-alpha-smoke-log.sh` additionally requires the integrated one-lobby contract marker. That fixture/source marker does not prove HTTP, provider, coherent multiplayer, cleanup, two-download, or human qualification.
-3. **Release QA tooling:** deterministic aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
+3. **Release QA tooling:** the deterministic M2–M5 playtest aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
 4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
 The current macOS candidate is only ad-hoc signed and is not notarized. The current Windows candidate has no Authenticode signature. Both are explicit release blockers; checksums and provenance do not waive them. Tag-triggered package jobs validate but do not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains a separate protected-environment dispatch that refuses to overwrite any draft or published release.

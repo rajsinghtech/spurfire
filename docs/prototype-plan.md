@@ -29,7 +29,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
-| M5 | Bounty Run scoring loop | **world loop integrated / results + playtest pending** | 15-min match, winner 400–800 pts, "play again" >= 70% |
+| M5 | Bounty Run scoring loop | **source complete / playtest pending** | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
 
 Build order is strict: each milestone's tuning depends on the previous one's feel. The invited-
@@ -322,7 +322,7 @@ sit full — if hoarding dominates, add a gentle spend incentive before any deca
 
 ## M5 — Bounty Run scoring loop
 
-**Status: world loop integrated; results and playtest pending.** The pure Rust match kernel owns the exact 15-minute
+**Status: source complete / playtest pending.** The pure Rust match kernel owns the exact 15-minute
 clock, canonical scoreboard and category breakdown, strict five-second assist window, respawn and
 speed-buff timers, deterministic Most Wanted reveals/survival payouts, dynamic-objective cadence,
 locked objective payouts, long-hit cap, winner tie-break, and fail-closed epoch checkpoint. Combat
@@ -335,7 +335,13 @@ roster-scaled radius; integer placement derives edge-buffered objectives and sep
 respawns from the lobby seed. Full rider/horse/combat respawns, the ten-second speed buff, all five
 objective interactions, the moving-bounty marker, and Most Wanted flare are wired. Ammo-wagon
 refill is atomic with its score award, and the horse station grants the locked 60-second +10% speed
-buff. End-of-match results and acceptance telemetry remain.
+buff. A centered results panel ranks the final scoreboard, explains each score category, and records
+the play-again choice. Final-only category rows remain within the live datagram cap. The elected
+authority submits the bounded final ledger through the native participant-capability boundary and
+then follows the existing safe teardown path. Secret-free one-second M5 intervals and the deterministic
+playtest aggregator measure winner pacing, category diversity, objective share, Most Wanted pressure,
+dead/encounter/objective time, worst convergence gap, and play-again rate. Automated coverage proves
+the implementation contract; every acceptance checkbox below still needs human match evidence.
 
 **Goal:** full 15-min matches with score pressure, Most Wanted drama, and event-driven
 convergence. Fun verdict gate for the whole prototype.

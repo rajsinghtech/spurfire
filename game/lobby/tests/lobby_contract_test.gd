@@ -248,6 +248,17 @@ func _check_m5_match_state_normalization(failures: Array[String]) -> void:
 		or (state.get("active_objective", {}) as Dictionary).get("position", Vector3.ZERO) != Vector3(120, 1, -80)
 	):
 		failures.append("M5 compact MatchState did not normalize into follower HUD state")
+	bridge.call("_install_m5_state_json", JSON.stringify({
+		"e": 2, "g": 91, "t": 54000, "n": 54000, "f": true, "x": PLAYER_A,
+		"p": [[PLAYER_A, 275, 2, 1, 1, true, null, null, null, [200, 50, 0, 0, 0, 25, 0, 0]]],
+	}))
+	state = bridge.call("get_m5_state") as Dictionary
+	players = state.get("players", []) as Array
+	if (
+		players.size() != 1
+		or int(((players[0] as Dictionary).get("score_breakdown", {}) as Dictionary).get("objective", 0)) != 25
+	):
+		failures.append("M5 final MatchState omitted results score categories")
 	bridge.free()
 
 func _check_secret_storage_contract(failures: Array[String]) -> void:
@@ -292,6 +303,7 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"advance_m5_match", "make_m5_match_state", "match_state", "get_m5_state",
 		"m5_respawn_position", "complete_m5_objective", "record_m5_signal_hold",
 		"_apply_m5_respawns", "_advance_m5_objective_interactions",
+		"m5_interval", "m5_match_result", "m5_survey", "record_m5_play_again",
 		"M3_INPUT_BUFFER_TICKS := 9", "_jump_buffer_until_tick",
 		"_crouch_buffer_until_tick", "reload_active_ticks",
 		"_update_authority_horse_presentation", "_apply_remote_horse_snapshot",
@@ -301,6 +313,13 @@ func _check_control_glue(failures: Array[String]) -> void:
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)
+	var network_source := FileAccess.get_file_as_string("res://scripts/network_status.gd")
+	for required in ["M5ResultsPanel", "PLAY AGAIN", "score_breakdown", "_record_result_choice"]:
+		if not network_source.contains(required):
+			failures.append("M5 results UI omitted behavior: %s" % required)
+	for required in ["submit_results", "results_completed", "_on_m5_match_choice"]:
+		if not shell_source.contains(required):
+			failures.append("lobby shell omitted M5 results lifecycle: %s" % required)
 	if bridge_source.contains("accept_packet_with_source(") or bridge_source.contains("decode_packet(packet"):
 		failures.append("secure bridge retained split packet acceptance/decoding")
 	if shell_source.contains("Host left • ending this Alpha match"):
