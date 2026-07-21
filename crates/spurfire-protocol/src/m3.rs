@@ -1189,6 +1189,12 @@ impl ActorGameplayKernel {
         }
     }
 
+    /// Last shared authority tick applied to the composed actor.
+    #[must_use]
+    pub const fn current_tick(&self) -> Option<SimulationTick> {
+        self.current_tick
+    }
+
     /// Current horse kernel for snapshots/HUD.
     #[must_use]
     pub const fn horse(&self) -> &HorseVitalityKernel {
@@ -1617,6 +1623,12 @@ impl M3AuthorityBank {
         self.actors
             .get(&rider_player_id)
             .map(|row| row.horse_entity_id)
+    }
+
+    /// Roster actor owning one registered horse combat entity.
+    #[must_use]
+    pub fn horse_owner(&self, horse_entity_id: EntityId) -> Option<PlayerId> {
+        self.horse_owners.get(&horse_entity_id).copied()
     }
 
     /// Routes one authority-epoch damage command by horse target. Rejections

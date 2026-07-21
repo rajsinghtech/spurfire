@@ -183,12 +183,14 @@ spook/three-second bolt edge, exact on-foot stamina/crouch/roll/stun timing, rec
 the Majestic Return phase clock, running-mount validation, acceptance telemetry, and validated
 migration checkpoints. A bounded native actor bank now routes unique horse target IDs, enforces
 authority epochs, and migrates the canonical roster atomically; `M3GameplayController` exposes that
-owner to Godot with a headless spook-to-running-remount regression. M3 changes signed actor
-input/snapshot/checkpoint canonicalization, so the foundation declares wire 2.0 without changing
-the active 1.2 transport. M3 remains incomplete until the horse target/hitbox and paused-reload
-combat paths, jump/crouch input buffers, per-stance acceleration/deceleration, live scene adapter,
-remote horse presentation, wire-v2 replication, and playtest instrumentation consume this state
-end to end.
+owner to Godot with a headless spook-to-running-remount regression. `M3CombatAuthority` adds a
+rewindable horizontal horse-body capsule/head sphere and commits ammo, target health, horse
+vitality, and fatal-spook effects transactionally without misreporting a horse bolt as a rider
+elimination. M3 changes signed actor input/snapshot/checkpoint canonicalization, so the foundation
+declares wire 2.0 without changing the active 1.2 transport. M3 remains incomplete until the
+paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
+scene adapter, remote horse presentation, wire-v2 replication, and playtest instrumentation consume
+this state end to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

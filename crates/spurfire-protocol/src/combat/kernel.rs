@@ -1263,6 +1263,29 @@ pub struct TargetPoseSnapshot {
     pub active: bool,
 }
 
+/// Rewindable horizontally oriented horse geometry at one simulation tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HorseTargetPoseSnapshot {
+    /// Snapshot tick.
+    pub tick: SimulationTick,
+    /// Stable horse target identity.
+    pub entity_id: EntityId,
+    /// Center of the horizontal body capsule.
+    pub body_center: QuantizedOrigin,
+    /// Normalized planar nose-forward direction.
+    pub body_forward: QuantizedDirection,
+    /// Half-length of the body capsule's inner segment.
+    pub body_half_length_mm: u16,
+    /// Body capsule radius.
+    pub body_radius_mm: u16,
+    /// Center of the head sphere.
+    pub head_center: QuantizedOrigin,
+    /// Head sphere radius.
+    pub head_radius_mm: u16,
+    /// Whether geometry is hittable at this tick.
+    pub active: bool,
+}
+
 /// Invalid registry operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum TargetRegistryError {
@@ -1287,7 +1310,36 @@ pub enum TargetRegistryError {
 struct TargetRecord {
     definition: TargetDefinition,
     health: u16,
-    history: VecDeque<TargetPoseSnapshot>,
+    history: VecDeque<TargetGeometrySnapshot>,
+    geometry_kind: Option<TargetGeometryKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetGeometryKind {
+    Rider,
+    Horse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetGeometrySnapshot {
+    Rider(TargetPoseSnapshot),
+    Horse(HorseTargetPoseSnapshot),
+}
+
+impl TargetGeometrySnapshot {
+    const fn tick(self) -> SimulationTick {
+        match self {
+            Self::Rider(pose) => pose.tick,
+            Self::Horse(pose) => pose.tick,
+        }
+    }
+
+    const fn kind(self) -> TargetGeometryKind {
+        match self {
+            Self::Rider(_) => TargetGeometryKind::Rider,
+            Self::Horse(_) => TargetGeometryKind::Horse,
+        }
+    }
 }
 
 /// Server-owned deterministic target registry with a 250 ms pose ring buffer.
@@ -1339,6 +1391,7 @@ impl TargetRegistry {
                 definition,
                 health,
                 history: VecDeque::new(),
+                geometry_kind: None,
             },
         );
         Ok(())
@@ -1353,19 +1406,66 @@ impl TargetRegistry {
             .targets
             .get_mut(&pose.entity_id)
             .ok_or(TargetRegistryError::UnknownTarget)?;
+        Self::push_geometry(
+            record,
+            TargetGeometrySnapshot::Rider(pose),
+            self.history_ticks,
+        )?;
+        Ok(())
+    }
+
+    /// Adds one monotonic, horizontally oriented horse pose.
+    pub fn record_horse_pose(
+        &mut self,
+        pose: HorseTargetPoseSnapshot,
+    ) -> Result<(), TargetRegistryError> {
+        if pose.body_half_length_mm == 0
+            || pose.body_radius_mm == 0
+            || pose.head_radius_mm == 0
+            || !pose.body_forward.is_normalized()
+            || pose.body_forward.y.abs() > DIRECTION_UNITS / 100
+        {
+            return Err(TargetRegistryError::InvalidTarget);
+        }
+        let record = self
+            .targets
+            .get_mut(&pose.entity_id)
+            .ok_or(TargetRegistryError::UnknownTarget)?;
+        Self::push_geometry(
+            record,
+            TargetGeometrySnapshot::Horse(pose),
+            self.history_ticks,
+        )?;
+        Ok(())
+    }
+
+    fn push_geometry(
+        record: &mut TargetRecord,
+        geometry: TargetGeometrySnapshot,
+        history_ticks: u64,
+    ) -> Result<(), TargetRegistryError> {
+        let tick = geometry.tick();
+        let geometry_kind = geometry.kind();
+        if record
+            .geometry_kind
+            .is_some_and(|existing| existing != geometry_kind)
+        {
+            return Err(TargetRegistryError::InvalidTarget);
+        }
         if record
             .history
             .back()
-            .is_some_and(|previous| pose.tick <= previous.tick)
+            .is_some_and(|previous| tick <= previous.tick())
         {
             return Err(TargetRegistryError::TickReplay);
         }
-        record.history.push_back(pose);
-        let oldest = pose.tick.as_u64().saturating_sub(self.history_ticks);
+        record.history.push_back(geometry);
+        record.geometry_kind = Some(geometry_kind);
+        let oldest = tick.as_u64().saturating_sub(history_ticks);
         while record
             .history
             .front()
-            .is_some_and(|snapshot| snapshot.tick.as_u64() < oldest)
+            .is_some_and(|snapshot| snapshot.tick().as_u64() < oldest)
         {
             record.history.pop_front();
         }
@@ -1378,6 +1478,54 @@ impl TargetRegistry {
         self.targets.get(&entity_id).map(|record| record.health)
     }
 
+    /// Synchronizes externally composed authority health, such as M3 horse
+    /// regeneration/remount, without changing immutable target identity.
+    pub fn synchronize_health(
+        &mut self,
+        entity_id: EntityId,
+        health: u16,
+    ) -> Result<(), TargetRegistryError> {
+        let record = self
+            .targets
+            .get_mut(&entity_id)
+            .ok_or(TargetRegistryError::UnknownTarget)?;
+        if health > record.definition.max_health {
+            return Err(TargetRegistryError::InvalidTarget);
+        }
+        record.health = health;
+        Ok(())
+    }
+
+    /// Rewound pose selected for an exact target/tick, if history exists.
+    #[must_use]
+    pub fn target_pose_at(
+        &self,
+        entity_id: EntityId,
+        tick: SimulationTick,
+    ) -> Option<TargetPoseSnapshot> {
+        self.targets
+            .get(&entity_id)
+            .and_then(|record| match Self::geometry_at(record, tick)? {
+                TargetGeometrySnapshot::Rider(pose) => Some(pose),
+                TargetGeometrySnapshot::Horse(_) => None,
+            })
+    }
+
+    /// Rewound horse pose selected for an exact target/tick, if history exists.
+    #[must_use]
+    pub fn horse_pose_at(
+        &self,
+        entity_id: EntityId,
+        tick: SimulationTick,
+    ) -> Option<HorseTargetPoseSnapshot> {
+        self.targets
+            .get(&entity_id)
+            .and_then(|record| match Self::geometry_at(record, tick)? {
+                TargetGeometrySnapshot::Horse(pose) => Some(pose),
+                TargetGeometrySnapshot::Rider(_) => None,
+            })
+    }
+
     /// Restores target health to its immutable spawn value.
     pub fn respawn(&mut self, entity_id: EntityId) -> Result<(), TargetRegistryError> {
         let record = self
@@ -1388,12 +1536,12 @@ impl TargetRegistry {
         Ok(())
     }
 
-    fn pose_at(record: &TargetRecord, tick: SimulationTick) -> Option<TargetPoseSnapshot> {
+    fn geometry_at(record: &TargetRecord, tick: SimulationTick) -> Option<TargetGeometrySnapshot> {
         record
             .history
             .iter()
             .rev()
-            .find(|snapshot| snapshot.tick <= tick)
+            .find(|snapshot| snapshot.tick() <= tick)
             .copied()
     }
 
@@ -1417,26 +1565,53 @@ impl TargetRegistry {
             {
                 continue;
             }
-            let Some(pose) = Self::pose_at(record, tick) else {
+            let Some(geometry) = Self::geometry_at(record, tick) else {
                 continue;
             };
-            if !pose.active {
+            let (active, body_distance, head_distance) = match geometry {
+                TargetGeometrySnapshot::Rider(pose) => (
+                    pose.active,
+                    ray_vertical_capsule_intersection(
+                        ray_origin,
+                        ray_direction,
+                        Vec3::from_origin(pose.body_center),
+                        f64::from(pose.body_half_height_mm),
+                        f64::from(pose.body_radius_mm),
+                    ),
+                    ray_sphere_intersection(
+                        ray_origin,
+                        ray_direction,
+                        Vec3::from_origin(pose.head_center),
+                        f64::from(pose.head_radius_mm),
+                    ),
+                ),
+                TargetGeometrySnapshot::Horse(pose) => {
+                    let center = Vec3::from_origin(pose.body_center);
+                    let forward = Vec3::from_array(pose.body_forward.to_components())
+                        .normalized()
+                        .expect("recorded horse forward is normalized");
+                    let half_length = f64::from(pose.body_half_length_mm);
+                    (
+                        pose.active,
+                        ray_capsule_intersection(
+                            ray_origin,
+                            ray_direction,
+                            center.sub(forward.scale(half_length)),
+                            center.add(forward.scale(half_length)),
+                            f64::from(pose.body_radius_mm),
+                        ),
+                        ray_sphere_intersection(
+                            ray_origin,
+                            ray_direction,
+                            Vec3::from_origin(pose.head_center),
+                            f64::from(pose.head_radius_mm),
+                        ),
+                    )
+                }
+            };
+            if !active {
                 continue;
             }
-
-            let body_distance = ray_vertical_capsule_intersection(
-                ray_origin,
-                ray_direction,
-                Vec3::from_origin(pose.body_center),
-                f64::from(pose.body_half_height_mm),
-                f64::from(pose.body_radius_mm),
-            );
-            let head_distance = ray_sphere_intersection(
-                ray_origin,
-                ray_direction,
-                Vec3::from_origin(pose.head_center),
-                f64::from(pose.head_radius_mm),
-            );
             for (zone, distance) in [
                 (HitZone::Head, head_distance),
                 (HitZone::Body, body_distance),
@@ -1592,6 +1767,63 @@ fn ray_vertical_capsule_intersection(
         );
     }
     nearest
+}
+
+fn ray_capsule_intersection(
+    origin: Vec3,
+    direction: Vec3,
+    start: Vec3,
+    end: Vec3,
+    radius: f64,
+) -> Option<f64> {
+    let axis = end.sub(start);
+    let axis_length_squared = axis.dot(axis);
+    if axis_length_squared <= f64::EPSILON {
+        return ray_sphere_intersection(origin, direction, start, radius);
+    }
+    let origin_from_start = origin.sub(start);
+    let closest_fraction = (origin_from_start.dot(axis) / axis_length_squared).clamp(0.0, 1.0);
+    let closest = start.add(axis.scale(closest_fraction));
+    let inside_offset = origin.sub(closest);
+    if inside_offset.dot(inside_offset) <= radius * radius {
+        return Some(0.0);
+    }
+
+    // Analytic ray/infinite-cylinder intersection, restricted to the inner
+    // segment. End-cap sphere tests below complete the capsule.
+    let axis_dot_ray = axis.dot(direction);
+    let axis_dot_origin = axis.dot(origin_from_start);
+    let ray_dot_origin = direction.dot(origin_from_start);
+    let origin_length_squared = origin_from_start.dot(origin_from_start);
+    let quadratic_a = axis_length_squared - axis_dot_ray * axis_dot_ray;
+    let quadratic_b = axis_length_squared * ray_dot_origin - axis_dot_origin * axis_dot_ray;
+    let quadratic_c = axis_length_squared * origin_length_squared
+        - axis_dot_origin * axis_dot_origin
+        - radius * radius * axis_length_squared;
+    let discriminant = quadratic_b * quadratic_b - quadratic_a * quadratic_c;
+    let mut nearest = None;
+    if quadratic_a.abs() > f64::EPSILON && discriminant >= 0.0 {
+        let root = discriminant.sqrt();
+        for distance in [
+            (-quadratic_b - root) / quadratic_a,
+            (-quadratic_b + root) / quadratic_a,
+        ] {
+            if distance >= 0.0 {
+                let axial = axis_dot_origin + distance * axis_dot_ray;
+                if (0.0..=axis_length_squared).contains(&axial) {
+                    nearest = choose_nearer(nearest, Some(distance));
+                }
+            }
+        }
+    }
+    nearest = choose_nearer(
+        nearest,
+        ray_sphere_intersection(origin, direction, start, radius),
+    );
+    choose_nearer(
+        nearest,
+        ray_sphere_intersection(origin, direction, end, radius),
+    )
 }
 
 fn choose_nearer(first: Option<f64>, second: Option<f64>) -> Option<f64> {
@@ -2802,6 +3034,50 @@ mod tests {
         assert_eq!(hit.target_id, EntityId(1));
         assert_eq!(hit.hit_zone, HitZone::Head);
         assert_eq!(hit.distance_mm, 150_300);
+    }
+
+    #[test]
+    fn horse_body_rewind_uses_a_horizontal_oriented_capsule() {
+        let shooter = player(1);
+        let mut targets = TargetRegistry::new(60).unwrap();
+        register_target(&mut targets, 2, 2, 320);
+        targets
+            .record_horse_pose(HorseTargetPoseSnapshot {
+                tick: SimulationTick::new(10),
+                entity_id: EntityId(2),
+                body_center: QuantizedOrigin::new(0, 1_000, -10_000),
+                body_forward: QuantizedDirection::new(DIRECTION_UNITS, 0, 0),
+                body_half_length_mm: 900,
+                body_radius_mm: 650,
+                head_center: QuantizedOrigin::new(0, 3_000, -10_000),
+                head_radius_mm: 350,
+                active: true,
+            })
+            .unwrap();
+
+        let broadside = targets
+            .nearest_hit(
+                SimulationTick::new(10),
+                QuantizedOrigin::new(800, 1_000, 0),
+                forward(),
+                20_000,
+                shooter,
+                TeamId(0),
+            )
+            .expect("ray inside the longitudinal segment must hit the horse body");
+        assert_eq!(broadside.target_id, EntityId(2));
+        assert_eq!(broadside.hit_zone, HitZone::Body);
+        assert_eq!(broadside.distance_mm, 9_350);
+        assert!(targets
+            .nearest_hit(
+                SimulationTick::new(10),
+                QuantizedOrigin::new(1_600, 1_000, 0),
+                forward(),
+                20_000,
+                shooter,
+                TeamId(0),
+            )
+            .is_none());
     }
 
     #[test]
