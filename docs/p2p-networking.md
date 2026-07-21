@@ -60,7 +60,9 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
 - The 20 Hz actor stream now uses temporal field-level compression against 2 Hz full bases;
   credential-free tests prove smaller delta packets, missing-base rejection, reconstruction, and
   recovery on the next base.
-- Extend the multi-process proof from the legacy M2 checkpoint to the complete wire-2 M5 state,
-  then exercise 8–16 peers, forced DERP, route transitions, roaming, packet loss, and churn.
+- The credential-free three-process proof now kills the original authority, installs the fragmented
+  complete wire-2 M3–M5 checkpoint, and verifies exact score, clock, and objective continuity.
+  Credentialed qualification must still exercise 8–16 peers, forced DERP, route transitions,
+  roaming, packet loss, and churn.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.

@@ -15,13 +15,20 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use spurfire_net::{
-    decode, encode, AcceptOutcome, Envelope, MatchCheckpoint, PeerPayload, RiderCheckpoint,
+    decode, encode,
+    v2::{
+        decode_m3, encode_m3, fragment_m3_checkpoint, M3EnvelopeV2, M3PeerPayloadV2,
+        M3SecureSession, M5MatchStateV2,
+    },
+    AcceptOutcome, Envelope, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, RiderCheckpoint,
     SecureSession, SessionState, MAX_DATAGRAM_BYTES, RIDER_INPUT_JUMP_PRESSED,
 };
 use spurfire_protocol::{
-    canonical_manifest_digest, LobbyId, PlayerId, QuantizedDirection, QuantizedOrigin, RiderStance,
-    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotOutcome, ShotResult, SimulationTick, WeaponId,
+    canonical_manifest_digest, ActorM3TickInput, BountyMatchKernel, EntityId, HorseVitalityClass,
+    LobbyId, M3AuthorityBank, M3ReloadCheckpointV2, OnFootTickInput, PlayerId, QuantizedDirection,
+    QuantizedOrigin, RiderStance, RosterManifest, RosterManifestEntry, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotOutcome, ShotResult, SimulationTick, WeaponId,
+    M3_WIRE_VERSION, OBJECTIVE_CADENCE_TICKS,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -40,6 +47,15 @@ type StartedScenario = (
     Receiver<Notice>,
     ReaderHandles,
 );
+type ChildHandshake = (
+    UdpSocket,
+    TcpStream,
+    BufReader<TcpStream>,
+    SecureSession,
+    M3SecureSession,
+    SigningKey,
+    RosterManifest,
+);
 
 fn proof_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
     io::Error::other(message.into()).into()
@@ -50,13 +66,14 @@ fn proof_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
 enum Scenario {
     TwoPeer,
     Migration,
+    Wire2Migration,
 }
 
 impl Scenario {
     const fn nodes(self) -> &'static [Node] {
         match self {
             Self::TwoPeer => &[Node::A, Node::B],
-            Self::Migration => &[Node::A, Node::B, Node::C],
+            Self::Migration | Self::Wire2Migration => &[Node::A, Node::B, Node::C],
         }
     }
 
@@ -64,6 +81,7 @@ impl Scenario {
         match self {
             Self::TwoPeer => "00000000-0000-4000-8000-000000000021",
             Self::Migration => "00000000-0000-4000-8000-000000000031",
+            Self::Wire2Migration => "00000000-0000-4000-8000-000000000041",
         }
     }
 }
@@ -73,6 +91,7 @@ impl fmt::Display for Scenario {
         formatter.write_str(match self {
             Self::TwoPeer => "two_peer",
             Self::Migration => "migration",
+            Self::Wire2Migration => "wire2_migration",
         })
     }
 }
@@ -84,6 +103,7 @@ impl FromStr for Scenario {
         match value {
             "two_peer" => Ok(Self::TwoPeer),
             "migration" => Ok(Self::Migration),
+            "wire2_migration" => Ok(Self::Wire2Migration),
             _ => Err(format!("unknown proof scenario: {value}")),
         }
     }
@@ -172,6 +192,8 @@ enum EventKind {
     NonAuthoritySnapshotRejected,
     SignedGameplayAccepted,
     SignedAuthoritySnapshotAccepted,
+    Wire2CheckpointInstalled,
+    Wire2ScoreContinued,
     Done,
 }
 
@@ -550,8 +572,10 @@ fn join_readers(readers: &mut BTreeMap<Node, JoinHandle<ProofResult<()>>>) -> Pr
 fn validate_event(scenario: Scenario, event: EventRecord) -> ProofResult<EventKey> {
     let (expected_authority, expected_epoch) = match scenario {
         Scenario::TwoPeer => (Node::A, 1),
-        Scenario::Migration if event.kind == EventKind::Mesh => (Node::A, 1),
-        Scenario::Migration => (Node::B, 2),
+        Scenario::Migration | Scenario::Wire2Migration if event.kind == EventKind::Mesh => {
+            (Node::A, 1)
+        }
+        Scenario::Migration | Scenario::Wire2Migration => (Node::B, 2),
     };
     if event.authority != expected_authority || event.epoch != expected_epoch {
         return Err(proof_error(format!(
@@ -901,18 +925,113 @@ fn run_migration_proof() -> ProofResult<()> {
     result
 }
 
+fn run_wire2_migration_proof() -> ProofResult<()> {
+    let (mut peers, mut writers, receiver, mut readers) = start_scenario(Scenario::Wire2Migration)?;
+    let result = (|| {
+        let mesh = BTreeSet::from([
+            EventKey {
+                node: Node::B,
+                kind: EventKind::Mesh,
+            },
+            EventKey {
+                node: Node::C,
+                kind: EventKind::Mesh,
+            },
+        ]);
+        let mut seen = BTreeSet::new();
+        collect_until(
+            Scenario::Wire2Migration,
+            &receiver,
+            &mesh,
+            &mut seen,
+            CONTROL_TIMEOUT,
+        )?;
+        let authority_writer = writers
+            .get_mut(&Node::A)
+            .ok_or_else(|| proof_error("missing wire-2 control writer for authority peer a"))?;
+        send_control(authority_writer, &ControlMessage::Quiesce)?;
+        wait_for_quiesced(
+            Scenario::Wire2Migration,
+            &receiver,
+            Node::A,
+            &mut seen,
+            CONTROL_TIMEOUT,
+        )?;
+        kill_peer(&mut peers, Node::A)?;
+        if let Some(writer) = writers.remove(&Node::A) {
+            writer.shutdown(Shutdown::Write)?;
+        }
+        join_reader(&mut readers, Node::A)?;
+
+        let continuity = BTreeSet::from([
+            EventKey {
+                node: Node::B,
+                kind: EventKind::Migrated,
+            },
+            EventKey {
+                node: Node::C,
+                kind: EventKind::Migrated,
+            },
+            EventKey {
+                node: Node::C,
+                kind: EventKind::Wire2CheckpointInstalled,
+            },
+            EventKey {
+                node: Node::C,
+                kind: EventKind::Wire2ScoreContinued,
+            },
+        ]);
+        collect_until(
+            Scenario::Wire2Migration,
+            &receiver,
+            &continuity,
+            &mut seen,
+            PROOF_TIMEOUT,
+        )?;
+        for node in [Node::B, Node::C] {
+            let writer = writers
+                .get_mut(&node)
+                .ok_or_else(|| proof_error(format!("missing control writer for peer {node}")))?;
+            send_control(writer, &ControlMessage::Stop)?;
+        }
+        let done = BTreeSet::from([
+            EventKey {
+                node: Node::B,
+                kind: EventKind::Done,
+            },
+            EventKey {
+                node: Node::C,
+                kind: EventKind::Done,
+            },
+        ]);
+        collect_until(
+            Scenario::Wire2Migration,
+            &receiver,
+            &done,
+            &mut seen,
+            CONTROL_TIMEOUT,
+        )?;
+        wait_for_success(&mut peers, None)?;
+        close_writers(&mut writers);
+        join_readers(&mut readers)?;
+        println!(
+            "SPURFIRE_SIGNED_WIRE2_M5_MIGRATION_OK peer_processes=3 signatures=strict authority=a successor=b epoch=2 checkpoint=complete_m3_m5 score_continuity=true clock_continuity=true objective_continuity=true"
+        );
+        Ok(())
+    })();
+    if result.is_err() {
+        close_writers(&mut writers);
+        terminate_peers(&mut peers);
+        let _ = join_readers(&mut readers);
+    }
+    result
+}
+
 fn child_handshake(
     scenario: Scenario,
     node: Node,
     control: SocketAddr,
-) -> ProofResult<(
-    UdpSocket,
-    TcpStream,
-    BufReader<TcpStream>,
-    SecureSession,
-    SigningKey,
-    RosterManifest,
-)> {
+) -> ProofResult<ChildHandshake> {
     if !scenario.nodes().contains(&node) {
         return Err(proof_error(
             "node does not belong to the requested scenario",
@@ -970,13 +1089,27 @@ fn child_handshake(
     for peer in scenario.nodes() {
         state.add_peer(peer.id()?, 0);
     }
+    let v2_session = M3SecureSession::new(
+        manifest.clone(),
+        manifest_public_key,
+        manifest_signature,
+        state.clone(),
+    )?;
     let session = SecureSession::new(
         manifest.clone(),
         manifest_public_key,
         manifest_signature,
         state,
     )?;
-    Ok((socket, writer, reader, session, signing_key, manifest))
+    Ok((
+        socket,
+        writer,
+        reader,
+        session,
+        v2_session,
+        signing_key,
+        manifest,
+    ))
 }
 
 fn endpoint_for(manifest: &RosterManifest, node: Node) -> ProofResult<SocketAddr> {
@@ -1020,6 +1153,35 @@ fn receive_envelope(
         source.set_ip(entry.tailnet_address);
     }
     Ok((decode(&bytes[..length])?, source))
+}
+
+fn send_v2_envelope(
+    socket: &UdpSocket,
+    envelope: &M3EnvelopeV2,
+    destination: SocketAddr,
+) -> ProofResult<()> {
+    let bytes = encode_m3(envelope)?;
+    let sent = socket.send_to(&bytes, destination)?;
+    if sent != bytes.len() {
+        return Err(proof_error("wire-2 proof UDP send was truncated"));
+    }
+    Ok(())
+}
+
+fn receive_v2_envelope(
+    socket: &UdpSocket,
+    manifest: &RosterManifest,
+) -> ProofResult<(M3EnvelopeV2, SocketAddr)> {
+    let mut bytes = [0_u8; MAX_DATAGRAM_BYTES];
+    let (length, mut source) = socket.recv_from(&mut bytes)?;
+    if let Some(entry) = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.application_port == source.port())
+    {
+        source.set_ip(entry.tailnet_address);
+    }
+    Ok((decode_m3(&bytes[..length])?, source))
 }
 
 fn transient_receive_error(error: &(dyn Error + Send + Sync + 'static)) -> bool {
@@ -1085,6 +1247,32 @@ fn emit_event(
         Node::C
     } else {
         return Err(proof_error("session reported an unknown authority"));
+    };
+    send_control(
+        writer,
+        &ControlMessage::Event {
+            node,
+            kind,
+            authority,
+            epoch: session.state().authority_epoch(),
+        },
+    )
+}
+
+fn emit_v2_event(
+    writer: &mut TcpStream,
+    node: Node,
+    kind: EventKind,
+    session: &M3SecureSession,
+) -> ProofResult<()> {
+    let authority = if session.state().authority() == Node::A.id()? {
+        Node::A
+    } else if session.state().authority() == Node::B.id()? {
+        Node::B
+    } else if session.state().authority() == Node::C.id()? {
+        Node::C
+    } else {
+        return Err(proof_error("wire-2 session reported an unknown authority"));
     };
     send_control(
         writer,
@@ -1282,6 +1470,133 @@ fn await_kill_after_quiesce(
             "authority control reader disconnected after quiescing",
         )),
     }
+}
+
+fn wire2_source_checkpoint() -> ProofResult<M3MatchCheckpointV2> {
+    let players = vec![Node::A.id()?, Node::B.id()?, Node::C.id()?];
+    let checkpoint_tick = SimulationTick::new(OBJECTIVE_CADENCE_TICKS);
+    let mut gameplay = M3AuthorityBank::new(1);
+    for (index, player) in players.iter().copied().enumerate() {
+        if !gameplay.register_actor(
+            player,
+            EntityId(100 + u64::try_from(index)?),
+            HorseVitalityClass::Courser,
+        ) {
+            return Err(proof_error("wire-2 checkpoint actor registration failed"));
+        }
+        gameplay.advance_actor(
+            player,
+            ActorM3TickInput {
+                tick: checkpoint_tick,
+                on_foot: OnFootTickInput {
+                    tick: checkpoint_tick,
+                    move_direction: None,
+                    sprint_pressed: false,
+                    crouch_pressed: false,
+                    reload_active: false,
+                },
+                interact_pressed: false,
+                spur_pressed: false,
+                mounted_for_spur: true,
+                rider_position: QuantizedOrigin::default(),
+                return_horse_position: QuantizedOrigin::default(),
+                return_horse_moving: false,
+            },
+        )?;
+    }
+
+    let mut bounty = BountyMatchKernel::new(
+        1,
+        0x5f_57_49_52_45_32,
+        SimulationTick::new(0),
+        players.clone(),
+    )?;
+    bounty.advance_tick(checkpoint_tick)?;
+    if bounty.active_objective().is_none() {
+        return Err(proof_error("wire-2 checkpoint has no live objective"));
+    }
+    bounty.record_damage(checkpoint_tick, Node::C.id()?, Node::A.id()?, 40)?;
+    bounty.record_elimination(checkpoint_tick, Node::B.id()?, Node::A.id()?, true)?;
+    bounty.record_horse_bolt(checkpoint_tick, Node::B.id()?, Node::C.id()?)?;
+    bounty.record_mounted_long_hit(checkpoint_tick, Node::B.id()?, 61_000)?;
+
+    let checkpoint = M3MatchCheckpointV2 {
+        wire_version: M3_WIRE_VERSION,
+        combat: MatchCheckpoint {
+            source_epoch: 1,
+            tick: checkpoint_tick.as_u64(),
+            riders: players
+                .iter()
+                .copied()
+                .map(|rider_player_id| {
+                    let fired = rider_player_id == Node::B.id()?;
+                    Ok(RiderCheckpoint {
+                        rider_player_id,
+                        position_mm: [0; 3],
+                        velocity_mmps: [0; 3],
+                        yaw_millidegrees: 0,
+                        stance: RiderStance::Mounted,
+                        health: 100,
+                        weapon_id: WeaponId::Dustwalker.as_u8(),
+                        ammo_magazine: if fired { 29 } else { 30 },
+                        ammo_reserve: 120,
+                        last_input_tick: checkpoint_tick.as_u64(),
+                        last_shot_tick: fired.then_some(checkpoint_tick.as_u64() - 1),
+                        last_command_tick: fired.then_some(checkpoint_tick.as_u64() - 1),
+                        shot_index: u64::from(fired),
+                    })
+                })
+                .collect::<ProofResult<Vec<_>>>()?,
+            resolved_shots: vec![(Node::B.id()?, checkpoint_tick.as_u64() - 1)],
+        },
+        gameplay: gameplay.checkpoint(),
+        reloads: players
+            .iter()
+            .copied()
+            .map(|rider_player_id| M3ReloadCheckpointV2 {
+                rider_player_id,
+                current_tick: Some(checkpoint_tick),
+                reload_held: false,
+                reload: None,
+            })
+            .collect(),
+        next_horse_damage_sequence: 7,
+        bounty: bounty.checkpoint(),
+    };
+    if !checkpoint.is_bounded_and_canonical() {
+        return Err(proof_error("wire-2 source checkpoint is noncanonical"));
+    }
+    Ok(checkpoint)
+}
+
+fn wire2_continued_match_state(checkpoint: &M3MatchCheckpointV2) -> ProofResult<M5MatchStateV2> {
+    let mut bounty = BountyMatchKernel::restore_checkpoint(checkpoint.bounty.clone(), 2)?;
+    let source_tick = SimulationTick::new(checkpoint.combat.tick);
+    bounty.record_horse_bolt(source_tick, Node::C.id()?, Node::B.id()?)?;
+    bounty.advance_tick(source_tick.saturating_add(1))?;
+    Ok(M5MatchStateV2::from_snapshot(&bounty.snapshot()))
+}
+
+fn wire2_continuity_is_exact(
+    checkpoint: &M3MatchCheckpointV2,
+    continued: &M5MatchStateV2,
+) -> ProofResult<bool> {
+    let source = M5MatchStateV2::from_snapshot(&checkpoint.bounty.match_state().snapshot());
+    let score = |state: &M5MatchStateV2, player: PlayerId| {
+        state
+            .players
+            .iter()
+            .find(|row| row.player_id == player)
+            .map(|row| row.score)
+    };
+    Ok(continued.authority_epoch == 2
+        && continued.current_tick.as_u64() == checkpoint.combat.tick + 1
+        && continued.end_tick == source.end_tick
+        && continued.active_objective == source.active_objective
+        && score(&source, Node::B.id()?) == Some(150)
+        && score(&source, Node::C.id()?) == Some(50)
+        && score(continued, Node::B.id()?) == Some(150)
+        && score(continued, Node::C.id()?) == Some(65))
 }
 
 fn migration_payload(
@@ -1644,8 +1959,251 @@ fn run_migration_child(
     }
 }
 
+const WIRE2_CHECKPOINT_ACK: u64 = 0x57_49_52_45_32_41_43_4b;
+
+fn run_wire2_migration_child(
+    node: Node,
+    socket: UdpSocket,
+    mut writer: TcpStream,
+    reader: BufReader<TcpStream>,
+    mut session: M3SecureSession,
+    signing_key: SigningKey,
+    manifest: RosterManifest,
+) -> ProofResult<()> {
+    let commands = start_command_reader(reader);
+    let checkpoint = wire2_source_checkpoint()?;
+    let continued = wire2_continued_match_state(&checkpoint)?;
+    if !wire2_continuity_is_exact(&checkpoint, &continued)? {
+        return Err(proof_error(
+            "wire-2 continued match fixture is inconsistent",
+        ));
+    }
+    let started = Instant::now();
+    let mut last_send = started;
+    let mut seen_peers = BTreeSet::new();
+    let mut mesh_reported = false;
+    let mut migrated_reported = false;
+    let mut fragments_sent = false;
+    let mut checkpoint_installed = false;
+    let mut checkpoint_acknowledged = false;
+    let mut score_continued = false;
+    let mut pending_fragments = 0_usize;
+    let mut received_fragment_indices = BTreeSet::new();
+    let mut reported_fragment_count = 0_u16;
+
+    loop {
+        match commands.try_recv() {
+            Ok(Ok(ParentCommand::Quiesce)) if node == Node::A => {
+                send_control(&mut writer, &ControlMessage::Quiesced { node })?;
+                return await_kill_after_quiesce(&commands, started + PROOF_TIMEOUT);
+            }
+            Ok(Ok(ParentCommand::Quiesce)) => {
+                return Err(proof_error(format!(
+                    "non-authority wire-2 peer {node} received quiesce"
+                )));
+            }
+            Ok(Ok(ParentCommand::Stop)) => {
+                let complete = match node {
+                    Node::B => {
+                        mesh_reported
+                            && migrated_reported
+                            && fragments_sent
+                            && checkpoint_acknowledged
+                    }
+                    Node::C => {
+                        mesh_reported
+                            && migrated_reported
+                            && checkpoint_installed
+                            && score_continued
+                    }
+                    Node::A => false,
+                };
+                if !complete {
+                    return Err(proof_error(format!(
+                        "peer {node} received stop before wire-2 score continuity completed"
+                    )));
+                }
+                emit_v2_event(&mut writer, node, EventKind::Done, &session)?;
+                return Ok(());
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(proof_error("wire-2 lifecycle command reader disconnected"));
+            }
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed > PROOF_TIMEOUT {
+            return Err(proof_error(format!(
+                "peer {node} exceeded the wire-2 migration proof timeout: mesh={mesh_reported} migrated={migrated_reported} fragments={fragments_sent} pending={pending_fragments}/{} received={received_fragment_indices:?}/{reported_fragment_count} installed={checkpoint_installed} ack={checkpoint_acknowledged} score={score_continued} authority={} epoch={}",
+                fragment_m3_checkpoint(Node::B.id()?, 2, &checkpoint)?.len(),
+                session.state().authority(),
+                session.state().authority_epoch(),
+            )));
+        }
+        let now_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        if node != Node::A {
+            if let Some((successor, epoch)) = session.expire_and_migrate(now_ms) {
+                if successor != Node::B.id()? || epoch != 2 {
+                    return Err(proof_error(
+                        "wire-2 deterministic migration chose the wrong successor",
+                    ));
+                }
+            }
+            if !migrated_reported
+                && session.state().authority() == Node::B.id()?
+                && session.state().authority_epoch() == 2
+            {
+                migrated_reported = true;
+                emit_v2_event(&mut writer, node, EventKind::Migrated, &session)?;
+            }
+        }
+
+        if last_send.elapsed() >= SEND_INTERVAL {
+            last_send = Instant::now();
+            if node == Node::B && migrated_reported && !fragments_sent {
+                for payload in fragment_m3_checkpoint(Node::B.id()?, 2, &checkpoint)? {
+                    let envelope =
+                        session.envelope(checkpoint.combat.tick, payload, &signing_key)?;
+                    send_v2_envelope(&socket, &envelope, endpoint_for(&manifest, Node::C)?)?;
+                }
+                fragments_sent = true;
+            } else {
+                let payload = if node == Node::B && checkpoint_acknowledged {
+                    M3PeerPayloadV2::MatchState {
+                        state: continued.clone(),
+                    }
+                } else {
+                    M3PeerPayloadV2::Heartbeat
+                };
+                let tick = if matches!(payload, M3PeerPayloadV2::MatchState { .. }) {
+                    continued.current_tick.as_u64()
+                } else {
+                    now_ms / 16
+                };
+                let envelope = session.envelope(tick, payload, &signing_key)?;
+                for peer in Scenario::Wire2Migration.nodes() {
+                    if *peer != node {
+                        send_v2_envelope(&socket, &envelope, endpoint_for(&manifest, *peer)?)?;
+                    }
+                }
+            }
+        }
+
+        match receive_v2_envelope(&socket, &manifest) {
+            Ok((envelope, source)) => {
+                let payload = envelope.payload.clone();
+                if let M3PeerPayloadV2::MigrationFragment {
+                    fragment_index,
+                    fragment_count,
+                    ..
+                } = &payload
+                {
+                    received_fragment_indices.insert(*fragment_index);
+                    reported_fragment_count = *fragment_count;
+                }
+                let outcome = session.accept_with_source(&envelope, source, None, now_ms);
+                if outcome == AcceptOutcome::Accepted {
+                    if envelope.authority_epoch == 1 {
+                        if envelope.sender == Node::A.id()? {
+                            seen_peers.insert(Node::A);
+                        } else if envelope.sender == Node::B.id()? {
+                            seen_peers.insert(Node::B);
+                        } else if envelope.sender == Node::C.id()? {
+                            seen_peers.insert(Node::C);
+                        }
+                    }
+                    if node == Node::C
+                        && matches!(payload, M3PeerPayloadV2::MigrationFragment { .. })
+                        && !checkpoint_installed
+                    {
+                        if session.installed_checkpoint() != Some(&checkpoint) {
+                            return Err(proof_error(
+                                "wire-2 receiver installed a non-exact M3-M5 checkpoint",
+                            ));
+                        }
+                        checkpoint_installed = true;
+                        emit_v2_event(
+                            &mut writer,
+                            node,
+                            EventKind::Wire2CheckpointInstalled,
+                            &session,
+                        )?;
+                        let acknowledgment = session.envelope(
+                            checkpoint.combat.tick,
+                            M3PeerPayloadV2::Probe {
+                                nonce: WIRE2_CHECKPOINT_ACK,
+                                reply: true,
+                            },
+                            &signing_key,
+                        )?;
+                        send_v2_envelope(
+                            &socket,
+                            &acknowledgment,
+                            endpoint_for(&manifest, Node::B)?,
+                        )?;
+                    }
+                    if node == Node::B
+                        && matches!(
+                            payload,
+                            M3PeerPayloadV2::Probe {
+                                nonce: WIRE2_CHECKPOINT_ACK,
+                                reply: true,
+                            }
+                        )
+                    {
+                        checkpoint_acknowledged = true;
+                    }
+                    if node == Node::C
+                        && matches!(payload, M3PeerPayloadV2::MatchState { .. })
+                        && !score_continued
+                    {
+                        let M3PeerPayloadV2::MatchState { state } = &payload else {
+                            unreachable!("matched match state")
+                        };
+                        if !checkpoint_installed || !wire2_continuity_is_exact(&checkpoint, state)?
+                        {
+                            return Err(proof_error(
+                                "wire-2 M5 score, clock, or objective did not continue exactly",
+                            ));
+                        }
+                        score_continued = true;
+                        emit_v2_event(&mut writer, node, EventKind::Wire2ScoreContinued, &session)?;
+                    }
+                } else if outcome == AcceptOutcome::PendingMigration {
+                    pending_fragments = pending_fragments.saturating_add(1);
+                } else if !matches!(
+                    outcome,
+                    AcceptOutcome::DuplicateOrReplay
+                        | AcceptOutcome::StaleAuthorityEpoch
+                        | AcceptOutcome::InvalidAuthorityClaim
+                        | AcceptOutcome::InvalidPayloadRole
+                ) {
+                    return Err(proof_error(format!(
+                        "wire-2 peer {node} rejected a legitimate signed packet as {outcome:?}"
+                    )));
+                }
+            }
+            Err(error) if transient_receive_error(error.as_ref()) => {}
+            Err(error) => return Err(error),
+        }
+
+        let expected_seen = Scenario::Wire2Migration
+            .nodes()
+            .iter()
+            .copied()
+            .filter(|peer| *peer != node)
+            .collect::<BTreeSet<_>>();
+        if !mesh_reported && expected_seen.is_subset(&seen_peers) {
+            mesh_reported = true;
+            emit_v2_event(&mut writer, node, EventKind::Mesh, &session)?;
+        }
+    }
+}
+
 fn child_main(scenario: Scenario, node: Node, control: SocketAddr) -> ProofResult<()> {
-    let (socket, writer, reader, session, signing_key, manifest) =
+    let (socket, writer, reader, session, v2_session, signing_key, manifest) =
         child_handshake(scenario, node, control)?;
     match scenario {
         Scenario::TwoPeer => {
@@ -1655,6 +2213,15 @@ fn child_main(scenario: Scenario, node: Node, control: SocketAddr) -> ProofResul
         Scenario::Migration => {
             run_migration_child(node, socket, writer, reader, session, signing_key, manifest)
         }
+        Scenario::Wire2Migration => run_wire2_migration_child(
+            node,
+            socket,
+            writer,
+            reader,
+            v2_session,
+            signing_key,
+            manifest,
+        ),
     }
 }
 
@@ -1663,7 +2230,8 @@ fn main() -> ProofResult<()> {
     match arguments.next() {
         None => {
             run_two_peer_proof()?;
-            run_migration_proof()
+            run_migration_proof()?;
+            run_wire2_migration_proof()
         }
         Some(mode) if mode == "--child" => {
             let scenario = arguments

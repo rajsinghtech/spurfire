@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Credential-free signed two-peer and three-peer authority-migration process proofs.
+# Credential-free signed wire-1 and complete-state wire-2 process proofs.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,6 +50,7 @@ env -i \
 required=(
   'SPURFIRE_SIGNED_TWO_PROCESS_OK peer_processes=2 signatures=strict accepted_bidirectional=true combat=authority_once result_dedup=true authority=a epoch=1'
   'SPURFIRE_SIGNED_THREE_PROCESS_MIGRATION_OK peer_processes=3 signatures=strict authority_roles=strict authority=a successor=b epoch=2 agreement=b,c checkpoint=hash_checked riders=2 combat_receipts=retained continued_play=true'
+  'SPURFIRE_SIGNED_WIRE2_M5_MIGRATION_OK peer_processes=3 signatures=strict authority=a successor=b epoch=2 checkpoint=complete_m3_m5 score_continuity=true clock_continuity=true objective_continuity=true'
 )
 for marker in "${required[@]}"; do
   count="$(grep -Fxc "$marker" "$proof_log" || true)"

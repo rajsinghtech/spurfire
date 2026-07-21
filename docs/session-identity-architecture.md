@@ -251,7 +251,8 @@ never logged or persisted. Signature cost is negligible (≤16 peers × 60 Hz; ~
   -D warnings` (including the `rustscale`-feature smoke bins), `cargo test --locked`,
   `bash scripts/check-control-plane-deps.sh`, and a tree-wide secret scan. Results are
   recorded with the landing commits.
-- Real admission remains force-closed. The credential-free signed two-process and
-  three-process migration proof is `just p2p-proof`; real RustScale route evidence and the
-  `migration_smoke.rs` signed-traffic extension require credentialed tailnets and remain
+- Real admission remains force-closed. `just p2p-proof` runs the credential-free signed
+  two-process exchange, the retained wire-1 migration scenario, and a wire-2 three-process
+  authority kill with exact M5 score/clock/objective continuity. Real RustScale route evidence and
+  the `migration_smoke.rs` signed-traffic extension require credentialed tailnets and remain
   separate follow-ups.

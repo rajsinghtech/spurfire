@@ -1169,9 +1169,9 @@ impl M3SecureSession {
     }
 
     pub fn expire_and_migrate(&mut self, now_ms: u64) -> Option<(PlayerId, u64)> {
-        self.pending_migration = None;
         let migration = self.state.expire_and_migrate(now_ms);
         if migration.is_some() {
+            self.pending_migration = None;
             self.sent_actor_keyframes.clear();
             self.received_actor_keyframes.clear();
             self.accepted_actor_snapshot = None;
@@ -2725,6 +2725,44 @@ mod tests {
         assert_eq!(rejected.state().authority(), player(1));
         assert_eq!(rejected.state().authority_epoch(), 1);
         assert!(rejected.installed_checkpoint().is_none());
+    }
+
+    #[test]
+    fn no_op_migration_poll_preserves_pending_checkpoint_fragments() {
+        let mut sender = secure_session(player(2));
+        let mut receiver = secure_session(player(3));
+        let heartbeat = sender
+            .envelope(9, M3PeerPayloadV2::Heartbeat, &signing_key(2))
+            .unwrap();
+        assert_eq!(
+            receiver.accept_with_source(&heartbeat, source(2), None, 2_999),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(sender.expire_and_migrate(3_000), Some((player(2), 2)));
+        assert_eq!(receiver.expire_and_migrate(3_000), Some((player(2), 2)));
+
+        let checkpoint = migration_checkpoint_for(1, &[player(1), player(2), player(3)]);
+        let envelopes = fragment_m3_checkpoint(player(2), 2, &checkpoint)
+            .unwrap()
+            .into_iter()
+            .map(|payload| {
+                sender
+                    .envelope(checkpoint.combat.tick, payload, &signing_key(2))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for envelope in &envelopes[..envelopes.len() - 1] {
+            assert_eq!(
+                receiver.accept_with_source(envelope, source(2), None, 3_001),
+                AcceptOutcome::PendingMigration
+            );
+            assert_eq!(receiver.expire_and_migrate(3_001), None);
+        }
+        assert_eq!(
+            receiver.accept_with_source(envelopes.last().unwrap(), source(2), None, 3_001),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(receiver.installed_checkpoint(), Some(&checkpoint));
     }
 
     #[test]
