@@ -172,12 +172,16 @@ for index in "${!NODES[@]}"; do
     env "${common_env[@]}" "$GODOT_BIN" --path game --resolution 620x430 --position "$x,$y" &
   fi
   PIDS+=("$!")
-  # Avoid phase-locking eight 60 Hz scene loops and their once-per-second
-  # probe bursts on a single qualification host. Real players run on separate
-  # machines; staggering preserves the network threshold without measuring an
-  # artificial same-frame scheduler stampede.
+  # Avoid phase-locking eight 60 Hz scene loops, probe bursts, and RustScale's
+  # fixed five-minute endpoint refresh on a single qualification host. Real
+  # players start on separate machines; the soak's wider launch dephasing
+  # prevents eight independent netchecks becoming one artificial host storm.
   if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
-    sleep 0.15
+    launch_stagger_sec="${SPURFIRE_P2P_LAUNCH_STAGGER_SEC:-0.15}"
+    if [[ "$MODE" == "soak" ]]; then
+      launch_stagger_sec="${SPURFIRE_P2P_LAUNCH_STAGGER_SEC:-5}"
+    fi
+    sleep "$launch_stagger_sec"
   fi
 done
 
