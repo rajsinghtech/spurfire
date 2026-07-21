@@ -69,6 +69,16 @@ interpolated rider with the known qualification trajectory at least 30 times per
 above 200 ms of equivalent planar presentation error. Shortened runs are development
 checks only; this remains practice-wire replication evidence rather than secure lifecycle proof.
 
+The 2026-07-21 15-minute qualification did **not** pass the 200 ms gate. All seven followers
+received the exact expected 18,000 snapshots and stayed within 11 ms of the interpolated
+qualification trajectory, but isolated snapshot gaps reached 225–334 ms. Long-gap telemetry then
+correlated the spikes with RustScale's fixed-phase five-minute endpoint/netcheck refresh. Bounding
+each embedded Tokio runtime to two workers reduced a six-minute refresh-boundary run to 131–202 ms,
+but one follower still failed closed at 202 ms. Every disposable child tailnet from these attempts
+was deleted and an independent organization listing found no `spurfire-godot-*` child. The upstream
+fix is tracked in [RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100); this
+remains an open M6 blocker until the default 900,000 ms run passes on a reviewed dependency revision.
+
 ## Security boundaries
 
 Canonical formats, key custody, validation ordering, and rotation rules for signed sessions
@@ -101,3 +111,6 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a
   live qualification item.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
+- RustScale's fixed-phase five-minute endpoint refresh can synchronize embedded peers and breach
+  the 200 ms gameplay gap gate; track and requalify
+  [issue #100](https://github.com/rajsinghtech/rustscale/issues/100) before closing the movement soak.
