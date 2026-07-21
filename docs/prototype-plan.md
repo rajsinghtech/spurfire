@@ -181,11 +181,14 @@ broken will poison playtest feedback; (3) airborne FOV/camera motion sickness.
 `spurfire-protocol::m3` now owns replay-safe archetype vitality and regeneration, the fatal
 spook/three-second bolt edge, exact on-foot stamina/crouch/roll/stun timing, recall reductions,
 the Majestic Return phase clock, running-mount validation, acceptance telemetry, and validated
-migration checkpoints. M3 changes signed actor input/snapshot/checkpoint canonicalization, so the
-foundation declares wire 2.0 without changing the active 1.2 transport. M3 remains incomplete
-until the native authority actor bank, horse target/hitbox model, paused-reload combat path,
-jump/crouch input buffers, per-stance acceleration/deceleration, GDExtension adapter, remote horse
-presentation, wire-v2 replication, and playtest instrumentation consume this state end to end.
+migration checkpoints. A bounded native actor bank now routes unique horse target IDs, enforces
+authority epochs, and migrates the canonical roster atomically; `M3GameplayController` exposes that
+owner to Godot with a headless spook-to-running-remount regression. M3 changes signed actor
+input/snapshot/checkpoint canonicalization, so the foundation declares wire 2.0 without changing
+the active 1.2 transport. M3 remains incomplete until the horse target/hitbox and paused-reload
+combat paths, jump/crouch input buffers, per-stance acceleration/deceleration, live scene adapter,
+remote horse presentation, wire-v2 replication, and playtest instrumentation consume this state
+end to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

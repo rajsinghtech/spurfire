@@ -39,6 +39,7 @@ func _ready() -> void:
 	_check_airborne_yaw_limiter(failures)
 	_check_network_rider(failures)
 	_check_peer_session(failures)
+	_check_m3_gameplay_controller(failures)
 	if not ClassDB.class_exists(&"HorseController"):
 		failures.append("native class HorseController is unavailable")
 		_finish(failures)
@@ -522,6 +523,120 @@ func _check_peer_session(failures: Array[String]) -> void:
 		if not reserved_buttons.is_empty():
 			failures.append("PeerSession accepted nonzero reserved rider-input bits")
 	peer_session.free()
+
+func _check_m3_gameplay_controller(failures: Array[String]) -> void:
+	if not ClassDB.class_exists(&"M3GameplayController"):
+		failures.append("native class M3GameplayController is unavailable")
+		return
+	var controller := ClassDB.instantiate(&"M3GameplayController") as Node
+	if controller == null:
+		failures.append("M3GameplayController could not be instantiated")
+		return
+	add_child(controller)
+	for method in [
+		"configure", "advance_tick", "apply_horse_damage", "apply_recall_credit",
+		"pending_horse_loss_effects", "acknowledge_horse_loss_effects",
+		"checkpoint_json", "restore_checkpoint_json"
+	]:
+		if not controller.has_method(method):
+			failures.append("M3GameplayController lacks %s" % method)
+	for signal_name in [
+		&"mode_changed", &"horse_damaged", &"horse_bolted", &"horse_despawned", &"remounted"
+	]:
+		if not controller.has_signal(signal_name):
+			failures.append("M3GameplayController lacks %s signal" % signal_name)
+
+	var bolted_events: Array = []
+	var despawn_events: Array = []
+	var remount_events: Array = []
+	controller.horse_bolted.connect(func(tick, throw_distance_m, stun_seconds):
+		bolted_events.append([tick, throw_distance_m, stun_seconds])
+	)
+	controller.horse_despawned.connect(func(tick): despawn_events.append(tick))
+	controller.remounted.connect(func(tick, running): remount_events.append([tick, running]))
+	var actor_id := "00000000-0000-4000-8000-000000000043"
+	if not bool(controller.call("configure", 7, actor_id, 7001, 0)):
+		failures.append("M3GameplayController rejected a valid Courser actor")
+	elif int(controller.get("horse_health")) != 200 or int(controller.get("mode_id")) != 0:
+		failures.append("M3GameplayController did not expose the configured mounted actor")
+	else:
+		var mounted := controller.call(
+			"advance_tick", 1, Vector2.ZERO, false, false, false, false,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		) as Dictionary
+		if int(mounted.get("mode_id", -1)) != 0:
+			failures.append("M3 authority actor did not begin mounted")
+		var fatal := controller.call(
+			"apply_horse_damage", 1, 1, 200, Vector3(5.0, 0.0, 0.0), Vector3.ZERO
+		) as Dictionary
+		if not bool(fatal.get("spooked", false)) or int(controller.get("horse_health")) != 0:
+			failures.append("M3 authority fatal horse damage did not spook exactly at zero")
+		if bolted_events.size() != 1 or not is_equal_approx(float(bolted_events[0][1]), 3.0):
+			failures.append("M3 horse-bolted presentation edge was not emitted exactly once")
+		var duplicate := controller.call(
+			"apply_horse_damage", 1, 1, 200, Vector3(5.0, 0.0, 0.0), Vector3.ZERO
+		) as Dictionary
+		if not duplicate.is_empty() or bolted_events.size() != 1:
+			failures.append("M3 duplicate horse damage replayed fatal effects")
+
+		var checkpoint := str(controller.call("checkpoint_json"))
+		if checkpoint.is_empty() or bool(controller.call("restore_checkpoint_json", checkpoint, 7)):
+			failures.append("M3 migration checkpoint accepted a non-advancing epoch")
+		elif not bool(controller.call("restore_checkpoint_json", checkpoint, 8)):
+			failures.append("M3 migration checkpoint did not restore at the exact next epoch")
+		elif int(controller.get("authority_epoch")) != 8 or int(controller.get("horse_state_id")) != 1:
+			failures.append("M3 migration lost the active bolt state")
+		else:
+			var pending := controller.call("pending_horse_loss_effects") as Dictionary
+			if int(pending.get("authority_epoch", -1)) != 7 or int(pending.get("damage_sequence", -1)) != 1:
+				failures.append("M3 migration lost the pending fatal-effect outbox")
+			elif bool(controller.call("acknowledge_horse_loss_effects", 7, 1, 2)):
+				failures.append("M3 fatal-effect outbox accepted a mismatched acknowledgement")
+			elif not bool(controller.call("acknowledge_horse_loss_effects", 7, 1, 1)):
+				failures.append("M3 fatal-effect outbox rejected its exact acknowledgement")
+			elif not (controller.call("pending_horse_loss_effects") as Dictionary).is_empty():
+				failures.append("M3 fatal-effect outbox did not clear after exact acknowledgement")
+
+		var stunned := controller.call(
+			"advance_tick", 36, Vector2(0.0, -1.0), true, true, true, false,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		) as Dictionary
+		var stunned_move := stunned.get("on_foot", {}) as Dictionary
+		if int(stunned.get("mode_id", -1)) != 1 or bool(stunned_move.get("can_fire", true)):
+			failures.append("M3 spook stun did not suppress on-foot input/fire")
+		var despawned := controller.call(
+			"advance_tick", 181, Vector2.ZERO, false, false, false, false,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		) as Dictionary
+		if not bool(despawned.get("horse_despawned", false)) or despawn_events != [181]:
+			failures.append("M3 horse did not despawn once after the exact three-second bolt")
+		for sequence in range(1, 7):
+			if not bool(controller.call("apply_recall_credit", 181, sequence, 1, 0)):
+				failures.append("M3 objective recall credit %d was rejected" % sequence)
+		controller.call(
+			"advance_tick", 661, Vector2.ZERO, false, false, false, true,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		)
+		controller.call(
+			"advance_tick", 781, Vector2.ZERO, false, false, false, false,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		)
+		controller.call(
+			"advance_tick", 871, Vector2.ZERO, false, false, false, false,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		)
+		var remounted := controller.call(
+			"advance_tick", 961, Vector2.ZERO, false, false, false, true,
+			Vector3.ZERO, Vector3(3.999, 0.0, 0.0), true
+		) as Dictionary
+		if not bool(remounted.get("remounted", false)) or int(controller.get("mode_id")) != 0:
+			failures.append("M3 running mount did not restore the rider and horse")
+		if remounted.has("on_foot") or remounted.has("recall"):
+			failures.append("M3 remount output retained contradictory detached state")
+		if remount_events != [[961, true]]:
+			failures.append("M3 running-mount presentation edge was not emitted exactly once")
+	remove_child(controller)
+	controller.free()
 
 func _check_native_apis(horse: CharacterBody3D, rider: CharacterBody3D, failures: Array[String]) -> void:
 	for method in ["reset_horse", "set_archetype", "get_archetype_stats", "start_dive_runout", "set_external_simulation_tick", "complete_remount"]:

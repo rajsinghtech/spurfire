@@ -6,6 +6,7 @@ pub mod archetype;
 mod horse_controller;
 mod lobby_client;
 pub mod locomotion;
+mod m3_gameplay_controller;
 pub mod mounted_weapon_controller;
 mod network_rider;
 mod peer_session;

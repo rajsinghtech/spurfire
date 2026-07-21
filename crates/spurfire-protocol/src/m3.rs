@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{QuantizedDirection, QuantizedOrigin, SimulationTick, WireVersion, DIRECTION_UNITS};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{
+    EntityId, PlayerId, QuantizedDirection, QuantizedOrigin, SimulationTick, WireVersion,
+    DIRECTION_UNITS,
+};
 
 /// M3 continues to use the shared 60 Hz authority clock.
 pub const M3_TICK_RATE_HZ: u32 = 60;
@@ -60,6 +65,8 @@ const GALLOP_IN_TICKS: u64 = 3 * M3_TICK_RATE_HZ as u64;
 /// starts a new gameplay wire major. The existing 1.2 transport remains active
 /// until its send/receive path is replaced atomically.
 pub const M3_WIRE_VERSION: WireVersion = WireVersion::new(2, 0);
+/// Invited-friends alpha roster ceiling retained by the M3 authority checkpoint.
+pub const MAX_M3_AUTHORITY_ACTORS: usize = 16;
 
 /// Wire-v2 stance namespace. Keeping it separate prevents an M3 binary from
 /// changing how active wire-1.2 packets interpret stance IDs.
@@ -1439,12 +1446,332 @@ impl ActorGameplayKernel {
     }
 }
 
+/// One canonical actor row in an M3 authority handoff.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M3AuthorityActorCheckpoint {
+    /// Stable roster identity owning the horse/rider state.
+    pub rider_player_id: PlayerId,
+    /// Stable combat-target identity for this rider's horse.
+    pub horse_entity_id: EntityId,
+    /// Validated complete actor state.
+    pub actor: ActorGameplayCheckpointV2,
+}
+
+/// Bounded, canonical wire-v2 authority handoff for every gameplay actor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct M3AuthorityCheckpointV2 {
+    /// Exact checkpoint schema boundary.
+    wire_version: WireVersion,
+    /// Epoch that authored the state.
+    source_authority_epoch: u64,
+    /// Rows sorted strictly by [`PlayerId`].
+    actors: Vec<M3AuthorityActorCheckpoint>,
+}
+
+#[derive(Deserialize)]
+struct RawM3AuthorityCheckpointV2 {
+    wire_version: WireVersion,
+    source_authority_epoch: u64,
+    actors: Vec<M3AuthorityActorCheckpoint>,
+}
+
+impl<'de> Deserialize<'de> for M3AuthorityCheckpointV2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawM3AuthorityCheckpointV2::deserialize(deserializer)?;
+        let checkpoint = Self {
+            wire_version: raw.wire_version,
+            source_authority_epoch: raw.source_authority_epoch,
+            actors: raw.actors,
+        };
+        M3AuthorityBank::validate_checkpoint(&checkpoint).map_err(serde::de::Error::custom)?;
+        Ok(checkpoint)
+    }
+}
+
+/// Authority-routed horse damage paired with its stable actor identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M3AuthorityHorseDamage {
+    /// Roster actor whose horse was hit.
+    pub rider_player_id: PlayerId,
+    /// Combat target routed to the actor.
+    pub horse_entity_id: EntityId,
+    /// Deterministic actor-kernel effects.
+    pub effects: HorseDamageEffects,
+}
+
+/// Fail-closed M3 actor-bank operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum M3AuthorityError {
+    /// Roster actor was not registered.
+    #[error("unknown_actor")]
+    UnknownActor,
+    /// Horse combat entity was not registered.
+    #[error("unknown_horse_target")]
+    UnknownHorseTarget,
+    /// A command came from a different authority epoch.
+    #[error("authority_epoch_mismatch")]
+    AuthorityEpochMismatch,
+    /// Actor state rejected the operation.
+    #[error("actor_state: {0}")]
+    ActorState(#[from] M3Error),
+}
+
+/// Fail-closed actor-bank checkpoint rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum M3AuthorityCheckpointError {
+    /// Checkpoint is not exactly wire v2.
+    #[error("wire_version_mismatch")]
+    WireVersionMismatch,
+    /// Successor must be exactly one epoch newer than the source.
+    #[error("authority_epoch_mismatch")]
+    AuthorityEpochMismatch,
+    /// Roster bounds, ordering, identities, or actor state were invalid.
+    #[error("invalid_checkpoint_state")]
+    InvalidState,
+}
+
+/// Native authority owner for every M3 actor and horse combat-target route.
+///
+/// The bank deliberately exposes actor state immutably. All mutation passes
+/// through epoch-checked, player/target-routed methods so a Godot adapter or
+/// network receiver cannot accidentally maintain a parallel gameplay owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct M3AuthorityBank {
+    authority_epoch: u64,
+    actors: BTreeMap<PlayerId, M3AuthorityActor>,
+    horse_owners: BTreeMap<EntityId, PlayerId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct M3AuthorityActor {
+    horse_entity_id: EntityId,
+    actor: ActorGameplayKernel,
+}
+
+impl M3AuthorityBank {
+    /// Creates an empty authority bank for the active epoch.
+    #[must_use]
+    pub fn new(authority_epoch: u64) -> Self {
+        Self {
+            authority_epoch,
+            actors: BTreeMap::new(),
+            horse_owners: BTreeMap::new(),
+        }
+    }
+
+    /// Current authority epoch required on damage and economy commands.
+    #[must_use]
+    pub const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+
+    /// Number of registered roster actors.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.actors.len()
+    }
+
+    /// Whether no actors are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.actors.is_empty()
+    }
+
+    /// Registers one roster actor and unique horse combat entity. Registration
+    /// is mutation-free on roster overflow or either identity collision.
+    pub fn register_actor(
+        &mut self,
+        rider_player_id: PlayerId,
+        horse_entity_id: EntityId,
+        class: HorseVitalityClass,
+    ) -> bool {
+        if self.actors.len() >= MAX_M3_AUTHORITY_ACTORS
+            || self.actors.contains_key(&rider_player_id)
+            || self.horse_owners.contains_key(&horse_entity_id)
+        {
+            return false;
+        }
+        self.actors.insert(
+            rider_player_id,
+            M3AuthorityActor {
+                horse_entity_id,
+                actor: ActorGameplayKernel::new(class),
+            },
+        );
+        self.horse_owners.insert(horse_entity_id, rider_player_id);
+        true
+    }
+
+    /// Immutable state for snapshots, HUD, and checkpoint construction.
+    #[must_use]
+    pub fn actor(&self, rider_player_id: PlayerId) -> Option<&ActorGameplayKernel> {
+        self.actors.get(&rider_player_id).map(|row| &row.actor)
+    }
+
+    /// Horse combat entity owned by one roster actor.
+    #[must_use]
+    pub fn horse_entity_id(&self, rider_player_id: PlayerId) -> Option<EntityId> {
+        self.actors
+            .get(&rider_player_id)
+            .map(|row| row.horse_entity_id)
+    }
+
+    /// Routes one authority-epoch damage command by horse target. Rejections
+    /// are mutation-free because the composed actor applies fatal edges
+    /// transactionally.
+    pub fn apply_horse_damage(
+        &mut self,
+        horse_entity_id: EntityId,
+        command: HorseDamageCommand,
+    ) -> Result<Option<M3AuthorityHorseDamage>, M3AuthorityError> {
+        if command.id.authority_epoch != self.authority_epoch {
+            return Err(M3AuthorityError::AuthorityEpochMismatch);
+        }
+        let rider_player_id = *self
+            .horse_owners
+            .get(&horse_entity_id)
+            .ok_or(M3AuthorityError::UnknownHorseTarget)?;
+        let row = self
+            .actors
+            .get_mut(&rider_player_id)
+            .expect("horse owner map must reference a registered actor");
+        Ok(row
+            .actor
+            .apply_horse_damage(command)
+            .map(|effects| M3AuthorityHorseDamage {
+                rider_player_id,
+                horse_entity_id,
+                effects,
+            }))
+    }
+
+    /// Applies a replay-safe recall credit to its exact roster actor.
+    pub fn apply_recall_credit(
+        &mut self,
+        rider_player_id: PlayerId,
+        command: RecallCreditCommand,
+    ) -> Result<bool, M3AuthorityError> {
+        if command.id.authority_epoch != self.authority_epoch {
+            return Err(M3AuthorityError::AuthorityEpochMismatch);
+        }
+        let row = self
+            .actors
+            .get_mut(&rider_player_id)
+            .ok_or(M3AuthorityError::UnknownActor)?;
+        Ok(row.actor.apply_recall_credit(command))
+    }
+
+    /// Advances exactly one roster actor on the shared authority tick.
+    pub fn advance_actor(
+        &mut self,
+        rider_player_id: PlayerId,
+        input: ActorM3TickInput,
+    ) -> Result<ActorM3TickOutput, M3AuthorityError> {
+        let row = self
+            .actors
+            .get_mut(&rider_player_id)
+            .ok_or(M3AuthorityError::UnknownActor)?;
+        row.actor.advance_tick(input).map_err(Into::into)
+    }
+
+    /// Acknowledges exact delivery of one pending fatal effect.
+    pub fn acknowledge_horse_loss_effects(
+        &mut self,
+        rider_player_id: PlayerId,
+        id: HorseDamageId,
+    ) -> Result<bool, M3AuthorityError> {
+        let row = self
+            .actors
+            .get_mut(&rider_player_id)
+            .ok_or(M3AuthorityError::UnknownActor)?;
+        Ok(row.actor.acknowledge_horse_loss_effects(id))
+    }
+
+    /// Captures every actor in canonical roster order.
+    #[must_use]
+    pub fn checkpoint(&self) -> M3AuthorityCheckpointV2 {
+        M3AuthorityCheckpointV2 {
+            wire_version: M3_WIRE_VERSION,
+            source_authority_epoch: self.authority_epoch,
+            actors: self
+                .actors
+                .iter()
+                .map(|(rider_player_id, row)| M3AuthorityActorCheckpoint {
+                    rider_player_id: *rider_player_id,
+                    horse_entity_id: row.horse_entity_id,
+                    actor: row.actor.checkpoint(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Restores a validated checkpoint for the exact next authority epoch.
+    pub fn restore_checkpoint(
+        checkpoint: M3AuthorityCheckpointV2,
+        next_authority_epoch: u64,
+    ) -> Result<Self, M3AuthorityCheckpointError> {
+        Self::validate_checkpoint(&checkpoint)?;
+        if checkpoint.source_authority_epoch.checked_add(1) != Some(next_authority_epoch) {
+            return Err(M3AuthorityCheckpointError::AuthorityEpochMismatch);
+        }
+        let mut bank = Self::new(next_authority_epoch);
+        for row in checkpoint.actors {
+            let actor = ActorGameplayKernel::restore_checkpoint(row.actor)
+                .map_err(|_| M3AuthorityCheckpointError::InvalidState)?;
+            bank.horse_owners
+                .insert(row.horse_entity_id, row.rider_player_id);
+            bank.actors.insert(
+                row.rider_player_id,
+                M3AuthorityActor {
+                    horse_entity_id: row.horse_entity_id,
+                    actor,
+                },
+            );
+        }
+        Ok(bank)
+    }
+
+    fn validate_checkpoint(
+        checkpoint: &M3AuthorityCheckpointV2,
+    ) -> Result<(), M3AuthorityCheckpointError> {
+        if checkpoint.wire_version != M3_WIRE_VERSION {
+            return Err(M3AuthorityCheckpointError::WireVersionMismatch);
+        }
+        if checkpoint.actors.len() > MAX_M3_AUTHORITY_ACTORS {
+            return Err(M3AuthorityCheckpointError::InvalidState);
+        }
+        let mut previous_player = None;
+        let mut horse_entities = BTreeSet::new();
+        for row in &checkpoint.actors {
+            if previous_player.is_some_and(|previous| row.rider_player_id <= previous)
+                || !horse_entities.insert(row.horse_entity_id)
+                || ActorGameplayKernel::restore_checkpoint(row.actor.clone()).is_err()
+            {
+                return Err(M3AuthorityCheckpointError::InvalidState);
+            }
+            previous_player = Some(row.rider_player_id);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn forward() -> QuantizedDirection {
         QuantizedDirection::new(0, 0, -DIRECTION_UNITS)
+    }
+
+    fn player(suffix: u8) -> PlayerId {
+        let mut bytes = [0_u8; 16];
+        bytes[6] = 0x40;
+        bytes[8] = 0x80;
+        bytes[15] = suffix;
+        PlayerId::from_bytes(bytes).unwrap()
     }
 
     fn actor_input(tick: u64, interact_pressed: bool) -> ActorM3TickInput {
@@ -1473,6 +1800,19 @@ mod tests {
                 sequence,
             },
             kind,
+        }
+    }
+
+    fn horse_damage(epoch: u64, tick: u64, sequence: u64, amount: u16) -> HorseDamageCommand {
+        HorseDamageCommand {
+            id: HorseDamageId {
+                authority_epoch: epoch,
+                tick: SimulationTick::new(tick),
+                sequence,
+            },
+            amount,
+            horse_position: QuantizedOrigin::new(5_000, 0, 0),
+            damage_source_position: QuantizedOrigin::default(),
         }
     }
 
@@ -1591,6 +1931,110 @@ mod tests {
                 .unwrap()
                 .application
                 .spooked
+        );
+    }
+
+    #[test]
+    fn authority_bank_routes_horse_damage_to_one_actor_and_rejects_wrong_epoch() {
+        let mut bank = M3AuthorityBank::new(7);
+        assert!(bank.register_actor(player(1), EntityId(101), HorseVitalityClass::Courser));
+        assert!(bank.register_actor(player(2), EntityId(202), HorseVitalityClass::Warhorse));
+        assert!(!bank.register_actor(player(1), EntityId(303), HorseVitalityClass::Mustang));
+        assert!(!bank.register_actor(player(3), EntityId(202), HorseVitalityClass::Mustang));
+        bank.advance_actor(player(1), actor_input(1, false))
+            .unwrap();
+        bank.advance_actor(player(2), actor_input(1, false))
+            .unwrap();
+
+        let before = bank.clone();
+        assert_eq!(
+            bank.apply_horse_damage(EntityId(101), horse_damage(8, 1, 1, 200)),
+            Err(M3AuthorityError::AuthorityEpochMismatch)
+        );
+        assert_eq!(bank, before);
+        assert_eq!(
+            bank.apply_horse_damage(EntityId(999), horse_damage(7, 1, 1, 200)),
+            Err(M3AuthorityError::UnknownHorseTarget)
+        );
+        assert_eq!(bank, before);
+
+        let routed = bank
+            .apply_horse_damage(EntityId(101), horse_damage(7, 1, 1, 200))
+            .unwrap()
+            .unwrap();
+        assert_eq!(routed.rider_player_id, player(1));
+        assert_eq!(routed.horse_entity_id, EntityId(101));
+        assert!(routed.effects.application.spooked);
+        assert_eq!(
+            bank.actor(player(1)).unwrap().horse().state(),
+            HorseVitalityState::Bolting
+        );
+        assert_eq!(bank.actor(player(2)).unwrap().horse().health(), 320);
+        assert!(bank
+            .apply_horse_damage(EntityId(101), horse_damage(7, 1, 1, 200))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn authority_bank_checkpoint_is_canonical_bounded_and_epoch_migratable() {
+        let mut bank = M3AuthorityBank::new(7);
+        assert!(bank.register_actor(player(2), EntityId(202), HorseVitalityClass::Warhorse));
+        assert!(bank.register_actor(player(1), EntityId(101), HorseVitalityClass::Courser));
+        bank.advance_actor(player(1), actor_input(1, false))
+            .unwrap();
+        bank.advance_actor(player(2), actor_input(1, false))
+            .unwrap();
+        let fatal = horse_damage(7, 1, 4, 200);
+        bank.apply_horse_damage(EntityId(101), fatal)
+            .unwrap()
+            .unwrap();
+
+        let checkpoint = bank.checkpoint();
+        assert_eq!(checkpoint.actors.len(), 2);
+        assert_eq!(checkpoint.actors[0].rider_player_id, player(1));
+        assert_eq!(checkpoint.actors[1].rider_player_id, player(2));
+        assert_eq!(
+            M3AuthorityBank::restore_checkpoint(checkpoint.clone(), 7),
+            Err(M3AuthorityCheckpointError::AuthorityEpochMismatch)
+        );
+
+        let encoded = serde_json::to_vec(&checkpoint).unwrap();
+        let decoded: M3AuthorityCheckpointV2 = serde_json::from_slice(&encoded).unwrap();
+        let mut restored = M3AuthorityBank::restore_checkpoint(decoded, 8).unwrap();
+        assert_eq!(restored.authority_epoch(), 8);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(
+            restored
+                .actor(player(1))
+                .unwrap()
+                .pending_horse_loss_effects()
+                .unwrap()
+                .horse_bolted
+                .unwrap()
+                .id,
+            fatal.id
+        );
+        assert_eq!(
+            restored.apply_horse_damage(EntityId(202), horse_damage(7, 1, 5, 1)),
+            Err(M3AuthorityError::AuthorityEpochMismatch)
+        );
+        assert!(restored
+            .apply_horse_damage(EntityId(202), horse_damage(8, 1, 1, 1))
+            .unwrap()
+            .is_some());
+
+        let mut duplicate_horse = checkpoint.clone();
+        duplicate_horse.actors[1].horse_entity_id = EntityId(101);
+        assert_eq!(
+            M3AuthorityBank::restore_checkpoint(duplicate_horse, 8),
+            Err(M3AuthorityCheckpointError::InvalidState)
+        );
+        let mut noncanonical_order = checkpoint;
+        noncanonical_order.actors.swap(0, 1);
+        assert_eq!(
+            M3AuthorityBank::restore_checkpoint(noncanonical_order, 8),
+            Err(M3AuthorityCheckpointError::InvalidState)
         );
     }
 
