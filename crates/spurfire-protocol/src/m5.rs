@@ -70,7 +70,7 @@ impl BountyScoreCategory {
 }
 
 /// One authority score mutation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BountyAward {
     pub player_id: PlayerId,
     pub category: BountyScoreCategory,

@@ -1281,6 +1281,14 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut bounty = spurfire_protocol::BountyMatchKernel::new(
+            source_epoch,
+            0,
+            SimulationTick::new(0),
+            players.to_vec(),
+        )
+        .unwrap();
+        bounty.advance_tick(tick).unwrap();
         M3MatchCheckpointV2 {
             wire_version: M3_WIRE_VERSION,
             combat: MatchCheckpoint {
@@ -1319,6 +1327,7 @@ mod tests {
                 })
                 .collect(),
             next_horse_damage_sequence: 1,
+            bounty: bounty.checkpoint(),
         }
     }
 

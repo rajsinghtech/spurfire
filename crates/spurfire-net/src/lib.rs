@@ -10,11 +10,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    canonical_envelope_digest, canonical_manifest_digest, LobbyId, M3AuthorityCheckpointV2,
-    M3ReloadCheckpointV2, NodeKey, PlayerId, RiderStance, RosterHash, RosterManifest,
-    SessionBinding, SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotResult, SimulationTick, WeaponId, WireVersion, CURRENT_WIRE_VERSION, M3_TICK_RATE_HZ,
-    M3_WIRE_VERSION,
+    canonical_envelope_digest, canonical_manifest_digest, BountyMatchCheckpointV2, LobbyId,
+    M3AuthorityCheckpointV2, M3ReloadCheckpointV2, NodeKey, PlayerId, RiderStance, RosterHash,
+    RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey, SessionSignature,
+    ShotCommand, ShotResult, SimulationTick, WeaponId, WireVersion, CURRENT_WIRE_VERSION,
+    M3_TICK_RATE_HZ, M3_WIRE_VERSION,
 };
 use thiserror::Error;
 
@@ -142,6 +142,9 @@ pub struct M3MatchCheckpointV2 {
     /// Next authority-global horse damage receipt sequence.
     #[serde(rename = "n", alias = "next_horse_damage_sequence")]
     pub next_horse_damage_sequence: u64,
+    /// M5 match clock, score, assist, respawn, reveal, and objective state.
+    #[serde(rename = "b", alias = "bounty")]
+    pub bounty: BountyMatchCheckpointV2,
 }
 
 impl M3MatchCheckpointV2 {
@@ -158,6 +161,10 @@ impl M3MatchCheckpointV2 {
         if self.wire_version != M3_WIRE_VERSION
             || self.gameplay.wire_version() != M3_WIRE_VERSION
             || self.combat.source_epoch != self.gameplay.source_authority_epoch()
+            || self.combat.source_epoch != self.bounty.source_authority_epoch
+            || self.bounty.match_state().authority_epoch() != self.combat.source_epoch
+            || self.bounty.match_state().current_tick() != SimulationTick::new(self.combat.tick)
+            || !self.bounty.match_state().state_is_valid()
             || self.next_horse_damage_sequence == 0
             || !self.combat.is_bounded_and_canonical()
             || self.gameplay.actors().is_empty()
@@ -171,13 +178,20 @@ impl M3MatchCheckpointV2 {
         {
             return false;
         }
+        let bounty_players = self.bounty.match_state().players().collect::<Vec<_>>();
         self.combat
             .riders
             .iter()
-            .zip(self.gameplay.actors().iter().zip(&self.reloads))
-            .all(|(rider, (actor, reload))| {
+            .zip(
+                self.gameplay
+                    .actors()
+                    .iter()
+                    .zip(self.reloads.iter().zip(bounty_players)),
+            )
+            .all(|(rider, (actor, (reload, bounty)))| {
                 let weapon = WeaponId::try_from(i64::from(rider.weapon_id)).ok();
                 rider.rider_player_id == actor.rider_player_id
+                    && bounty.player_id == rider.rider_player_id
                     && reload.rider_player_id == rider.rider_player_id
                     && reload.current_tick == Some(SimulationTick::new(self.combat.tick))
                     && reload.reload.is_none_or(|state| {
@@ -1113,6 +1127,17 @@ mod tests {
                 })
                 .collect(),
             next_horse_damage_sequence: 4,
+            bounty: {
+                let mut bounty = spurfire_protocol::BountyMatchKernel::new(
+                    3,
+                    0,
+                    SimulationTick::new(0),
+                    vec![player(1), player(2)],
+                )
+                .unwrap();
+                bounty.advance_tick(tick).unwrap();
+                bounty.checkpoint()
+            },
         };
         assert!(checkpoint.is_bounded_and_canonical());
         let encoded = serde_json::to_vec(&checkpoint).unwrap();
@@ -1129,6 +1154,17 @@ mod tests {
         let mut wrong_tick = checkpoint.clone();
         wrong_tick.combat.tick = 11;
         assert!(!wrong_tick.is_bounded_and_canonical());
+        let mut wrong_bounty_tick = checkpoint.clone();
+        let mut stale_bounty = spurfire_protocol::BountyMatchKernel::new(
+            3,
+            0,
+            SimulationTick::new(0),
+            vec![player(1), player(2)],
+        )
+        .unwrap();
+        stale_bounty.advance_tick(SimulationTick::new(9)).unwrap();
+        wrong_bounty_tick.bounty = stale_bounty.checkpoint();
+        assert!(!wrong_bounty_tick.is_bounded_and_canonical());
         let mut wrong_reload = checkpoint.clone();
         wrong_reload.reloads[0].rider_player_id = player(2);
         assert!(!wrong_reload.is_bounded_and_canonical());

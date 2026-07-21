@@ -22,14 +22,15 @@ use spurfire_net::{
     AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, ActorM3Mode, ActorM3TickInput, CombatAuthority, CombatGait, DiveId,
-    EntityId, HorseVitalityClass, HorseVitalityState, LobbyId, LobbySessionProjection,
-    M3ActorStance, M3AuthorityBank, M3AuthorityShot, M3CombatAuthority, M3HorseTargetPose, NodeKey,
-    OnFootState, OnFootTickInput, PlayerId, QuantizedDirection, QuantizedOrigin, RecallState,
-    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
-    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
-    SimulationTick, SpurCreditKind, SpurSpendOutcome, TargetDefinition, TargetPoseSnapshot,
-    TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
+    canonical_keyreg_digest, ActorM3Mode, ActorM3TickInput, BountyMatchKernel, CombatAuthority,
+    CombatGait, DiveId, EntityId, HorseVitalityClass, HorseVitalityState, LobbyId,
+    LobbySessionProjection, M3ActorStance, M3AuthorityBank, M3AuthorityShot, M3CombatAuthority,
+    M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput, PlayerId, QuantizedDirection,
+    QuantizedOrigin, RecallState, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
+    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
+    ShotOutcome, ShotResult, SimulationTick, SpurCreditKind, SpurSpendOutcome, TargetDefinition,
+    TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS,
+    M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -431,6 +432,7 @@ pub struct PeerSession {
     authority_rider_history: BTreeMap<PlayerId, VecDeque<CombatRiderSnapshot>>,
     combat_receipts: BTreeSet<(u64, PlayerId, u64)>,
     m3_combat_authority: Option<M3CombatAuthority>,
+    m5_match_authority: Option<BountyMatchKernel>,
     lobby_client: LobbyClientState,
     creator_join_display: Option<String>,
     creator_join_lobby: Option<String>,
@@ -1040,6 +1042,14 @@ impl PeerSession {
         let Ok(mut authority) = M3CombatAuthority::new(60, 0, epoch) else {
             return false;
         };
+        let Ok(bounty) = BountyMatchKernel::new(
+            epoch,
+            0,
+            SimulationTick::new(0),
+            self.allowed_players.iter().copied().collect(),
+        ) else {
+            return false;
+        };
         for player in &self.allowed_players {
             let Some((horse_class, weapon_id)) = loadouts.get(player).copied() else {
                 return false;
@@ -1056,6 +1066,7 @@ impl PeerSession {
             }
         }
         self.m3_combat_authority = Some(authority);
+        self.m5_match_authority = Some(bounty);
         self.m3_loadouts = loadouts
             .into_iter()
             .map(|(player_id, (horse_class, weapon_id))| {
@@ -1078,6 +1089,74 @@ impl PeerSession {
     #[func]
     fn is_m3_wire_active(&self) -> bool {
         self.m3_wire_active
+    }
+
+    /// Advance the authority-owned M5 match clock once after all actor ticks.
+    #[func]
+    fn advance_m5_match(&mut self, tick: i64) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return result;
+        }
+        let Ok(tick) = u64::try_from(tick).map(SimulationTick::new) else {
+            return result;
+        };
+        let (Some(bounty), Some(combat)) = (
+            self.m5_match_authority.as_ref(),
+            self.m3_combat_authority.as_ref(),
+        ) else {
+            return result;
+        };
+        let mut bounty = bounty.clone();
+        let mut combat = combat.clone();
+        let Ok(output) = bounty.advance_tick(tick) else {
+            return result;
+        };
+        for player in &output.respawned_players {
+            if combat.respawn_rider(*player).is_err() {
+                return VarDictionary::new();
+            }
+        }
+        self.m5_match_authority = Some(bounty.clone());
+        self.m3_combat_authority = Some(combat);
+        result.set("advanced", true);
+        result.set(
+            "remaining_ticks",
+            i64::try_from(bounty.end_tick().as_u64().saturating_sub(tick.as_u64()))
+                .unwrap_or(i64::MAX),
+        );
+        result.set("match_ended", output.match_ended);
+        result.set(
+            "winner_player_id",
+            output
+                .winner
+                .map_or_else(String::new, |player| player.to_string()),
+        );
+        let mut respawned_players = PackedStringArray::new();
+        for player in output.respawned_players {
+            respawned_players.push(&GString::from(&player.to_string()));
+        }
+        result.set("respawned_players", &respawned_players);
+        if let Some(reveal) = bounty.active_reveal() {
+            result.set("most_wanted_player_id", reveal.player_id.to_string());
+            result.set(
+                "most_wanted_end_tick",
+                i64::try_from(reveal.end_tick.as_u64()).unwrap_or(i64::MAX),
+            );
+        }
+        if let Some(objective) = bounty.active_objective() {
+            result.set(
+                "objective_json",
+                serde_json::to_string(&objective).unwrap_or_default(),
+            );
+        }
+        result.set(
+            "scoreboard_json",
+            serde_json::to_string(&bounty.players().collect::<Vec<_>>()).unwrap_or_default(),
+        );
+        result
     }
 
     /// Build a bounded, sequenced heartbeat datagram for `send_packet`.
@@ -1965,9 +2044,17 @@ impl PeerSession {
         {
             return VarDictionary::new();
         }
-        let Some(authority) = self.m3_combat_authority.as_mut() else {
+        let (Some(authority), Some(bounty)) = (
+            self.m3_combat_authority.as_ref(),
+            self.m5_match_authority.as_ref(),
+        ) else {
             return VarDictionary::new();
         };
+        if bounty.current_tick() != authority_tick || bounty.finished() {
+            return VarDictionary::new();
+        }
+        let mut authority = authority.clone();
+        let mut bounty = bounty.clone();
         let shooter_snapshot = self
             .authority_rider_history
             .get(&command.shooter_peer_id)
@@ -1978,7 +2065,7 @@ impl PeerSession {
             .actor(command.shooter_peer_id)
             .map_or(0, |actor| actor.spur().meter());
         let Some(resolved) = resolve_m3_authority_shot(
-            authority,
+            &mut authority,
             &self.authority_rider_history,
             &command,
             authority_tick,
@@ -2005,6 +2092,65 @@ impl PeerSession {
                 .actor(player)
                 .is_some_and(|actor| actor.mode() != ActorM3Mode::Mounted)
         });
+        let hit_rider = resolved
+            .shot
+            .result
+            .target_id
+            .and_then(|target| authority.rider_owner(target));
+        let mut bounty_awards = Vec::new();
+        if resolved.shot.result.outcome == ShotOutcome::Hit {
+            if let Some(target) = hit_rider {
+                if bounty
+                    .record_damage(
+                        authority_tick,
+                        command.shooter_peer_id,
+                        target,
+                        resolved.shot.result.damage,
+                    )
+                    .is_err()
+                {
+                    return VarDictionary::new();
+                }
+            }
+            if shooter_stance == Some(RiderStance::Mounted) {
+                if let Some(distance) = resolved.shot.result.distance_mm {
+                    match bounty.record_mounted_long_hit(
+                        authority_tick,
+                        command.shooter_peer_id,
+                        distance,
+                    ) {
+                        Ok(Some(award)) => bounty_awards.push(award),
+                        Ok(None) => {}
+                        Err(_) => return VarDictionary::new(),
+                    }
+                }
+            }
+        }
+        if let Some(horse_damage) = resolved.horse_damage {
+            if horse_damage.effects.application.spooked {
+                let Ok(award) = bounty.record_horse_bolt(
+                    authority_tick,
+                    command.shooter_peer_id,
+                    horse_damage.rider_player_id,
+                ) else {
+                    return VarDictionary::new();
+                };
+                bounty_awards.push(award);
+            }
+        }
+        if let Some(target) = eliminated_rider {
+            let Ok(mut awards) = bounty.record_elimination(
+                authority_tick,
+                command.shooter_peer_id,
+                target,
+                shooter_stance == Some(RiderStance::SaddleDiveAirborne),
+            ) else {
+                return VarDictionary::new();
+            };
+            bounty_awards.append(&mut awards);
+        }
+        self.m3_combat_authority = Some(authority);
+        self.m5_match_authority = Some(bounty.clone());
         let mut result = VarDictionary::new();
         result.set(
             "result_json",
@@ -2017,6 +2163,14 @@ impl PeerSession {
         );
         result.set("spur_meter", i64::from(spur_after));
         result.set("shooter_charge_active", shooter_charge_active);
+        result.set(
+            "bounty_awards_json",
+            serde_json::to_string(&bounty_awards).unwrap_or_default(),
+        );
+        result.set(
+            "scoreboard_json",
+            serde_json::to_string(&bounty.players().collect::<Vec<_>>()).unwrap_or_default(),
+        );
         if let Some(snapshot) = shooter_snapshot {
             let origin = snapshot.muzzle_origin.to_meters();
             result.set(
@@ -2252,7 +2406,9 @@ impl PeerSession {
         let Some(next_epoch) = checkpoint.combat.source_epoch.checked_add(1) else {
             return packets;
         };
-        let Some(restored) = Self::restore_m3_checkpoint(&checkpoint, next_epoch) else {
+        let Some((restored, restored_bounty)) =
+            Self::restore_m3_checkpoint(&checkpoint, next_epoch)
+        else {
             return packets;
         };
         let Some(mut candidate_session) = self.m3_secure_session.clone() else {
@@ -2289,6 +2445,7 @@ impl PeerSession {
         self.authority_epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
         if authority == local {
             self.m3_combat_authority = Some(restored);
+            self.m5_match_authority = Some(restored_bounty);
         }
         self.advance_gameplay_epoch(epoch);
         packets
@@ -2667,10 +2824,11 @@ impl PeerSession {
         };
         let migrated = installed.is_some();
         if migrated {
-            let Some(authority) = prepared_authority else {
+            let Some((authority, bounty)) = prepared_authority else {
                 return Self::outcome_code(AcceptOutcome::InvalidCheckpoint);
             };
             self.m3_combat_authority = Some(authority);
+            self.m5_match_authority = Some(bounty);
         }
         self.authority_player_id = GString::from(&authority.to_string());
         self.authority_epoch = i64::try_from(authority_epoch).unwrap_or(i64::MAX);
@@ -3096,6 +3254,7 @@ impl PeerSession {
         self.authority_rider_history.clear();
         self.combat_receipts.clear();
         self.m3_combat_authority = None;
+        self.m5_match_authority = None;
     }
 
     fn make_packet(&mut self, tick: i64, payload: PeerPayload) -> PackedByteArray {
@@ -3187,12 +3346,14 @@ impl PeerSession {
 
     fn build_m3_checkpoint(&self, combat: MatchCheckpoint) -> Option<M3MatchCheckpointV2> {
         let authority = self.m3_combat_authority.as_ref()?;
+        let bounty = self.m5_match_authority.as_ref()?;
         let checkpoint = M3MatchCheckpointV2 {
             wire_version: M3_WIRE_VERSION,
             combat,
             gameplay: authority.actors().checkpoint(),
             reloads: authority.reload_checkpoints(),
             next_horse_damage_sequence: authority.next_horse_damage_sequence(),
+            bounty: bounty.checkpoint(),
         };
         checkpoint.is_bounded_and_canonical().then_some(checkpoint)
     }
@@ -3212,7 +3373,7 @@ impl PeerSession {
     fn restore_m3_checkpoint(
         checkpoint: &M3MatchCheckpointV2,
         authority_epoch: u64,
-    ) -> Option<M3CombatAuthority> {
+    ) -> Option<(M3CombatAuthority, BountyMatchKernel)> {
         if !checkpoint.is_bounded_and_canonical()
             || checkpoint.combat.source_epoch.checked_add(1) != Some(authority_epoch)
         {
@@ -3246,7 +3407,7 @@ impl PeerSession {
                 )
                 .ok()?;
         }
-        M3CombatAuthority::restore_components(
+        let combat = M3CombatAuthority::restore_components(
             combat,
             targets,
             actors,
@@ -3254,7 +3415,11 @@ impl PeerSession {
             checkpoint.reloads.clone(),
             checkpoint.next_horse_damage_sequence,
         )
-        .ok()
+        .ok()?;
+        let bounty =
+            BountyMatchKernel::restore_checkpoint(checkpoint.bounty.clone(), authority_epoch)
+                .ok()?;
+        Some((combat, bounty))
     }
 
     const fn outcome_code(outcome: AcceptOutcome) -> i64 {
@@ -3386,6 +3551,7 @@ impl INode for PeerSession {
             authority_rider_history: BTreeMap::new(),
             combat_receipts: BTreeSet::new(),
             m3_combat_authority: None,
+            m5_match_authority: None,
             lobby_client: LobbyClientState::default(),
             creator_join_display: None,
             creator_join_lobby: None,
@@ -3629,9 +3795,17 @@ mod tests {
             gameplay: authority.actors().checkpoint(),
             reloads: authority.reload_checkpoints(),
             next_horse_damage_sequence: authority.next_horse_damage_sequence(),
+            bounty: {
+                let mut bounty =
+                    BountyMatchKernel::new(1, 0, SimulationTick::new(0), players.to_vec()).unwrap();
+                bounty.advance_tick(tick).unwrap();
+                bounty.checkpoint()
+            },
         };
-        let restored = PeerSession::restore_m3_checkpoint(&checkpoint, 2).unwrap();
+        let (restored, restored_bounty) =
+            PeerSession::restore_m3_checkpoint(&checkpoint, 2).unwrap();
         assert_eq!(restored.actors().authority_epoch(), 2);
+        assert_eq!(restored_bounty.authority_epoch(), 2);
         for player in players {
             assert_eq!(
                 restored.actors().horse_entity_id(player),

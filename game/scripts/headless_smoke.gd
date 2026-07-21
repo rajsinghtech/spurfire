@@ -489,7 +489,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 		"make_m3_actor_snapshot", "make_m3_actor_loadout", "m3_checkpoint_json",
 		"make_m3_actor_snapshot_from_pose", "m3_actor_state_json",
 		"poll_m3_migration", "advance_m3_actor", "record_m3_horse_pose",
-		"resolve_m3_shot_command", "issue_m4_spur_credit",
+		"resolve_m3_shot_command", "issue_m4_spur_credit", "advance_m5_match",
 	]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks M3 multiplayer method %s" % method)
@@ -561,6 +561,9 @@ func _check_peer_session(failures: Array[String]) -> void:
 		) as Dictionary
 		if not bool(actor_tick.get("advanced", false)):
 			failures.append("PeerSession did not advance its private composed M3 actor")
+		var match_tick := peer_session.call("advance_m5_match", 10) as Dictionary
+		if not bool(match_tick.get("advanced", false)) or int(match_tick.get("remaining_ticks", 0)) != 53990:
+			failures.append("PeerSession did not advance its private M5 match authority")
 		var actor_state = JSON.parse_string(str(peer_session.call(
 			"m3_actor_state_json", "00000000-0000-4000-8000-000000000002"
 		)))

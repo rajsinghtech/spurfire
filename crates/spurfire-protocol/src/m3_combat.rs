@@ -413,6 +413,24 @@ impl M3CombatAuthority {
             .map_err(Into::into)
     }
 
+    /// Restores one eliminated rider to full health on the M5 respawn edge.
+    pub fn respawn_rider(
+        &mut self,
+        rider_player_id: PlayerId,
+    ) -> Result<(), M3CombatAuthorityError> {
+        let rider_entity = self
+            .rider_entities
+            .get(&rider_player_id)
+            .copied()
+            .ok_or(M3CombatAuthorityError::UnknownActorOrTarget)?;
+        let mut candidate = self.clone();
+        candidate
+            .targets
+            .synchronize_health(rider_entity, M3_RIDER_MAX_HEALTH)?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Records locked horse hit geometry for rewind. Hittability derives from
     /// authority vitality; callers cannot keep a spooked/despawned horse active.
     pub fn record_horse_pose(
@@ -675,6 +693,28 @@ mod tests {
             WeaponId::Longspur,
             TeamId(1),
         ));
+        assert_eq!(authority, before);
+    }
+
+    #[test]
+    fn m5_respawn_restores_only_the_rostered_rider_target() {
+        let mut authority = authority();
+        authority
+            .targets
+            .synchronize_health(EntityId(102), 0)
+            .unwrap();
+        authority.respawn_rider(player(2)).unwrap();
+        assert_eq!(
+            authority.targets.health(EntityId(102)),
+            Some(M3_RIDER_MAX_HEALTH)
+        );
+        assert_eq!(authority.targets.health(EntityId(202)), Some(320));
+
+        let before = authority.clone();
+        assert_eq!(
+            authority.respawn_rider(player(3)),
+            Err(M3CombatAuthorityError::UnknownActorOrTarget)
+        );
         assert_eq!(authority, before);
     }
 

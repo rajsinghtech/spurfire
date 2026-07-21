@@ -32,6 +32,7 @@ var _m3_horse_classes: Dictionary = {}
 var _m3_telemetry_file: FileAccess
 var _m3_telemetry_session := ""
 var _m3_telemetry_closed := false
+var _m5_state: Dictionary = {}
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -301,6 +302,9 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 			)
 			if not snapshot.is_empty():
 				_send_to_all(snapshot)
+	var match_tick := peer_session.advance_m5_match(tick) as Dictionary
+	if bool(match_tick.get("advanced", false)):
+		_m5_state = match_tick
 	_flush_m3_metrics(tick, false)
 
 func _update_authority_horse_presentation(
