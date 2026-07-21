@@ -32,12 +32,19 @@ The script requires the gitignored `.env` OAuth settings. It:
 4. Installs a disposable `tag:spurfire` allow policy.
 5. Mints five non-reusable, ephemeral, preauthorized 15-minute keys.
 6. Enrolls two independent embedded RustScale servers.
-7. Exchanges a bounded Spurfire Hello and rider-input frame in both directions over application UDP and reports the route class.
-8. Starts three additional peers as separate OS processes, establishes the mesh, and forcibly kills authority process A without a Leave packet.
-9. Verifies surviving processes B and C elect B at epoch 2, exchange the authority announcement and a new rider-input frame, and continue play.
+7. Exchanges bounded signed Spurfire traffic in both directions, reports the route class, and measures the median of nine application-path RTT probes; direct median RTT at or above 80 ms fails.
+8. Starts three additional peers as separate OS processes with a signed exact-endpoint wire-2 roster, establishes the mesh, and forcibly kills authority process A without a Leave packet.
+9. Verifies surviving processes B and C elect B after the two-second silence boundary, installs B's fragmented complete M3–M5 checkpoint on C, proves exact score/clock/objective continuity plus continued rider input, and requires kill-to-continuation below three seconds.
 10. Closes survivors and exactly deletes the child tailnet under an exit trap.
 
-On 2026-07-17, the complete probe printed `SPURFIRE_P2P_UDP_OK`, `SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true`, and `SPURFIRE_P2P_LIFECYCLE_OK`. The disposable child tailnet was deleted, as were earlier direct-UDP development tailnets. Those runs exposed RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as a local teardown warning only after traffic succeeds.
+On 2026-07-21, the complete Linux ARM64 probe used direct paths with a 3 ms application median,
+printed signed complete-state continuity with `failover_ms=2044`, and ended with
+`SPURFIRE_P2P_LIFECYCLE_OK`. A separate
+organization-tailnet listing confirmed exact absence of that child and every disposable child
+created during the correction runs. This is live protocol/lifecycle development evidence, not the
+private packaged-client artifact required by the terminal release gate. Earlier runs exposed
+RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as
+a local teardown warning only after traffic succeeds.
 
 ## Security boundaries
 

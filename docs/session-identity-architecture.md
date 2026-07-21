@@ -212,9 +212,10 @@ on epoch change.
   `just p2p-proof` runs separate loopback peers, rejects tampered signed traffic before state
   mutation, kills authority A, proves B/C agreement on B at epoch 2, rejects a signed
   non-authority snapshot, and accepts signed authority and gameplay traffic after migration.
-  live: `p2p_smoke.rs` runs signed traffic
-  inside `just p2p-live`; extending the RustScale `migration_smoke.rs` path to signed epoch-2
-  traffic remains a live-harness follow-up.
+  live: `p2p_smoke.rs` runs signed traffic inside `just p2p-live`; the RustScale
+  `migration_smoke.rs` path uses signed exact-endpoint wire 2, forcibly kills A, installs B's
+  fragmented complete M3–M5 checkpoint on C, and requires exact score/clock/objective continuity
+  plus continued input in under three seconds.
 - **Docs** — D12 (`docs/decisions.md`), security-boundaries rewrite in
   `docs/p2p-networking.md`, `docs/prototype-plan.md` join-flow wording.
 

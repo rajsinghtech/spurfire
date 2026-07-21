@@ -24,7 +24,9 @@ pub mod rustscale;
 pub mod v2;
 
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
-pub const HEARTBEAT_TIMEOUT_MS: u64 = 3_000;
+/// M6 authority silence threshold. The complete checkpoint handoff must still
+/// leave enough of the three-second recovery budget for state installation.
+pub const HEARTBEAT_TIMEOUT_MS: u64 = 2_000;
 pub const RECONNECT_GRACE_MS: u64 = 5_000;
 /// Maximum invited-friends roster represented by one M2 checkpoint.
 pub const MAX_CHECKPOINT_RIDERS: usize = 16;
@@ -1379,7 +1381,8 @@ mod tests {
         // Keep local and peer 3 alive while authority 1 expires.
         session.peers.get_mut(&player(2)).unwrap().last_seen_ms = 2_000;
         session.peers.get_mut(&player(3)).unwrap().last_seen_ms = 2_000;
-        assert_eq!(session.expire_and_migrate(3_100), Some((player(2), 2)));
+        assert_eq!(session.expire_and_migrate(1_999), None);
+        assert_eq!(session.expire_and_migrate(2_000), Some((player(2), 2)));
         let stale = Envelope {
             wire_version: CURRENT_WIRE_VERSION,
             lobby_id: lobby(),
@@ -1391,7 +1394,7 @@ mod tests {
             session: None,
         };
         assert_eq!(
-            session.accept(&stale, 3_101),
+            session.accept(&stale, 2_001),
             AcceptOutcome::StaleAuthorityEpoch
         );
     }

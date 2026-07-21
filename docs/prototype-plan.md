@@ -405,7 +405,10 @@ and a three-process authority-kill proof verify exact fragmented checkpoint inst
 score, clock, and objective continuity. A signed credential-free harness runs full virtual 15-minute
 6/8/12/16-player sessions with MTU enforcement, modeled loss/relay presentation, reconnect churn,
 epoch-2 failover, and bot-duel fairness. Credentialed packaged-client runs and human evidence are
-still outstanding.
+still outstanding. A live Linux ARM64 three-process RustScale run on 2026-07-21 killed A, installed
+the exact fragmented M3–M5 checkpoint on C, preserved score/clock/objective state, resumed in
+2,044 ms, measured a 3 ms direct application median over nine samples, deleted the child tailnet,
+and independently confirmed its absence. Packaged-client health-UI agreement remains unproven.
 
 **M6 source scope and current state:**
 
@@ -458,8 +461,8 @@ still outstanding.
 **Acceptance checklist:**
 - [ ] 8-player match completes end-to-end on a real tailnet (create -> play -> results -> teardown) driven from the game client, not scripts.
 - [ ] Median RTT < 80ms direct; lobby health UI matches measured matrix.
-- [ ] Kill the authority mid-match: play resumes < 3s, score/state intact (<= 1 keyframe interval of loss); extend `p2p-live` to assert score continuity.
-- [ ] Authority-vs-peer hit% gap < 5% (bot-duel fairness harness).
+- [x] Kill the authority mid-match: live signed `p2p-live` resumed in 2,044 ms with exact M3–M5 score/clock/objective continuity (2026-07-21).
+- [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
 - [ ] No movement desync > 200ms peak for any client over a 15-min soak.
 - [ ] Forced-DERP + packet-loss soak playable: TTK consistency holds, sway model unaffected.
 - [ ] 16-peer churn run (joins/leaves mid-lobby) without stuck state.

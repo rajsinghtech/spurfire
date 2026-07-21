@@ -213,19 +213,25 @@ just p2p-live
 The headless probe creates a disposable child tailnet and should print:
 
 ```text
-SPURFIRE_P2P_UDP_OK ... route_a_to_b=Direct|Derp|PeerRelay ...
-SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true
+SPURFIRE_P2P_UDP_OK ... route_a_to_b=Direct|Derp|PeerRelay ... samples=9 median_rtt_ms=<measured>
+SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true checkpoint=complete_m3_m5 score_continuity=true clock_continuity=true objective_continuity=true failover_ms=<measured-under-3000>
 SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 ```
 
-`Direct` is preferred but relay paths are valid when NAT or local policy prevents direct UDP. The migration marker proves three separate OS peer processes formed a mesh, authority A was forcibly terminated, B and C agreed on B at epoch 2, and a rider-input packet was accepted after migration.
+`Direct` is preferred but relay paths are valid when NAT or local policy prevents direct UDP. Nine
+signed request/reply samples measure application-path RTT; a direct-path median at or above 80 ms
+fails the probe. The
+migration marker proves three separate OS peer processes formed a signed wire-2 mesh, authority A
+was forcibly terminated, B and C agreed on B at epoch 2, C installed B's exact fragmented M3–M5
+checkpoint, score/clock/objective state continued, a rider-input packet was accepted, and the
+kill-to-continued-state interval remained below three seconds.
 
 The cleanup trap attempts to delete the tailnet on success, failure, interruption, or timeout. This development probe is **not Alpha lifecycle evidence**: its delete acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha lifecycle qualification even when UDP/migration markers appear.
 
-The RustScale probe proves real transport and process-loss behavior, while `just p2p-proof` is the
-credential-free strict-signature gate. The current RustScale migration executable still uses the
-legacy insecure envelope path; do not treat its lifecycle marker alone as signed-session
-qualification.
+The RustScale probe proves real signed transport, complete-state process-loss recovery, and the
+provider deletion acknowledgement, while `just p2p-proof` is the credential-free deterministic
+gate. The lifecycle marker alone still does not prove the private-live validator's two stable-ID
+absence observations, vault erasure, packaged game-client flow, or human qualification.
 
 ## 9. Final secret and repository checks
 

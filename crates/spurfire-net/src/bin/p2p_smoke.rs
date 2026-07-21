@@ -1,4 +1,4 @@
-use std::{env, fs, net::SocketAddr};
+use std::{env, fs, net::SocketAddr, time::Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
 use spurfire_net::{rustscale::RustScalePeer, PeerPayload, SecureSession, SessionState};
@@ -156,14 +156,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("peer A rejected peer B gameplay frame".into());
     }
 
+    let mut rtt_ms = Vec::with_capacity(9);
+    for sample in 0_u64..9 {
+        let nonce = 0x50_32_50_52_4f_42_45_00 | sample;
+        let probe = session_a.envelope(
+            3 + sample * 2,
+            PeerPayload::Probe {
+                nonce,
+                reply: false,
+            },
+            &signing_a,
+        )?;
+        let started = Instant::now();
+        a.send(&probe, destination_b).await?;
+        let (request, request_source) = b.recv(Duration::from_secs(5)).await?;
+        if !matches!(
+            &request.payload,
+            PeerPayload::Probe {
+                nonce: received_nonce,
+                reply: false,
+            } if *received_nonce == nonce
+        ) || session_b.accept_with_source(
+            &request,
+            request_source,
+            b.node_key_for(request_source.ip()),
+            3 + sample * 2,
+        ) != spurfire_net::AcceptOutcome::Accepted
+        {
+            return Err("peer B rejected signed RTT probe".into());
+        }
+        let response = session_b.envelope(
+            4 + sample * 2,
+            PeerPayload::Probe { nonce, reply: true },
+            &signing_b,
+        )?;
+        b.send(&response, request_source).await?;
+        let (reply, reply_source) = a.recv(Duration::from_secs(5)).await?;
+        if !matches!(
+            &reply.payload,
+            PeerPayload::Probe {
+                nonce: received_nonce,
+                reply: true,
+            } if *received_nonce == nonce
+        ) || session_a.accept_with_source(
+            &reply,
+            reply_source,
+            a.node_key_for(reply_source.ip()),
+            4 + sample * 2,
+        ) != spurfire_net::AcceptOutcome::Accepted
+        {
+            return Err("peer A rejected signed RTT reply".into());
+        }
+        let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        rtt_ms.push(micros.saturating_add(999) / 1_000);
+    }
+    rtt_ms.sort_unstable();
+    let median_rtt_ms = rtt_ms[rtt_ms.len() / 2];
+    let route_a_to_b = a
+        .route_to(b.tailnet_ip())
+        .unwrap_or_else(|| "unknown".into());
+    let route_b_to_a = b
+        .route_to(a.tailnet_ip())
+        .unwrap_or_else(|| "unknown".into());
+    if route_a_to_b == "Direct" && route_b_to_a == "Direct" && median_rtt_ms >= 80 {
+        return Err(
+            format!("direct application median RTT exceeded 80ms: {median_rtt_ms}ms").into(),
+        );
+    }
+
     println!(
-        "SPURFIRE_P2P_UDP_OK a={} b={} route_a_to_b={} route_b_to_a={}",
+        "SPURFIRE_P2P_UDP_OK a={} b={} route_a_to_b={} route_b_to_a={} samples=9 median_rtt_ms={median_rtt_ms}",
         a.tailnet_ip(),
         b.tailnet_ip(),
-        a.route_to(b.tailnet_ip())
-            .unwrap_or_else(|| "unknown".into()),
-        b.route_to(a.tailnet_ip())
-            .unwrap_or_else(|| "unknown".into())
+        route_a_to_b,
+        route_b_to_a,
     );
     close_with_retry(&mut a).await?;
     close_with_retry(&mut b).await?;
