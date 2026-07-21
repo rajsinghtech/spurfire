@@ -20,6 +20,7 @@ use thiserror::Error;
 pub mod replication;
 #[cfg(feature = "rustscale")]
 pub mod rustscale;
+pub mod v2;
 
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 3_000;
@@ -126,12 +127,16 @@ impl MatchCheckpoint {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct M3MatchCheckpointV2 {
     /// Exact M3 schema boundary.
+    #[serde(rename = "v", alias = "wire_version")]
     pub wire_version: WireVersion,
     /// Existing movement/combat/ammo/receipt state.
+    #[serde(rename = "c", alias = "combat")]
     pub combat: MatchCheckpoint,
     /// Complete horse/on-foot/recall actor bank.
+    #[serde(rename = "g", alias = "gameplay")]
     pub gameplay: M3AuthorityCheckpointV2,
     /// Next authority-global horse damage receipt sequence.
+    #[serde(rename = "n", alias = "next_horse_damage_sequence")]
     pub next_horse_damage_sequence: u64,
 }
 
@@ -268,11 +273,18 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, CodecError> {
     if bytes.len() > MAX_DATAGRAM_BYTES {
         return Err(CodecError::TooLarge);
     }
-    let mut envelope: Envelope =
+    #[derive(Deserialize)]
+    struct VersionHeader {
+        #[serde(alias = "v")]
+        wire_version: WireVersion,
+    }
+    let header: VersionHeader =
         serde_json::from_slice(bytes).map_err(|error| CodecError::Malformed(error.to_string()))?;
-    if !CURRENT_WIRE_VERSION.is_compatible_with(envelope.wire_version) {
+    if !CURRENT_WIRE_VERSION.is_compatible_with(header.wire_version) {
         return Err(CodecError::IncompatibleVersion);
     }
+    let mut envelope: Envelope =
+        serde_json::from_slice(bytes).map_err(|error| CodecError::Malformed(error.to_string()))?;
     if envelope.wire_version.minor() < 2 {
         if let PeerPayload::RiderSnapshot {
             rider_player_id, ..
@@ -1717,6 +1729,19 @@ mod tests {
             decode(&serde_json::to_vec(&major).unwrap()),
             Err(CodecError::IncompatibleVersion)
         );
+        let mut unknown_v2_payload = serde_json::to_value(&major).unwrap();
+        unknown_v2_payload["payload"] = serde_json::json!({"type": "actor_snapshot"});
+        assert_eq!(
+            decode(&serde_json::to_vec(&unknown_v2_payload).unwrap()),
+            Err(CodecError::IncompatibleVersion)
+        );
+        let mut unknown_v1_payload =
+            serde_json::to_value(envelope(PeerPayload::Heartbeat)).unwrap();
+        unknown_v1_payload["payload"] = serde_json::json!({"type": "actor_snapshot"});
+        assert!(matches!(
+            decode(&serde_json::to_vec(&unknown_v1_payload).unwrap()),
+            Err(CodecError::Malformed(_))
+        ));
         let mut future_minor = envelope(PeerPayload::RiderInput {
             throttle_milli: 0,
             steer_milli: 0,

@@ -85,6 +85,48 @@ pub enum M3RiderStance {
     Rolling,
 }
 
+/// Unified wire-v2 actor stance. Unlike active wire 1.2, this namespace can
+/// represent the complete mounted, Saddle Dive, spook, and on-foot lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum M3ActorStance {
+    /// Grounded mounted locomotion.
+    Mounted = 0,
+    /// Ordinary mounted jump/fall.
+    MountedAirborne = 1,
+    /// M2 flying dismount.
+    SaddleDiveAirborne = 2,
+    /// Bad-landing prone lockout.
+    LandingProne = 3,
+    /// Half-speed landing recovery.
+    LandingRecovery = 4,
+    /// Fatal horse-spook stun.
+    SpookStunned = 5,
+    /// Ordinary on-foot movement.
+    OnFootStanding = 6,
+    /// On-foot stamina sprint.
+    OnFootSprinting = 7,
+    /// Held crouch.
+    OnFootCrouched = 8,
+    /// Direction-locked tactical roll.
+    OnFootRolling = 9,
+}
+
+impl M3ActorStance {
+    /// Stable canonical byte used by signed wire-v2 payloads.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Whether this stance still attaches the rider to a horse.
+    #[must_use]
+    pub const fn is_mounted(self) -> bool {
+        matches!(self, Self::Mounted | Self::MountedAirborne)
+    }
+}
+
 /// M3 horse row selected by the existing M0 archetype selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,10 +155,13 @@ impl HorseVitalityClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HorseDamageId {
     /// Authority epoch producing the damage.
+    #[serde(rename = "e", alias = "authority_epoch")]
     pub authority_epoch: u64,
     /// Original damage tick.
+    #[serde(rename = "t", alias = "tick")]
     pub tick: SimulationTick,
     /// Authority-unique sequence within the tick.
+    #[serde(rename = "s", alias = "sequence")]
     pub sequence: u64,
 }
 
@@ -149,18 +194,25 @@ pub enum HorseVitalityState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorseDamageApplication {
     /// Health before this command.
+    #[serde(rename = "b", alias = "health_before")]
     pub health_before: u16,
     /// Health after saturating subtraction.
+    #[serde(rename = "a", alias = "health_after")]
     pub health_after: u16,
     /// True only for the command that crossed to zero.
+    #[serde(rename = "s", alias = "spooked")]
     pub spooked: bool,
     /// Integer planar vector pointing away from the damage source.
+    #[serde(rename = "d", alias = "bolt_away_delta_mm")]
     pub bolt_away_delta_mm: [i32; 2],
     /// Locked lateral throw distance when `spooked` is true.
+    #[serde(rename = "x", alias = "rider_throw_distance_mm")]
     pub rider_throw_distance_mm: u32,
     /// Locked no-input stun duration when `spooked` is true.
+    #[serde(rename = "u", alias = "rider_stun_ticks")]
     pub rider_stun_ticks: u64,
     /// Spook throws never author fall damage.
+    #[serde(rename = "f", alias = "rider_fall_damage")]
     pub rider_fall_damage: bool,
 }
 
@@ -168,12 +220,16 @@ pub struct HorseDamageApplication {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorseBoltedEvent {
     /// Damage receipt that caused the event; this is its replay identity.
+    #[serde(rename = "i", alias = "id")]
     pub id: HorseDamageId,
     /// Horse row that was depleted.
+    #[serde(rename = "c", alias = "class")]
     pub class: HorseVitalityClass,
     /// Integer planar vector pointing away from the last damage source.
+    #[serde(rename = "d", alias = "bolt_away_delta_mm")]
     pub bolt_away_delta_mm: [i32; 2],
     /// Locked notification value. M3 logs it; M5 alone mutates score.
+    #[serde(rename = "p", alias = "notification_points")]
     pub notification_points: u16,
 }
 
@@ -181,22 +237,33 @@ pub struct HorseBoltedEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorseDamageEffects {
     /// Unique damage application.
+    #[serde(rename = "a", alias = "application")]
     pub application: HorseDamageApplication,
     /// Present exactly once on the fatal edge.
+    #[serde(rename = "b", alias = "horse_bolted")]
     pub horse_bolted: Option<HorseBoltedEvent>,
 }
 
 /// Deterministic, replay-safe horse vitality and bolt timer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorseVitalityKernel {
+    #[serde(rename = "c", alias = "class")]
     class: HorseVitalityClass,
+    #[serde(rename = "h", alias = "health")]
     health: u16,
+    #[serde(rename = "s", alias = "state")]
     state: HorseVitalityState,
+    #[serde(rename = "b", alias = "bolt_started_tick")]
     bolt_started_tick: Option<SimulationTick>,
+    #[serde(rename = "d", alias = "bolt_away_delta_mm")]
     bolt_away_delta_mm: [i32; 2],
+    #[serde(rename = "i", alias = "last_damage_id")]
     last_damage_id: Option<HorseDamageId>,
+    #[serde(rename = "t", alias = "current_tick")]
     current_tick: Option<SimulationTick>,
+    #[serde(rename = "l", alias = "last_damage_tick")]
     last_damage_tick: Option<SimulationTick>,
+    #[serde(rename = "r", alias = "regen_units")]
     regen_units: u32,
 }
 
@@ -454,15 +521,25 @@ pub struct OnFootTickOutput {
 /// Pure on-foot stance, stamina, roll, and input-buffer state machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnFootKernel {
+    #[serde(rename = "t", alias = "current_tick")]
     current_tick: Option<SimulationTick>,
+    #[serde(rename = "s", alias = "state")]
     state: OnFootState,
+    #[serde(rename = "a", alias = "stamina_units")]
     stamina_units: u32,
+    #[serde(rename = "p", alias = "previous_crouch_level")]
     previous_crouch_level: bool,
+    #[serde(rename = "b", alias = "buffered_roll_until")]
     buffered_roll_until: Option<SimulationTick>,
+    #[serde(rename = "r", alias = "roll_started_tick")]
     roll_started_tick: Option<SimulationTick>,
+    #[serde(rename = "d", alias = "roll_direction")]
     roll_direction: QuantizedDirection,
+    #[serde(rename = "c", alias = "roll_cooldown_until")]
     roll_cooldown_until: SimulationTick,
+    #[serde(rename = "e", alias = "roll_exit_tick")]
     roll_exit_tick: Option<SimulationTick>,
+    #[serde(rename = "u", alias = "spook_stun_until")]
     spook_stun_until: Option<SimulationTick>,
 }
 
@@ -683,10 +760,13 @@ fn roll_exit_sway(elapsed_ticks: u64) -> u16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RecallCreditId {
     /// Authority epoch producing the credit.
+    #[serde(rename = "e", alias = "authority_epoch")]
     pub authority_epoch: u64,
     /// Original gameplay tick.
+    #[serde(rename = "t", alias = "tick")]
     pub tick: SimulationTick,
     /// Authority-unique sequence within the tick.
+    #[serde(rename = "s", alias = "sequence")]
     pub sequence: u64,
 }
 
@@ -748,28 +828,49 @@ pub struct RecallTickOutput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemountTelemetryRow {
     /// Fatal spook tick; acceptance timing includes the three-second bolt.
+    #[serde(rename = "l", alias = "horse_lost_tick")]
     pub horse_lost_tick: SimulationTick,
     /// Successful remount tick, if observed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "r",
+        alias = "remount_tick",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub remount_tick: Option<SimulationTick>,
     /// Wall-clock-equivalent tick duration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "d",
+        alias = "lose_horse_to_remount_ticks",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lose_horse_to_remount_ticks: Option<u64>,
     /// Whether the running-mount branch succeeded.
+    #[serde(rename = "m", alias = "running_mount")]
     pub running_mount: bool,
 }
 
 /// Deterministic recall economy, return phases, and mount window.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecallKernel {
+    #[serde(rename = "s", alias = "state")]
     state: RecallState,
+    #[serde(rename = "c", alias = "current_tick")]
     current_tick: Option<SimulationTick>,
+    #[serde(rename = "h", alias = "horse_loss_tick")]
     horse_loss_tick: Option<SimulationTick>,
+    #[serde(rename = "l", alias = "lost_tick")]
     lost_tick: Option<SimulationTick>,
+    #[serde(rename = "p", alias = "phase_enter_tick")]
     phase_enter_tick: Option<SimulationTick>,
+    #[serde(rename = "e", alias = "earned_reduction_ticks")]
     earned_reduction_ticks: u64,
+    #[serde(rename = "d", alias = "damage_remainder")]
     damage_remainder: u32,
+    #[serde(rename = "i", alias = "last_credit_id")]
     last_credit_id: Option<RecallCreditId>,
+    #[serde(rename = "t", alias = "telemetry")]
     telemetry: Option<RemountTelemetryRow>,
 }
 
@@ -1107,11 +1208,17 @@ pub struct ActorM3TickOutput {
 /// spook stun, roll, recall cooldown, or return sequence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ActorGameplayKernel {
+    #[serde(rename = "t")]
     current_tick: Option<SimulationTick>,
+    #[serde(rename = "h")]
     horse: HorseVitalityKernel,
+    #[serde(rename = "o")]
     on_foot: OnFootKernel,
+    #[serde(rename = "r")]
     recall: RecallKernel,
+    #[serde(rename = "l")]
     horse_loss_tick: Option<SimulationTick>,
+    #[serde(rename = "p")]
     pending_horse_loss_effects: Option<HorseDamageEffects>,
 }
 
@@ -1120,24 +1227,34 @@ pub struct ActorGameplayKernel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ActorGameplayCheckpointV2 {
     /// Exact major-version boundary for the checkpoint canonical form.
+    #[serde(rename = "v")]
     wire_version: WireVersion,
     /// Complete actor authority state, including replay receipts and timers.
+    #[serde(rename = "a")]
     actor: ActorGameplayKernel,
 }
 
 #[derive(Deserialize)]
 struct RawActorGameplayCheckpointV2 {
+    #[serde(rename = "v", alias = "wire_version")]
     wire_version: WireVersion,
+    #[serde(rename = "a", alias = "actor")]
     actor: RawActorGameplayKernel,
 }
 
 #[derive(Deserialize)]
 struct RawActorGameplayKernel {
+    #[serde(rename = "t", alias = "current_tick")]
     current_tick: Option<SimulationTick>,
+    #[serde(rename = "h", alias = "horse")]
     horse: HorseVitalityKernel,
+    #[serde(rename = "o", alias = "on_foot")]
     on_foot: OnFootKernel,
+    #[serde(rename = "r", alias = "recall")]
     recall: RecallKernel,
+    #[serde(rename = "l", alias = "horse_loss_tick")]
     horse_loss_tick: Option<SimulationTick>,
+    #[serde(rename = "p", alias = "pending_horse_loss_effects")]
     pending_horse_loss_effects: Option<HorseDamageEffects>,
 }
 
@@ -1456,10 +1573,13 @@ impl ActorGameplayKernel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct M3AuthorityActorCheckpoint {
     /// Stable roster identity owning the horse/rider state.
+    #[serde(rename = "p", alias = "rider_player_id")]
     pub rider_player_id: PlayerId,
     /// Stable combat-target identity for this rider's horse.
+    #[serde(rename = "h", alias = "horse_entity_id")]
     pub horse_entity_id: EntityId,
     /// Validated complete actor state.
+    #[serde(rename = "a", alias = "actor")]
     pub actor: ActorGameplayCheckpointV2,
 }
 
@@ -1467,10 +1587,13 @@ pub struct M3AuthorityActorCheckpoint {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct M3AuthorityCheckpointV2 {
     /// Exact checkpoint schema boundary.
+    #[serde(rename = "v")]
     wire_version: WireVersion,
     /// Epoch that authored the state.
+    #[serde(rename = "e")]
     source_authority_epoch: u64,
     /// Rows sorted strictly by [`PlayerId`].
+    #[serde(rename = "a")]
     actors: Vec<M3AuthorityActorCheckpoint>,
 }
 
@@ -1496,8 +1619,11 @@ impl M3AuthorityCheckpointV2 {
 
 #[derive(Deserialize)]
 struct RawM3AuthorityCheckpointV2 {
+    #[serde(rename = "v", alias = "wire_version")]
     wire_version: WireVersion,
+    #[serde(rename = "e", alias = "source_authority_epoch")]
     source_authority_epoch: u64,
+    #[serde(rename = "a", alias = "actors")]
     actors: Vec<M3AuthorityActorCheckpoint>,
 }
 

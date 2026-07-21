@@ -3563,6 +3563,7 @@ dependencies = [
 name = "spurfire-net"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "rustscale-netstack",
  "rustscale-tsnet",

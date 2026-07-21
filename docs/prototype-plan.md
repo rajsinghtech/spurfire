@@ -188,11 +188,13 @@ rewindable horizontal horse-body capsule/head sphere and commits ammo, target he
 vitality, and fatal-spook effects transactionally without misreporting a horse bolt as a rider
 elimination. `M3MatchCheckpointV2` binds that gameplay bank to the existing sorted combat roster,
 ammo, health, command receipts, authority epoch, and canonical digest. M3 changes signed actor
-input/snapshot/checkpoint canonicalization, so the foundation declares wire 2.0 without changing
-the active 1.2 transport. M3 remains incomplete until the
+input/snapshot/checkpoint canonicalization, so a separate strict wire-2.0 candidate now defines
+bounded loadouts, mounted/on-foot input, complete actor/horse snapshots, hash-bound MTU-safe
+migration fragments, and fixed-layout signing bytes without changing the active 1.2 transport. M3
+remains incomplete until the
 paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
-scene adapter, remote horse presentation, wire-v2 replication, and playtest instrumentation consume
-this state end to end.
+scene adapter, remote horse presentation, atomic `PeerSession` wire-v2 activation, and playtest
+instrumentation consume this state end to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

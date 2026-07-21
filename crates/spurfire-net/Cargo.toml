@@ -11,6 +11,7 @@ default = []
 rustscale = ["dep:rustscale-tsnet", "dep:rustscale-netstack", "dep:tempfile"]
 
 [dependencies]
+base64 = "0.22"
 ed25519-dalek = "2"
 spurfire-protocol = { path = "../spurfire-protocol" }
 serde.workspace = true
