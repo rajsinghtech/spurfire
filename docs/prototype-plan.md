@@ -469,12 +469,16 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
 - [x] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
   eight-Godot run delivered all 18,000 snapshots per follower but failed at 225–334 ms during
   RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. RustScale
-  PR #101 then passed the six-minute refresh-boundary regression at 145 ms peak snapshot gap and
-  1 ms peak presentation desync across eight Godot clients. Its exact candidate subsequently passed
-  the full 900,000 ms run across all eight clients and 56 directed routes at 153 ms peak snapshot
-  gap and 2 ms peak presentation desync, followed by exact cleanup and independent absence proof.
-  Track [RustScale #100](https://github.com/rajsinghtech/rustscale/issues/100) through reviewed pin
-  promotion. This checkbox is practice-wire transport/presentation evidence, not horse-physics or
+  PR #101's fix was isolated onto v0.1.4 as PR #103 revision
+  `ad92ab56474ac37adff5c48da1ae8eaaa50efb43` after the broader candidate exposed the Windows Godot
+  startup regression tracked by [RustScale #102](https://github.com/rajsinghtech/rustscale/issues/102).
+  The exact backport passed the six-minute refresh-boundary regression and full 900,000 ms run across
+  all eight clients and 56 directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation
+  desync. The exact final child was deleted and absent afterward, but an older inert provider record
+  remains, so the separate leaked-state checkbox stays open. Track
+  merged RustScale PR #101 through a compatible release, while keeping
+  [RustScale #102](https://github.com/rajsinghtech/rustscale/issues/102) as the main-consumption
+  blocker. This checkbox is practice-wire transport/presentation evidence, not horse-physics or
   human-play qualification.
 - [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 23 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
 - [x] 16-peer live signed churn: 240-direction mesh, four leaves/re-enrollments, roster revision 2, replacement input, and 240-direction remesh (2026-07-21).

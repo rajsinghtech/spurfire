@@ -2,8 +2,10 @@
 
 Branch `agent/alpha-completion`. The session-identity implementation was validated against released
 RustScale v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; the current Alpha
-validation branch temporarily pins PR #101 candidate revision
-`eea0e4cd40d60a7c143ad7671439d66d2912df08` for refresh-soak qualification. Status:
+validation branch temporarily pins v0.1.4-compatible refresh backport PR #103 revision
+`ad92ab56474ac37adff5c48da1ae8eaaa50efb43`. The backport contains only PR #101's reviewed refresh
+fix while the broader post-v0.1.4 Windows Godot startup regression remains tracked in RustScale
+issue #102. Status:
 **implemented** (wire-1.2 signed-session
 foundation, extended by the live M3 wire-2.0 payload/session path) and validated in a secret-free isolated checkout on the alpha builder
 (formatting, warnings-denied Clippy, tests, dependency/secret guards). Real admission

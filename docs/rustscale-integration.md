@@ -5,6 +5,15 @@
 The verdict applies to that commit: RustScale is moving quickly, so every cited API and line should
 be rechecked when the dependency revision changes.
 
+**Current consumer validation (2026-07-21):** Spurfire pins v0.1.4-compatible backport revision
+`ad92ab56474ac37adff5c48da1ae8eaaa50efb43` from RustScale PR #103. It is released v0.1.4 plus only
+PR #101's randomized, STUN-only periodic endpoint refresh, now merged to RustScale main as
+`7139bf384045a7e398320ae853e751c61c8218b9`. The exact backport passed RustScale's netcheck/tsnet
+gates, Spurfire's hosted all-platform consumer matrix, and the full 15-minute live eight-Godot
+soak. This does not supersede the older API survey below. It avoids the broader
+post-v0.1.4 dependency state until the reproducible Windows Godot startup crash in RustScale issue
+#102 is fixed and requalified; it is not a permanent fork or a reason to float Spurfire on a branch.
+
 ## Executive verdict
 
 Rust callers can join a tailnet with a short-lived auth key **today**, use an in-process userspace

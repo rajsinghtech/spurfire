@@ -254,22 +254,26 @@ CPU on Linux. Neither setting relaxes the 200 ms threshold or the evidence check
 The 2026-07-21 default run failed with 225–334 ms gaps during fixed-phase five-minute RustScale
 endpoint refreshes. A two-worker-per-client follow-up reduced the boundary to 131–202 ms but still
 failed one follower at 202 ms. See
-[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The exact PR #101
-candidate revision `eea0e4cd40d60a7c143ad7671439d66d2912df08` then passed a 360,000 ms
-refresh-boundary run with all eight Godot clients and all 56 directed routes. The authority received
-at least 21,599 inputs from each follower; the peak snapshot gap was 145 ms and peak presentation
-desync was 1 ms. Exact cleanup deleted the child tailnet. Do not treat that shortened regression
-proof or the successful static matrix as completion of the 15-minute movement gate. The subsequent
-exact-candidate default run completed the gate:
+[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The reviewed fix from
+RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
+`ad92ab56474ac37adff5c48da1ae8eaaa50efb43` because the broader post-v0.1.4 candidate crashed
+Windows Godot startup ([RustScale issue #102](https://github.com/rajsinghtech/rustscale/issues/102)).
+The exact backport passed a 360,000 ms refresh-boundary run with all eight Godot clients and all 56
+directed routes. The authority received at least 21,599 inputs from each follower; peak snapshot gap
+was 131 ms and peak presentation desync was 1 ms. Exact cleanup deleted the child tailnet. Do not
+treat that shortened regression proof or the successful static matrix as completion of the
+15-minute movement gate. The subsequent exact-backport default run completed the gate:
 
 ```text
-SPURFIRE_GODOT_P2P_SOAK_OK peers=8 duration_ms=900000 min_sender_inputs=53999 peak_gap_ms=153 max_last_age_ms=48 min_motion_span_mm=39999 min_presentation_samples=130435 peak_presentation_desync_ms=2
+SPURFIRE_GODOT_P2P_SOAK_OK peers=8 duration_ms=900000 min_sender_inputs=53999 peak_gap_ms=131 max_last_age_ms=28 min_motion_span_mm=39999 min_presentation_samples=130435 peak_presentation_desync_ms=1
 ```
 
-All 56 directed routes were Direct with a 14 ms median. Exact cleanup deleted the disposable child,
-the builder retained no credential or run directory, and an independent organization listing found
-no `spurfire-godot-*` tailnet. This completes the practice-wire transport/presentation soak only;
-secure packaged lifecycle, horse physics, and human-play evidence remain separate gates.
+All 56 directed routes were Direct. Exact cleanup deleted the disposable final child
+`tailce2727.ts.net`, and the builder retained no credential or run directory. The final child was
+absent from the organization listing, but an older inert `spurfire-godot-*` organization record
+(`TrsgR9zy7s11CNTRL`) remains while operational deletion returns `404 tailnet not found`; therefore
+the broad leaked-state gate remains open. This completes the practice-wire transport/presentation
+soak only; secure packaged lifecycle, horse physics, and human-play evidence remain separate gates.
 
 ## 8. Automated UDP and authority-loss test
 
