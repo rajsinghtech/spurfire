@@ -318,6 +318,13 @@ jobs:
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then
               MSYS2_ARG_CONV_EXCL='*' wevtutil.exe qe Application /c:20 /rd:true /f:text || true
+              gdb --batch \
+                -ex 'set pagination off' \
+                -ex run \
+                -ex 'thread apply all backtrace' \
+                --args "$PWD/godot4.exe" \
+                --headless --display-driver headless --audio-driver Dummy \
+                --path "$PWD/game" --scene res://scenes/headless_smoke.tscn || true
               exit "$smoke_status"
             fi
           done
