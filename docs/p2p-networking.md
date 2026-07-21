@@ -10,7 +10,7 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 - `spurfire_net::rustscale::RustScalePeer` enrolls an ephemeral node with a one-use auth key, clears the key after `up()`, binds `Server::listen_packet`, and sends/receives through `UdpListener`.
 - `SnapshotBuffer` interpolates authoritative states two ticks behind, follows the shortest yaw arc, caps velocity extrapolation at fifteen ticks (250 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
 - Godot's native `PeerSession` node owns RustScale on a background Tokio runtime and moves packets to the main thread through signals. OAuth credentials remain control-plane-only; this class accepts only a narrow join auth key.
-- Godot's `NetworkRider` presents up to 600 buffered remote snapshots (at least ten seconds at 60 Hz) and exposes reconciliation results. The lobby bridge sends wire-2 actor snapshots at 20 Hz, sends stance changes immediately, and feeds accepted authority state into remote riders.
+- Godot's `NetworkRider` presents up to 600 buffered remote snapshots (at least ten seconds at 60 Hz) and exposes reconciliation results. The lobby bridge sends wire-2 actor state at 20 Hz, sends stance changes immediately, and feeds accepted authority state into remote riders. Full actor bases arrive at 2 Hz; intermediate packets contain signed field-level deltas. A missing or mismatched base fails closed until the next full packet.
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
 
@@ -57,8 +57,9 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   presentation ring, and native zeroizing HTTPS create/join handoff are implemented and covered by
   credential-free tests. The successor restores the complete latest signed checkpoint and
   announces its hash.
-- Add temporal compression for the 20 Hz actor stream. MatchState already sends bounded 2 Hz
-  keyframes; actor packets are currently compact short-key full snapshots.
+- The 20 Hz actor stream now uses temporal field-level compression against 2 Hz full bases;
+  credential-free tests prove smaller delta packets, missing-base rejection, reconstruction, and
+  recovery on the next base.
 - Extend the multi-process proof from the legacy M2 checkpoint to the complete wire-2 M5 state,
   then exercise 8–16 peers, forced DERP, route transitions, roaming, packet loss, and churn.
 - Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.

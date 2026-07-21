@@ -29,10 +29,17 @@ use crate::{
     MAX_DATAGRAM_BYTES,
 };
 
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Decoded checkpoint bytes carried by one migration datagram.
 pub const M3_CHECKPOINT_FRAGMENT_BYTES: usize = 384;
 /// Hard cap keeps reassembly at or below 72 KiB before canonical validation.
 pub const MAX_M3_CHECKPOINT_FRAGMENTS: usize = 192;
+/// Full actor snapshot cadence. Intermediate 20 Hz packets are signed deltas
+/// against this base, so loss recovers within one MatchState interval.
+pub const M3_ACTOR_KEYFRAME_TICKS: u64 = 30;
 
 /// Mounted jump edge.
 pub const M3_INPUT_JUMP_PRESSED: u16 = 1 << 0;
@@ -203,6 +210,182 @@ pub struct M3ActorSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub charge_end_tick: Option<SimulationTick>,
+}
+
+/// Field-level temporal delta against one full actor snapshot keyframe.
+///
+/// Values are absolute replacements rather than arithmetic differences. This
+/// keeps reconstruction overflow-free while omitting stable identity, health,
+/// stance, recall, and Charge fields from the 20 Hz stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M3ActorSnapshotDelta {
+    #[serde(rename = "i", alias = "rider_player_id")]
+    pub rider_player_id: PlayerId,
+    #[serde(rename = "t", alias = "base_tick")]
+    pub base_tick: u64,
+    #[serde(default, rename = "p", skip_serializing_if = "Option::is_none")]
+    pub rider_position_mm: Option<[i32; 3]>,
+    #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
+    pub rider_velocity_mmps: Option<[i32; 3]>,
+    #[serde(default, rename = "y", skip_serializing_if = "Option::is_none")]
+    pub rider_yaw_millidegrees: Option<i32>,
+    #[serde(default, rename = "s", skip_serializing_if = "Option::is_none")]
+    pub stance: Option<M3ActorStance>,
+    #[serde(default, rename = "h", skip_serializing_if = "Option::is_none")]
+    pub rider_health: Option<u16>,
+    #[serde(default, rename = "a", skip_serializing_if = "Option::is_none")]
+    pub stamina_ticks: Option<u32>,
+    #[serde(default, rename = "oi", skip_serializing_if = "Option::is_none")]
+    pub horse_entity_id: Option<EntityId>,
+    #[serde(default, rename = "oc", skip_serializing_if = "Option::is_none")]
+    pub horse_class: Option<HorseVitalityClass>,
+    #[serde(default, rename = "os", skip_serializing_if = "Option::is_none")]
+    pub horse_state: Option<HorseVitalityState>,
+    #[serde(default, rename = "op", skip_serializing_if = "Option::is_none")]
+    pub horse_position_mm: Option<[i32; 3]>,
+    #[serde(default, rename = "ov", skip_serializing_if = "Option::is_none")]
+    pub horse_velocity_mmps: Option<[i32; 3]>,
+    #[serde(default, rename = "oy", skip_serializing_if = "Option::is_none")]
+    pub horse_yaw_millidegrees: Option<i32>,
+    #[serde(default, rename = "oh", skip_serializing_if = "Option::is_none")]
+    pub horse_health: Option<u16>,
+    #[serde(default, rename = "od", skip_serializing_if = "Option::is_none")]
+    pub bolt_away_direction: Option<QuantizedDirection>,
+    #[serde(default, rename = "r", skip_serializing_if = "Option::is_none")]
+    pub recall_state: Option<RecallState>,
+    #[serde(default, rename = "qc", skip_serializing_if = "is_false")]
+    pub recall_ready_changed: bool,
+    #[serde(default, rename = "q", skip_serializing_if = "Option::is_none")]
+    pub recall_ready_tick: Option<SimulationTick>,
+    #[serde(default, rename = "u", skip_serializing_if = "Option::is_none")]
+    pub spur_meter: Option<u8>,
+    #[serde(default, rename = "bc", skip_serializing_if = "is_false")]
+    pub charge_started_changed: bool,
+    #[serde(default, rename = "b", skip_serializing_if = "Option::is_none")]
+    pub charge_started_tick: Option<SimulationTick>,
+    #[serde(default, rename = "ec", skip_serializing_if = "is_false")]
+    pub charge_end_changed: bool,
+    #[serde(default, rename = "e", skip_serializing_if = "Option::is_none")]
+    pub charge_end_tick: Option<SimulationTick>,
+}
+
+impl M3ActorSnapshotDelta {
+    #[must_use]
+    pub fn between(base_tick: u64, base: M3ActorSnapshot, current: M3ActorSnapshot) -> Self {
+        let changed = |same: bool| !same;
+        Self {
+            rider_player_id: current.rider_player_id,
+            base_tick,
+            rider_position_mm: changed(base.rider_position_mm == current.rider_position_mm)
+                .then_some(current.rider_position_mm),
+            rider_velocity_mmps: changed(base.rider_velocity_mmps == current.rider_velocity_mmps)
+                .then_some(current.rider_velocity_mmps),
+            rider_yaw_millidegrees: changed(
+                base.rider_yaw_millidegrees == current.rider_yaw_millidegrees,
+            )
+            .then_some(current.rider_yaw_millidegrees),
+            stance: changed(base.stance == current.stance).then_some(current.stance),
+            rider_health: changed(base.rider_health == current.rider_health)
+                .then_some(current.rider_health),
+            stamina_ticks: changed(base.stamina_ticks == current.stamina_ticks)
+                .then_some(current.stamina_ticks),
+            horse_entity_id: changed(base.horse.entity_id == current.horse.entity_id)
+                .then_some(current.horse.entity_id),
+            horse_class: changed(base.horse.class == current.horse.class)
+                .then_some(current.horse.class),
+            horse_state: changed(base.horse.state == current.horse.state)
+                .then_some(current.horse.state),
+            horse_position_mm: changed(base.horse.position_mm == current.horse.position_mm)
+                .then_some(current.horse.position_mm),
+            horse_velocity_mmps: changed(base.horse.velocity_mmps == current.horse.velocity_mmps)
+                .then_some(current.horse.velocity_mmps),
+            horse_yaw_millidegrees: changed(
+                base.horse.yaw_millidegrees == current.horse.yaw_millidegrees,
+            )
+            .then_some(current.horse.yaw_millidegrees),
+            horse_health: changed(base.horse.health == current.horse.health)
+                .then_some(current.horse.health),
+            bolt_away_direction: changed(
+                base.horse.bolt_away_direction == current.horse.bolt_away_direction,
+            )
+            .then_some(current.horse.bolt_away_direction),
+            recall_state: changed(base.recall_state == current.recall_state)
+                .then_some(current.recall_state),
+            recall_ready_changed: base.recall_ready_tick != current.recall_ready_tick,
+            recall_ready_tick: (base.recall_ready_tick != current.recall_ready_tick)
+                .then_some(current.recall_ready_tick)
+                .flatten(),
+            spur_meter: changed(base.spur_meter == current.spur_meter)
+                .then_some(current.spur_meter),
+            charge_started_changed: base.charge_started_tick != current.charge_started_tick,
+            charge_started_tick: (base.charge_started_tick != current.charge_started_tick)
+                .then_some(current.charge_started_tick)
+                .flatten(),
+            charge_end_changed: base.charge_end_tick != current.charge_end_tick,
+            charge_end_tick: (base.charge_end_tick != current.charge_end_tick)
+                .then_some(current.charge_end_tick)
+                .flatten(),
+        }
+    }
+
+    #[must_use]
+    pub fn apply(self, base: M3ActorSnapshot) -> Option<M3ActorSnapshot> {
+        if self.rider_player_id != base.rider_player_id
+            || (!self.recall_ready_changed && self.recall_ready_tick.is_some())
+            || (!self.charge_started_changed && self.charge_started_tick.is_some())
+            || (!self.charge_end_changed && self.charge_end_tick.is_some())
+        {
+            return None;
+        }
+        let mut snapshot = base;
+        snapshot.rider_position_mm = self.rider_position_mm.unwrap_or(snapshot.rider_position_mm);
+        snapshot.rider_velocity_mmps = self
+            .rider_velocity_mmps
+            .unwrap_or(snapshot.rider_velocity_mmps);
+        snapshot.rider_yaw_millidegrees = self
+            .rider_yaw_millidegrees
+            .unwrap_or(snapshot.rider_yaw_millidegrees);
+        snapshot.stance = self.stance.unwrap_or(snapshot.stance);
+        snapshot.rider_health = self.rider_health.unwrap_or(snapshot.rider_health);
+        snapshot.stamina_ticks = self.stamina_ticks.unwrap_or(snapshot.stamina_ticks);
+        snapshot.horse.entity_id = self.horse_entity_id.unwrap_or(snapshot.horse.entity_id);
+        snapshot.horse.class = self.horse_class.unwrap_or(snapshot.horse.class);
+        snapshot.horse.state = self.horse_state.unwrap_or(snapshot.horse.state);
+        snapshot.horse.position_mm = self.horse_position_mm.unwrap_or(snapshot.horse.position_mm);
+        snapshot.horse.velocity_mmps = self
+            .horse_velocity_mmps
+            .unwrap_or(snapshot.horse.velocity_mmps);
+        snapshot.horse.yaw_millidegrees = self
+            .horse_yaw_millidegrees
+            .unwrap_or(snapshot.horse.yaw_millidegrees);
+        snapshot.horse.health = self.horse_health.unwrap_or(snapshot.horse.health);
+        snapshot.horse.bolt_away_direction = self
+            .bolt_away_direction
+            .unwrap_or(snapshot.horse.bolt_away_direction);
+        snapshot.recall_state = self.recall_state.unwrap_or(snapshot.recall_state);
+        if self.recall_ready_changed {
+            snapshot.recall_ready_tick = self.recall_ready_tick;
+        }
+        snapshot.spur_meter = self.spur_meter.unwrap_or(snapshot.spur_meter);
+        if self.charge_started_changed {
+            snapshot.charge_started_tick = self.charge_started_tick;
+        }
+        if self.charge_end_changed {
+            snapshot.charge_end_tick = self.charge_end_tick;
+        }
+        snapshot.is_canonical().then_some(snapshot)
+    }
+
+    #[must_use]
+    fn is_canonical(self) -> bool {
+        (self.recall_ready_changed || self.recall_ready_tick.is_none())
+            && (self.charge_started_changed || self.charge_started_tick.is_none())
+            && (self.charge_end_changed || self.charge_end_tick.is_none())
+            && self.spur_meter.is_none_or(|meter| meter <= 100)
+            && self
+                .bolt_away_direction
+                .is_none_or(QuantizedDirection::is_normalized)
+    }
 }
 
 /// Base64-on-JSON fragment so large migration checkpoints remain MTU-safe.
@@ -625,6 +808,10 @@ pub enum M3PeerPayloadV2 {
         #[serde(rename = "s", alias = "snapshot")]
         snapshot: M3ActorSnapshot,
     },
+    ActorSnapshotDelta {
+        #[serde(rename = "d", alias = "delta")]
+        delta: M3ActorSnapshotDelta,
+    },
     ShotCommand {
         #[serde(rename = "c", alias = "command")]
         command: ShotCommand,
@@ -724,6 +911,9 @@ pub struct M3SecureSession {
     state: SessionState,
     pending_migration: Option<PendingMigration>,
     installed_checkpoint: Option<M3MatchCheckpointV2>,
+    sent_actor_keyframes: BTreeMap<PlayerId, (u64, M3ActorSnapshot)>,
+    received_actor_keyframes: BTreeMap<PlayerId, (u64, M3ActorSnapshot)>,
+    accepted_actor_snapshot: Option<(u64, M3ActorSnapshot)>,
 }
 
 impl M3SecureSession {
@@ -745,6 +935,9 @@ impl M3SecureSession {
             state,
             pending_migration: None,
             installed_checkpoint: None,
+            sent_actor_keyframes: BTreeMap::new(),
+            received_actor_keyframes: BTreeMap::new(),
+            accepted_actor_snapshot: None,
         })
     }
 
@@ -765,6 +958,15 @@ impl M3SecureSession {
 
     pub fn take_installed_checkpoint(&mut self) -> Option<M3MatchCheckpointV2> {
         self.installed_checkpoint.take()
+    }
+
+    /// Returns the reconstructed actor snapshot for the most recently accepted
+    /// full or delta packet when its sequence matches.
+    #[must_use]
+    pub fn accepted_actor_snapshot(&self, sequence: u64) -> Option<M3ActorSnapshot> {
+        self.accepted_actor_snapshot
+            .filter(|(accepted_sequence, _)| *accepted_sequence == sequence)
+            .map(|(_, snapshot)| snapshot)
     }
 
     /// Locks the server-audited match-start election into the peer-owned
@@ -844,12 +1046,41 @@ impl M3SecureSession {
         payload: M3PeerPayloadV2,
         signing_key: &SigningKey,
     ) -> Result<M3EnvelopeV2, SessionIdentityError> {
+        let payload = match payload {
+            M3PeerPayloadV2::ActorSnapshot { snapshot } if !snapshot.is_canonical() => {
+                return Err(SessionIdentityError::BadSignature);
+            }
+            M3PeerPayloadV2::ActorSnapshot { snapshot } => {
+                let base = self
+                    .sent_actor_keyframes
+                    .get(&snapshot.rider_player_id)
+                    .copied();
+                if let Some((base_tick, base_snapshot)) = base.filter(|(base_tick, _)| {
+                    tick > *base_tick && tick - *base_tick < M3_ACTOR_KEYFRAME_TICKS
+                }) {
+                    M3PeerPayloadV2::ActorSnapshotDelta {
+                        delta: M3ActorSnapshotDelta::between(base_tick, base_snapshot, snapshot),
+                    }
+                } else {
+                    M3PeerPayloadV2::ActorSnapshot { snapshot }
+                }
+            }
+            // Callers supply complete authority truth; only this session may
+            // derive a delta from its retained signed base.
+            M3PeerPayloadV2::ActorSnapshotDelta { .. } => {
+                return Err(SessionIdentityError::BadSignature);
+            }
+            payload => payload,
+        };
         validate_payload(&payload).map_err(|_| SessionIdentityError::BadSignature)?;
         let local = self.state.local_player;
         let authority = self.state.authority;
         let subject_is_valid = match &payload {
             M3PeerPayloadV2::ActorSnapshot { snapshot } => {
                 local == authority && self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::ActorSnapshotDelta { delta } => {
+                local == authority && self.state.peers.contains_key(&delta.rider_player_id)
             }
             M3PeerPayloadV2::MatchState { state } => {
                 local == authority
@@ -895,6 +1126,10 @@ impl M3SecureSession {
             session: None,
         };
         self.sign(&mut envelope, signing_key)?;
+        if let M3PeerPayloadV2::ActorSnapshot { snapshot } = &envelope.payload {
+            self.sent_actor_keyframes
+                .insert(snapshot.rider_player_id, (tick, *snapshot));
+        }
         self.state.next_sequence = self.state.next_sequence.saturating_add(1);
         Ok(envelope)
     }
@@ -935,7 +1170,13 @@ impl M3SecureSession {
 
     pub fn expire_and_migrate(&mut self, now_ms: u64) -> Option<(PlayerId, u64)> {
         self.pending_migration = None;
-        self.state.expire_and_migrate(now_ms)
+        let migration = self.state.expire_and_migrate(now_ms);
+        if migration.is_some() {
+            self.sent_actor_keyframes.clear();
+            self.received_actor_keyframes.clear();
+            self.accepted_actor_snapshot = None;
+        }
+        migration
     }
 
     pub fn accept_with_source(
@@ -1035,6 +1276,7 @@ impl M3SecureSession {
         if matches!(
             envelope.payload,
             M3PeerPayloadV2::ActorSnapshot { .. }
+                | M3PeerPayloadV2::ActorSnapshotDelta { .. }
                 | M3PeerPayloadV2::ShotResult { .. }
                 | M3PeerPayloadV2::MatchState { .. }
         ) && envelope.sender != self.state.authority
@@ -1052,6 +1294,10 @@ impl M3SecureSession {
             }
             M3PeerPayloadV2::ActorSnapshot { snapshot } => {
                 !self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::ActorSnapshotDelta { delta } => {
+                !self.state.peers.contains_key(&delta.rider_player_id)
+                    || delta.base_tick >= envelope.simulation_tick
             }
             M3PeerPayloadV2::MatchState { state } => {
                 state.authority_epoch != envelope.authority_epoch
@@ -1075,6 +1321,26 @@ impl M3SecureSession {
         if subject_is_invalid {
             return AcceptOutcome::InvalidPayloadSubject;
         }
+        let accepted_actor_snapshot = match &envelope.payload {
+            M3PeerPayloadV2::ActorSnapshot { snapshot } => Some(*snapshot),
+            M3PeerPayloadV2::ActorSnapshotDelta { delta } => {
+                let Some((base_tick, base)) = self
+                    .received_actor_keyframes
+                    .get(&delta.rider_player_id)
+                    .copied()
+                else {
+                    return AcceptOutcome::InvalidPayloadSubject;
+                };
+                if base_tick != delta.base_tick {
+                    return AcceptOutcome::InvalidPayloadSubject;
+                }
+                let Some(snapshot) = (*delta).apply(base) else {
+                    return AcceptOutcome::InvalidPayloadSubject;
+                };
+                Some(snapshot)
+            }
+            _ => None,
+        };
         if matches!(
             envelope.payload,
             M3PeerPayloadV2::ShotResult { ref result }
@@ -1118,7 +1384,19 @@ impl M3SecureSession {
             {
                 self.state.authority = authority;
                 self.state.authority_epoch = epoch;
+                self.sent_actor_keyframes.clear();
+                self.received_actor_keyframes.clear();
+                self.accepted_actor_snapshot = None;
             }
+        }
+        if let Some(snapshot) = accepted_actor_snapshot {
+            if matches!(envelope.payload, M3PeerPayloadV2::ActorSnapshot { .. }) {
+                self.received_actor_keyframes.insert(
+                    snapshot.rider_player_id,
+                    (envelope.simulation_tick, snapshot),
+                );
+            }
+            self.accepted_actor_snapshot = Some((envelope.sequence, snapshot));
         }
         AcceptOutcome::Accepted
     }
@@ -1241,6 +1519,9 @@ impl M3SecureSession {
         self.state.authority = authority;
         self.state.authority_epoch = epoch;
         self.installed_checkpoint = Some(checkpoint);
+        self.sent_actor_keyframes.clear();
+        self.received_actor_keyframes.clear();
+        self.accepted_actor_snapshot = None;
         AcceptOutcome::Accepted
     }
 }
@@ -1305,6 +1586,7 @@ fn validate_payload(payload: &M3PeerPayloadV2) -> Result<(), CodecError> {
         M3PeerPayloadV2::Hello { hostname } => !hostname.is_empty() && hostname.len() <= 255,
         M3PeerPayloadV2::ActorInput { input } => input.is_canonical(),
         M3PeerPayloadV2::ActorSnapshot { snapshot } => snapshot.is_canonical(),
+        M3PeerPayloadV2::ActorSnapshotDelta { delta } => delta.is_canonical(),
         M3PeerPayloadV2::MatchState { state } => state.is_canonical(),
         M3PeerPayloadV2::MigrationFragment {
             fragment_index,
@@ -1384,6 +1666,9 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
             direction(&mut out, snapshot.horse.bolt_away_direction);
             out.push(recall_state_code(snapshot.recall_state));
             option_tick(&mut out, snapshot.recall_ready_tick);
+            out.push(snapshot.spur_meter);
+            option_tick(&mut out, snapshot.charge_started_tick);
+            option_tick(&mut out, snapshot.charge_end_tick);
         }
         M3PeerPayloadV2::ShotCommand { command } => {
             out.push(6);
@@ -1421,6 +1706,33 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
             out.extend_from_slice(&fragment_index.to_be_bytes());
             out.extend_from_slice(&fragment_count.to_be_bytes());
             out.extend_from_slice(fragment.as_bytes());
+        }
+        M3PeerPayloadV2::ActorSnapshotDelta { delta } => {
+            out.push(12);
+            out.extend_from_slice(delta.rider_player_id.as_bytes());
+            out.extend_from_slice(&delta.base_tick.to_be_bytes());
+            option_i32_array(&mut out, delta.rider_position_mm);
+            option_i32_array(&mut out, delta.rider_velocity_mmps);
+            option_i32(&mut out, delta.rider_yaw_millidegrees);
+            option_u8(&mut out, delta.stance.map(M3ActorStance::as_u8));
+            option_u16(&mut out, delta.rider_health);
+            option_u32(&mut out, delta.stamina_ticks);
+            option_u64(&mut out, delta.horse_entity_id.map(|id| id.0));
+            option_u8(&mut out, delta.horse_class.map(horse_class_code));
+            option_u8(&mut out, delta.horse_state.map(horse_state_code));
+            option_i32_array(&mut out, delta.horse_position_mm);
+            option_i32_array(&mut out, delta.horse_velocity_mmps);
+            option_i32(&mut out, delta.horse_yaw_millidegrees);
+            option_u16(&mut out, delta.horse_health);
+            option_direction(&mut out, delta.bolt_away_direction);
+            option_u8(&mut out, delta.recall_state.map(recall_state_code));
+            out.push(u8::from(delta.recall_ready_changed));
+            option_tick(&mut out, delta.recall_ready_tick);
+            option_u8(&mut out, delta.spur_meter);
+            out.push(u8::from(delta.charge_started_changed));
+            option_tick(&mut out, delta.charge_started_tick);
+            out.push(u8::from(delta.charge_end_changed));
+            option_tick(&mut out, delta.charge_end_tick);
         }
         M3PeerPayloadV2::Leave => out.push(10),
         M3PeerPayloadV2::MatchState { state } => {
@@ -1629,6 +1941,55 @@ fn option_tick(out: &mut Vec<u8>, value: Option<SimulationTick>) {
         Some(tick) => {
             out.push(1);
             out.extend_from_slice(&tick.as_u64().to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn option_i32_array(out: &mut Vec<u8>, value: Option<[i32; 3]>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            i32_array(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
+fn option_direction(out: &mut Vec<u8>, value: Option<QuantizedDirection>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            direction(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
+macro_rules! option_number {
+    ($name:ident, $type:ty) => {
+        fn $name(out: &mut Vec<u8>, value: Option<$type>) {
+            match value {
+                Some(value) => {
+                    out.push(1);
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+                None => out.push(0),
+            }
+        }
+    };
+}
+
+option_number!(option_i32, i32);
+option_number!(option_u16, u16);
+option_number!(option_u32, u32);
+option_number!(option_u64, u64);
+
+fn option_u8(out: &mut Vec<u8>, value: Option<u8>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.push(value);
         }
         None => out.push(0),
     }
@@ -1937,6 +2298,98 @@ mod tests {
         assert_ne!(
             base,
             canonical_m3_payload_bytes(&M3PeerPayloadV2::ActorSnapshot { snapshot: changed })
+        );
+        let mut changed_spur = snapshot();
+        changed_spur.spur_meter = 1;
+        assert_ne!(
+            base,
+            canonical_m3_payload_bytes(&M3PeerPayloadV2::ActorSnapshot {
+                snapshot: changed_spur,
+            })
+        );
+    }
+
+    #[test]
+    fn actor_snapshots_use_recoverable_signed_deltas_between_keyframes() {
+        let mut sender = secure_session(player(1));
+        let mut receiver = secure_session(player(2));
+        let first_snapshot = snapshot();
+        let first = sender
+            .envelope(
+                1,
+                M3PeerPayloadV2::ActorSnapshot {
+                    snapshot: first_snapshot,
+                },
+                &signing_key(1),
+            )
+            .unwrap();
+        assert!(matches!(
+            first.payload,
+            M3PeerPayloadV2::ActorSnapshot { .. }
+        ));
+        assert_eq!(
+            receiver.accept_with_source(&first, source(1), None, 1),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            receiver.accepted_actor_snapshot(first.sequence),
+            Some(first_snapshot)
+        );
+
+        let mut moved = first_snapshot;
+        moved.rider_position_mm[0] += 750;
+        moved.rider_velocity_mmps[0] = 4_000;
+        moved.spur_meter = 25;
+        let delta = sender
+            .envelope(
+                4,
+                M3PeerPayloadV2::ActorSnapshot { snapshot: moved },
+                &signing_key(1),
+            )
+            .unwrap();
+        assert!(matches!(
+            delta.payload,
+            M3PeerPayloadV2::ActorSnapshotDelta { .. }
+        ));
+        let full_wire = encode_m3(&envelope(M3PeerPayloadV2::ActorSnapshot {
+            snapshot: moved,
+        }))
+        .unwrap();
+        let delta_wire = encode_m3(&delta).unwrap();
+        assert!(delta_wire.len() < full_wire.len());
+
+        let mut missing_base = secure_session(player(3));
+        assert_eq!(
+            missing_base.accept_with_source(&delta, source(1), None, 4),
+            AcceptOutcome::InvalidPayloadSubject
+        );
+        assert_eq!(
+            receiver.accept_with_source(&delta, source(1), None, 4),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            receiver.accepted_actor_snapshot(delta.sequence),
+            Some(moved)
+        );
+
+        let recovery = sender
+            .envelope(
+                31,
+                M3PeerPayloadV2::ActorSnapshot { snapshot: moved },
+                &signing_key(1),
+            )
+            .unwrap();
+        assert!(matches!(
+            recovery.payload,
+            M3PeerPayloadV2::ActorSnapshot { .. }
+        ));
+        assert_eq!(
+            missing_base.accept_with_source(&recovery, source(1), None, 31),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            missing_base.accepted_actor_snapshot(recovery.sequence),
+            Some(moved)
         );
     }
 

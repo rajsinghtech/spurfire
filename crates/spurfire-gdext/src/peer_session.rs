@@ -2900,6 +2900,21 @@ impl PeerSession {
                     serde_json::to_string(&snapshot).unwrap_or_default(),
                 );
             }
+            M3PeerPayloadV2::ActorSnapshotDelta { .. } => {
+                let Some(snapshot) = self
+                    .m3_secure_session
+                    .as_ref()
+                    .and_then(|session| session.accepted_actor_snapshot(envelope.sequence))
+                else {
+                    return VarDictionary::new();
+                };
+                result.set("type", "actor_snapshot");
+                result.set("rider_player_id", snapshot.rider_player_id.to_string());
+                result.set(
+                    "snapshot_json",
+                    serde_json::to_string(&snapshot).unwrap_or_default(),
+                );
+            }
             M3PeerPayloadV2::ShotCommand { command } => {
                 result.set("type", "shot_command");
                 result.set("shooter_player_id", command.shooter_peer_id.to_string());

@@ -396,12 +396,13 @@ live qualification remain** — the lobby locks and projects the exact match-sta
 survivors recompute the same rule after two seconds of authority silence, and the service validates
 the next-epoch claim without selecting it. Signed wire 2.0 carries M3–M5 authority state and a
 bounded hash-checked checkpoint; the new authority restores combat, Spur, match score/clock,
-objectives, receipts, and RNG state atomically. Actor snapshots broadcast at 20 Hz, MatchState
+objectives, receipts, and RNG state atomically. Actor snapshots broadcast as field-level deltas at
+20 Hz against recoverable 2 Hz full bases, while MatchState
 keyframes at 2 Hz, presentation retains 600 snapshots (at least ten seconds), and shot admission
 uses the locked 150 ms rewind cap over a 250 ms pose/stance history. Native zeroizing create/join
 handoff and the privacy-suppressed public stats endpoint are implemented. Credential-free tests
-prove source behavior; temporal snapshot-delta compression, 8–16-peer/soak harnesses,
-credentialed packaged-client runs, and human evidence are still outstanding.
+prove source behavior; 8–16-peer/soak harnesses, credentialed packaged-client runs, and human
+evidence are still outstanding.
 
 **M6 source scope and current state:**
 
@@ -415,8 +416,9 @@ credentialed packaged-client runs, and human evidence are still outstanding.
 2. **Complete-state handoff.** The signed checkpoint carries per-rider movement/health/ammo,
    input/shot receipts, M5 score and clock, Spur, objectives, and RNG counter and verifies the
    restored-state hash before epoch continuation. MatchState keyframes remain MTU-safe at eight
-   players and the presentation ring retains at least ten seconds. Temporal compression of the
-   20 Hz actor stream remains a source task before M6 can be called complete.
+   players and the presentation ring retains at least ten seconds. The 20 Hz actor stream sends
+   signed field-level deltas against 2 Hz full bases; a peer missing its base fails closed until the
+   next full packet.
 3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
    ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
    capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
