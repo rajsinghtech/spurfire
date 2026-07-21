@@ -144,6 +144,13 @@ for index in "${!NODES[@]}"; do
     env "${common_env[@]}" "$GODOT_BIN" --path game --resolution 620x430 --position "$x,$y" &
   fi
   PIDS+=("$!")
+  # Avoid phase-locking eight 60 Hz scene loops and their once-per-second
+  # probe bursts on a single qualification host. Real players run on separate
+  # machines; staggering preserves the network threshold without measuring an
+  # artificial same-frame scheduler stampede.
+  if [[ "$MODE" == "qualify" ]]; then
+    sleep 0.15
+  fi
 done
 
 wait_status=0
