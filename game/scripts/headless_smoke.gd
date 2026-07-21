@@ -143,9 +143,6 @@ func _ready() -> void:
 	print("SPURFIRE_DIAG_COURSE bridge_caps_checked")
 	_check_persisted_telemetry(course, failures)
 	print("SPURFIRE_DIAG_COURSE telemetry_checked")
-	course.queue_free()
-	await get_tree().process_frame
-	print("SPURFIRE_DIAG_COURSE freed")
 	_finish(failures)
 
 func _check_input_map(failures: Array[String]) -> void:
