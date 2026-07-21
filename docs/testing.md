@@ -239,9 +239,9 @@ the known qualification trajectory at least 30 times per second and fails above 
 planar presentation error. `SPURFIRE_P2P_SOAK_MS` may shorten development runs, but
 only the default 900,000 ms run is 15-minute evidence. This remains practice-wire transport and
 presentation evidence, not horse-physics, secure lobby lifecycle, or human-play qualification.
-The single-host soak dephases client enrollment so RustScale maintenance timers model independent
-player startup instead of phase-locking on the runner. `SPURFIRE_P2P_LAUNCH_STAGGER_SEC` may
-override that development setting; `SPURFIRE_P2P_PIN_CLIENTS=1` opts into one client/runtime per
+The single-host soak staggers client launch by 150 ms to dephase scene/probe bursts; the RustScale
+dependency independently randomizes periodic endpoint maintenance. `SPURFIRE_P2P_LAUNCH_STAGGER_SEC`
+may override the launch setting, and `SPURFIRE_P2P_PIN_CLIENTS=1` opts into one client/runtime per
 CPU on Linux. Neither setting relaxes the 200 ms threshold or the evidence checker's exact counts.
 
 The 2026-07-21 default run failed with 225–334 ms gaps during fixed-phase five-minute RustScale
