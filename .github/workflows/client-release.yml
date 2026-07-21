@@ -311,6 +311,17 @@ jobs:
           reg.exe add $key /v DumpFolder /t REG_EXPAND_SZ /d $dumpDir /f
           reg.exe add $key /v DumpType /t REG_DWORD /d 2 /f
 
+      - name: Install Microsoft ProcDump
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install procdump --yes --no-progress
+          $procDump = (Get-Command procdump64.exe -ErrorAction SilentlyContinue).Source
+          if ([string]::IsNullOrWhiteSpace($procDump)) {
+            $procDump = (Get-Command procdump.exe -ErrorAction Stop).Source
+          }
+          "PROCDUMP_BIN=$procDump" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Test, build, and export
         shell: bash
         run: |
@@ -327,7 +338,10 @@ jobs:
           for attempt in 1 2 3 4 5; do
             echo "SPURFIRE_DIAG_WINDOWS_ATTEMPT $attempt" | tee -a "$RUNNER_TEMP/godot-smoke.log"
             set +e
-            GODOT_BIN="$PWD/godot4.exe" scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            GODOT_BIN="$PWD/godot4.exe" \
+              GODOT_PROCDUMP_BIN="$PROCDUMP_BIN" \
+              GODOT_DUMP_DIR="$RUNNER_TEMP/godot-dumps" \
+              scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
             smoke_status="${PIPESTATUS[0]}"
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then

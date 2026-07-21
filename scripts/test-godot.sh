@@ -11,6 +11,8 @@ Environment:
   GODOT_TIMEOUT_SECONDS Per-command timeout, default 120
   GODOT_SMOKE_SCENE     Project-relative scene, default res://scenes/headless_smoke.tscn
   GODOT_SINGLE_THREADED_SCENE  Set to 1 to force scene-tree work onto the main thread
+  GODOT_PROCDUMP_BIN    Optional Windows ProcDump executable used to launch Godot
+  GODOT_DUMP_DIR        Required dump directory when GODOT_PROCDUMP_BIN is set
 EOF
 }
 
@@ -93,6 +95,16 @@ godot_runtime_args=()
 if [[ "${GODOT_SINGLE_THREADED_SCENE:-0}" == "1" ]]; then
   godot_runtime_args+=(--single-threaded-scene)
 fi
+godot_command=("$godot_bin")
+if [[ -n "${GODOT_PROCDUMP_BIN:-}" ]]; then
+  if [[ -z "${GODOT_DUMP_DIR:-}" ]]; then
+    echo "error: GODOT_DUMP_DIR is required with GODOT_PROCDUMP_BIN" >&2
+    exit 2
+  fi
+  godot_command=(
+    "$GODOT_PROCDUMP_BIN" -accepteula -ma -e -x "$GODOT_DUMP_DIR" "$godot_bin"
+  )
+fi
 
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: GODOT_TIMEOUT_SECONDS must be a positive integer" >&2
@@ -119,7 +131,7 @@ if [[ "$needs_import" == true ]]; then
   import_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-import.XXXXXX")"
   mv "$descriptor" "$disabled_descriptor"
   import_status=0
-  run_bounded "$timeout_seconds" "$godot_bin" \
+  run_bounded "$timeout_seconds" "${godot_command[@]}" \
     "${godot_runtime_args[@]}" \
     --headless \
     --display-driver headless \
@@ -139,7 +151,7 @@ if [[ "$needs_import" == true ]]; then
 fi
 
 printf 'Running %s headlessly (timeout %ss)...\n' "$smoke_scene" "$timeout_seconds"
-run_bounded "$timeout_seconds" "$godot_bin" \
+run_bounded "$timeout_seconds" "${godot_command[@]}" \
   "${godot_runtime_args[@]}" \
   --headless \
   --display-driver headless \
@@ -149,7 +161,7 @@ run_bounded "$timeout_seconds" "$godot_bin" \
 
 for extra_scene in res://ui/tests/polish_smoke.tscn res://combat/tests/combat_smoke.tscn res://lobby/tests/lobby_contract_test.tscn; do
   printf 'Running %s...\n' "$extra_scene"
-  run_bounded "$timeout_seconds" "$godot_bin" \
+  run_bounded "$timeout_seconds" "${godot_command[@]}" \
     "${godot_runtime_args[@]}" \
     --headless \
     --display-driver headless \
@@ -164,7 +176,7 @@ done
 runtime_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-runtime.XXXXXX")"
 trap 'rm -f "$runtime_log"' EXIT
 printf 'Running configured main scene for 30 frames...\n'
-run_bounded "$timeout_seconds" "$godot_bin" \
+run_bounded "$timeout_seconds" "${godot_command[@]}" \
   "${godot_runtime_args[@]}" \
   --headless \
   --display-driver headless \
