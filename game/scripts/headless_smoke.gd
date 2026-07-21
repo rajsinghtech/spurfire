@@ -57,6 +57,9 @@ func _ready() -> void:
 		_finish(failures)
 		return
 
+	print("SPURFIRE_DIAG_STAGE frontier_arena")
+	await _check_frontier_arena_contract(failures)
+	print("SPURFIRE_DIAG_COURSE frontier_checked")
 	print("SPURFIRE_DIAG_STAGE course_load")
 	var packed := load("res://scenes/graybox_course.tscn") as PackedScene
 	if packed == null:
@@ -66,8 +69,6 @@ func _ready() -> void:
 	print("SPURFIRE_DIAG_COURSE loaded")
 	var course := packed.instantiate()
 	print("SPURFIRE_DIAG_COURSE instantiated")
-	await _check_frontier_arena_contract(course, failures)
-	print("SPURFIRE_DIAG_COURSE frontier_checked")
 	add_child(course)
 	print("SPURFIRE_DIAG_COURSE added")
 	for path in REQUIRED_NODES:
@@ -232,7 +233,28 @@ func _check_capture_contract(course: Node, failures: Array[String]) -> void:
 	if not is_equal_approx(float(camera_rig.get("_world_yaw")), deg_to_rad(90.0)):
 		failures.append("camera forced recenter after player stopped aiming")
 
-func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> void:
+func _check_frontier_arena_contract(failures: Array[String]) -> void:
+	var fixture_paths := [
+		"FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31",
+		"JumpFence_0Rail", "BridgeDeck"
+	]
+	var graybox_packed := load("res://scenes/graybox_course.tscn") as PackedScene
+	if graybox_packed == null:
+		failures.append("graybox_course.tscn could not be loaded for frontier comparison")
+		return
+	var graybox := graybox_packed.instantiate()
+	add_child(graybox)
+	await get_tree().process_frame
+	var expected_transforms: Dictionary = {}
+	for fixture in fixture_paths:
+		var expected := graybox.get_node_or_null("TestCourse/" + fixture) as Node3D
+		if expected == null:
+			failures.append("graybox course missing frontier comparison fixture: %s" % fixture)
+		else:
+			expected_transforms[fixture] = expected.transform
+	graybox.queue_free()
+	await get_tree().process_frame
+
 	var packed := load("res://scenes/frontier_arena.tscn") as PackedScene
 	if packed == null:
 		failures.append("frontier_arena.tscn could not be loaded")
@@ -298,10 +320,9 @@ func _check_frontier_arena_contract(graybox: Node, failures: Array[String]) -> v
 		var fixture_mesh := arena.get_node("TestCourse/" + fixture).get_child(0) as MeshInstance3D
 		if fixture_mesh.material_override != null:
 			failures.append("frontier restyle erased authored fixture color: %s" % fixture)
-	for fixture in ["FlatStraight", "RoughStrip", "Ramp15", "Ramp25", "Landing30", "Landing31", "JumpFence_0Rail", "BridgeDeck"]:
-		var expected := graybox.get_node("TestCourse/" + fixture) as Node3D
+	for fixture in fixture_paths:
 		var actual := arena.get_node("TestCourse/" + fixture) as Node3D
-		if expected.transform != actual.transform:
+		if expected_transforms.has(fixture) and expected_transforms[fixture] != actual.transform:
 			failures.append("frontier arena moved smoke fixture: %s" % fixture)
 	arena.queue_free()
 	await get_tree().process_frame
