@@ -740,18 +740,44 @@ class CommandTests(unittest.TestCase):
             "Windows x86_64 client",
             "macOS universal client",
             "Assemble checksummed nonpublishing candidate",
+            "Sign and verify Windows release client",
+            "Sign, notarize, and verify macOS release client",
             "Validate protected trusted release candidate",
         )
         for name in expected_jobs:
             self.assertEqual(job_validation.count(f'name: "{name}"'), 1, name)
-        self.assertIn("(.total_count == 6)", artifact_validation)
+        self.assertIn("(.total_count == 8)", artifact_validation)
         for artifact in (
             "client-linux",
             "client-linux-arm64",
             "client-macos",
             "client-windows",
+            "client-macos-trusted",
+            "client-windows-trusted",
         ):
             self.assertIn(f'"{artifact}"', artifact_validation)
+
+    def test_trusted_desktop_signing_is_protected_and_fail_closed(self):
+        preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
+        windows = preflight.split("  trusted-windows:", 1)[1].split("  trusted-macos:", 1)[0]
+        macos = preflight.split("  trusted-macos:", 1)[1].split("  trusted-candidate:", 1)[0]
+        trusted = preflight.split("  trusted-candidate:", 1)[1]
+        for job in (windows, macos):
+            self.assertIn("environment: alpha-release", job)
+            self.assertIn(
+                "if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'",
+                job,
+            )
+        self.assertIn("SPURFIRE_WINDOWS_PFX_BASE64", windows)
+        self.assertIn("Set-AuthenticodeSignature", windows)
+        self.assertIn("TimeStamperCertificate", windows)
+        self.assertIn("SPURFIRE_APPLE_CERTIFICATE_P12_BASE64", macos)
+        self.assertIn("xcrun notarytool submit", macos)
+        self.assertIn("xcrun stapler validate", macos)
+        self.assertIn("spctl --assess", macos)
+        self.assertIn("client-windows-trusted", trusted)
+        self.assertIn("client-macos-trusted", trusted)
+        self.assertIn("Attest protected signed candidate provenance", trusted)
 
     def test_desktop_jobs_run_behavioral_native_smoke(self):
         # ABI, loader, input, and exported-method regressions must not ship in

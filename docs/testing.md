@@ -83,7 +83,14 @@ GitHub Actions then provides these credential-free gates:
 3. **Release QA tooling:** the deterministic M2–M5 playtest aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
 4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
-The current macOS candidate is only ad-hoc signed and is not notarized. The current Windows candidate has no Authenticode signature. Both are explicit release blockers; checksums and provenance do not waive them. Tag-triggered package jobs validate but do not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains a separate protected-environment dispatch that refuses to overwrite any draft or published release.
+Ordinary macOS candidates are only ad-hoc signed and are not notarized; ordinary Windows candidates
+have no Authenticode signature. Both remain explicitly nonpublishing. A manual `trusted-release`
+dispatch can replace them only inside the protected `alpha-release` environment, after Developer ID
+signing/notarization and timestamped Authenticode verification; missing configuration fails closed.
+Checksums and provenance do not waive publisher identity. Tag-triggered package jobs validate but do
+not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest
+and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains
+a separate protected-environment dispatch that refuses to overwrite any draft or published release.
 
 See [alpha-release-qualification.md](alpha-release-qualification.md) for candidate artifacts, telemetry aggregation, two-client entry points, and the terminal evidence contract.
 

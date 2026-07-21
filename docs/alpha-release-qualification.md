@@ -25,7 +25,49 @@ Release/check tooling has credential-free unit tests under `scripts/tests/`. Tes
 - `candidate-manifest.json`; and
 - platform trust records.
 
-Non-PR runs request GitHub build-provenance attestations and verify them before marking `provenance_verified=true`. The candidate manifest still says `release_eligible=false`: current macOS export is ad-hoc signed and not notarized, and current Windows export has no Authenticode signature. Checksums and provenance do not waive publisher identity/trust.
+Non-PR runs request GitHub build-provenance attestations and verify them before marking
+`provenance_verified=true`. The ordinary candidate manifest always says `release_eligible=false`:
+its macOS export is ad-hoc signed and not notarized, and its Windows export has no Authenticode
+signature. Checksums and provenance do not waive publisher identity/trust.
+
+### Protected desktop signing
+
+A manual `trusted-release` dispatch adds two `alpha-release` environment jobs after the ordinary
+builds. They download the source-bound desktop archives and replace them only after signing and
+verification:
+
+- Windows imports a temporary PFX, matches the signer's SHA-256 to the approved repository
+  variable, Authenticode-signs and timestamps every shipped EXE/DLL, requires `Valid` signatures and
+  timestamp certificates, launch-smokes the signed executable, and removes the temporary certificate.
+- macOS imports a Developer ID Application identity into a temporary keychain, matches its team ID,
+  signs Mach-O contents inside-out with hardened runtime and secure timestamps, submits the ZIP with
+  `notarytool`, staples the accepted ticket, verifies strict/deep code signing and Gatekeeper, and
+  launch-smokes both universal slices.
+- The protected assembly replaces the untrusted archives and trust records, creates fresh GitHub
+  build-provenance attestations for the signed bytes, verifies them at the exact source SHA, and only
+  then evaluates trusted-release metadata.
+
+Configure the protected `alpha-release` environment with required reviewers and a main-branch
+deployment policy. Its variables are `SPURFIRE_APPLE_TEAM_ID`,
+`SPURFIRE_WINDOWS_CERTIFICATE_SHA256`, and optionally `SPURFIRE_WINDOWS_TIMESTAMP_URL` (the default
+is DigiCert's HTTP Authenticode timestamp service). Its secrets are:
+
+- `SPURFIRE_APPLE_CERTIFICATE_P12_BASE64`
+- `SPURFIRE_APPLE_CERTIFICATE_PASSWORD`
+- `SPURFIRE_APPLE_NOTARY_KEY_P8_BASE64`
+- `SPURFIRE_APPLE_NOTARY_KEY_ID`
+- `SPURFIRE_APPLE_NOTARY_ISSUER_ID`
+- `SPURFIRE_WINDOWS_PFX_BASE64`
+- `SPURFIRE_WINDOWS_PFX_PASSWORD`
+
+Missing credentials, mismatched signer identities, absent timestamps, notarization rejection,
+unstapled tickets, Gatekeeper rejection, or a signed-archive launch failure all fail closed. Never
+place these credentials in repository variables or ordinary CI. Apple requires Developer ID signing,
+hardened runtime, secure timestamps, and notarization for this distribution path; Microsoft documents
+that Authenticode timestamps preserve signature validity after certificate expiry. See
+[Apple notarization requirements](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution),
+[Microsoft Authenticode signing](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-authenticodesignature),
+and [GitHub protected environment secrets](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 
 ## Secret-free playtest aggregation
 
@@ -78,6 +120,10 @@ The completed manifest records bindings; it does not create any of these decisio
 
 A stable tag is not a way to discover readiness. First qualify source commit **S** and record S in a reviewed `docs/release-evidence/<version>.json`. Commit only that manifest and its release notes in metadata commit **T**, then `scripts/check-release-tag-binding.sh <version> T` must prove S is an ancestor and S..T changes only those two files. The tag may identify T; all CI/client/live run IDs and artifact evidence remain bound to S. The manifest also binds launch smoke, SBOM/provenance, platform trust, activation, private-live cleanup, natural M2 playtest, telemetry, and independent approvals.
 
-Tag-triggered package workflows validate but do not publish stable OCI aliases. Client publication is a separate protected-environment dispatch requiring the independently reviewed evidence-manifest SHA-256. It refuses any existing draft or published release rather than overwriting it. Current candidate manifests cannot publish because Apple Developer ID/notarization and Windows Authenticode are absent.
+Tag-triggered package workflows validate but do not publish stable OCI aliases. Client publication is
+a separate protected-environment dispatch requiring the independently reviewed evidence-manifest
+SHA-256. It refuses any existing draft or published release rather than overwriting it. Ordinary
+candidate manifests can never publish; a protected trusted-release candidate additionally requires
+configured Apple/Windows credentials and successful live signing/notarization evidence.
 
 GitHub forbids overriding `GITHUB_*` default variables, so build-provenance attestations always bind the workflow commit. Tag-triggered candidate runs therefore attest **T** and re-prove — inside the verifying job — that **T** adds only release metadata on top of **S**; non-tag runs attest **S** directly and assert the two SHAs are equal. Trusted-release eligibility and client publication each independently require **S** to be contained in the protected `main` branch, so a manual dispatch at an arbitrary off-main ref can never satisfy the evidence chain.

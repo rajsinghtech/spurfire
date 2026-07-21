@@ -616,17 +616,281 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  trusted-windows:
+    name: Sign and verify Windows release client
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'
+    needs: [metadata, windows]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: alpha-release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: if ((git rev-parse HEAD) -ne $env:SOURCE_SHA) { throw 'checkout is not the qualified source SHA' }
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-windows
+          path: trusted-windows
+
+      - name: Authenticode-sign, timestamp, launch, and verify
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          WINDOWS_PFX_BASE64: ${{ secrets.SPURFIRE_WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.SPURFIRE_WINDOWS_PFX_PASSWORD }}
+          APPROVED_WINDOWS_CERTIFICATE_SHA256: ${{ vars.SPURFIRE_WINDOWS_CERTIFICATE_SHA256 }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.SPURFIRE_WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'invalid source SHA' }
+          if ($env:APPROVED_WINDOWS_CERTIFICATE_SHA256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid approved Windows certificate SHA-256' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) { throw 'Windows signing credentials are not configured' }
+          if ($env:WINDOWS_TIMESTAMP_URL -notmatch '^http://') { throw 'Windows timestamp URL must use the Authenticode-compatible http scheme' }
+
+          $input = Join-Path $PWD 'trusted-windows/Spurfire-windows-x86_64.zip'
+          $record = Get-Content trusted-windows/windows-trust.json | ConvertFrom-Json
+          $inputHash = (Get-FileHash $input -Algorithm SHA256).Hash.ToLower()
+          if ($record.source_sha -ne $env:SOURCE_SHA -or $record.archive_sha256 -ne $inputHash) { throw 'unsigned Windows artifact is not bound to the qualified source' }
+
+          $unpack = Join-Path $env:RUNNER_TEMP 'spurfire-windows-sign'
+          $pfx = Join-Path $env:RUNNER_TEMP 'spurfire-windows-signing.pfx'
+          $certificate = $null
+          $importedCertificates = @()
+          try {
+            Remove-Item $unpack -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $unpack | Out-Null
+            Expand-Archive $input -DestinationPath $unpack
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force
+            $importedCertificates = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+            $signingCertificates = @($importedCertificates | Where-Object {
+              $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3')
+            })
+            if ($signingCertificates.Count -ne 1) { throw 'PFX must contain exactly one private code-signing certificate' }
+            $certificate = $signingCertificates[0]
+            $certificateSha256 = $certificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLower()
+            if ($certificateSha256 -ne $env:APPROVED_WINDOWS_CERTIFICATE_SHA256) { throw 'Windows signer certificate does not match the approved SHA-256' }
+
+            $targets = @(Get-ChildItem $unpack -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' })
+            if ($targets.Count -lt 1) { throw 'Windows archive contains no signable PE files' }
+            foreach ($target in $targets) {
+              $signed = Set-AuthenticodeSignature -FilePath $target.FullName -Certificate $certificate -HashAlgorithm SHA256 -IncludeChain All -TimestampServer $env:WINDOWS_TIMESTAMP_URL -Force
+              if ($signed.Status -ne 'Valid' -or $null -eq $signed.TimeStamperCertificate) { throw "invalid or untimestamped signature: $($target.FullName)" }
+            }
+
+            $executable = Join-Path $unpack 'Spurfire.exe'
+            if (-not (Test-Path $executable)) { throw 'signed Windows archive is missing Spurfire.exe' }
+            & $executable --headless --audio-driver Dummy --quit-after 30 2>&1 | Tee-Object "$env:RUNNER_TEMP/windows-signed-final.log"
+            if ($LASTEXITCODE -ne 0) { throw "signed Windows client exited $LASTEXITCODE" }
+            if (Select-String -Path "$env:RUNNER_TEMP/windows-signed-final.log" -Pattern 'ERROR:|SCRIPT ERROR|Parse Error') { throw 'signed Windows client emitted an error' }
+
+            $output = Join-Path $PWD 'trusted-windows-signed'
+            New-Item -ItemType Directory -Force $output | Out-Null
+            $archive = Join-Path $output 'Spurfire-windows-x86_64.zip'
+            Compress-Archive -Path "$unpack/*" -DestinationPath $archive
+            $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+            "$archiveHash  Spurfire-windows-x86_64.zip" | Set-Content -NoNewline (Join-Path $output 'Spurfire-windows-x86_64.zip.sha256')
+            [ordered]@{
+              schema_version = 1
+              platform = 'windows-x86_64'
+              source_sha = $env:SOURCE_SHA
+              archive = 'Spurfire-windows-x86_64.zip'
+              archive_sha256 = $archiveHash
+              launch_smoke_passed = $true
+              signature = 'authenticode'
+              authenticode_signed = $true
+              verification = [ordered]@{
+                status = 'Valid'
+                timestamp_verified = $true
+                signer_certificate_sha256 = $certificateSha256
+              }
+            } | ConvertTo-Json -Depth 3 -Compress | Set-Content -NoNewline (Join-Path $output 'windows-trust.json')
+          } finally {
+            foreach ($imported in $importedCertificates) { Remove-Item "Cert:\CurrentUser\My\$($imported.Thumbprint)" -Force -ErrorAction SilentlyContinue }
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: client-windows-trusted
+          path: trusted-windows-signed
+          if-no-files-found: error
+          retention-days: 14
+
+  trusted-macos:
+    name: Sign, notarize, and verify macOS release client
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'
+    needs: [metadata, macos]
+    runs-on: macos-14
+    timeout-minutes: 45
+    environment: alpha-release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.source_sha }}
+      - name: Assert exact qualified source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-macos
+          path: trusted-macos
+
+      - name: Developer ID-sign, notarize, staple, launch, and verify
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.SPURFIRE_APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.SPURFIRE_APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.SPURFIRE_APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.SPURFIRE_APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.SPURFIRE_APPLE_NOTARY_ISSUER_ID }}
+          APPROVED_APPLE_TEAM_ID: ${{ vars.SPURFIRE_APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPROVED_APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
+          test -n "$APPLE_CERTIFICATE_P12_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_NOTARY_KEY_P8_BASE64"
+          [[ "$APPLE_NOTARY_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]
+          [[ "$APPLE_NOTARY_ISSUER_ID" =~ ^[0-9a-fA-F-]{36}$ ]]
+
+          input="$PWD/trusted-macos/Spurfire-macos-universal.zip"
+          input_hash="$(shasum -a 256 "$input" | cut -d ' ' -f 1)"
+          jq -e --arg source_sha "$SOURCE_SHA" --arg digest "$input_hash" \
+            '.source_sha == $source_sha and .archive_sha256 == $digest' \
+            trusted-macos/macos-trust.json >/dev/null
+
+          unpack="$RUNNER_TEMP/spurfire-macos-sign"
+          certificate="$RUNNER_TEMP/spurfire-developer-id.p12"
+          notary_key="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          keychain="$RUNNER_TEMP/spurfire-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$certificate" "$notary_key"
+          }
+          trap cleanup EXIT HUP INT TERM
+          rm -rf "$unpack"
+          mkdir -p "$unpack"
+          unzip -q "$input" -d "$unpack"
+          app="$(find "$unpack" -maxdepth 2 -name '*.app' -type d -print -quit)"
+          test -n "$app"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | /usr/bin/base64 -D > "$certificate"
+          printf '%s' "$APPLE_NOTARY_KEY_P8_BASE64" | /usr/bin/base64 -D > "$notary_key"
+          chmod 600 "$certificate" "$notary_key"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          identities="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/ {print $2}')"
+          test "$(wc -w <<< "$identities" | tr -d ' ')" -eq 1
+          identity="$identities"
+
+          while IFS= read -r code; do
+            if file "$code" | grep -q 'Mach-O'; then
+              codesign --force --options runtime --timestamp --sign "$identity" --keychain "$keychain" "$code"
+            fi
+          done < <(find "$app/Contents" -type f \( -perm -111 -o -name '*.dylib' \) -print)
+          codesign --force --options runtime --timestamp --sign "$identity" --keychain "$keychain" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          details="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          grep -q 'Authority=Developer ID Application:' <<< "$details"
+          team_id="$(sed -n 's/^TeamIdentifier=//p' <<< "$details")"
+          test "$team_id" = "$APPROVED_APPLE_TEAM_ID"
+
+          submission="$RUNNER_TEMP/Spurfire-macos-notary.zip"
+          ditto -c -k --keepParent "$app" "$submission"
+          xcrun notarytool submit "$submission" \
+            --key "$notary_key" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --output-format json > "$RUNNER_TEMP/notary-result.json"
+          jq -e '.status == "Accepted"' "$RUNNER_TEMP/notary-result.json" >/dev/null
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          executable="$app/Contents/MacOS/Spurfire"
+          "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-signed-final.log"
+          if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-signed-final.log"; then
+            echo 'error: signed macOS client emitted an error' >&2
+            exit 1
+          fi
+          sudo softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-signed-final-x86_64.log"
+          if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-signed-final-x86_64.log"; then
+            echo 'error: signed macOS x86_64 slice emitted an error' >&2
+            exit 1
+          fi
+
+          output="$PWD/trusted-macos-signed"
+          mkdir -p "$output"
+          archive="$output/Spurfire-macos-universal.zip"
+          ditto -c -k --keepParent "$app" "$archive"
+          archive_hash="$(shasum -a 256 "$archive" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "$archive_hash" Spurfire-macos-universal.zip > "$output/Spurfire-macos-universal.zip.sha256"
+          jq -n \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg archive_sha256 "$archive_hash" \
+            --arg team_id "$team_id" '{
+              schema_version: 1,
+              platform: "macos-universal",
+              source_sha: $source_sha,
+              archive: "Spurfire-macos-universal.zip",
+              archive_sha256: $archive_sha256,
+              launch_smoke_passed: true,
+              signature: "developer_id",
+              developer_id_signed: true,
+              notarized: true,
+              verification: {
+                codesign_deep_strict: true,
+                notarization_stapled: true,
+                gatekeeper_assessment: true,
+                team_id: $team_id
+              }
+            }' > "$output/macos-trust.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: client-macos-trusted
+          path: trusted-macos-signed
+          if-no-files-found: error
+          retention-days: 14
+
   trusted-candidate:
     name: Validate protected trusted release candidate
     if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'
-    needs: [metadata, candidate]
+    needs: [metadata, candidate, trusted-windows, trusted-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: alpha-release
     permissions:
       actions: read
-      attestations: read
+      attestations: write
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -642,6 +906,32 @@ jobs:
         with:
           name: alpha-candidate-${{ needs.metadata.outputs.source_sha }}
           path: trusted-candidate
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-windows-trusted
+          path: trusted-windows
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-macos-trusted
+          path: trusted-macos
+
+      - name: Replace untrusted desktop archives with protected signed artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp trusted-windows/Spurfire-windows-x86_64.zip trusted-candidate/
+          cp trusted-windows/Spurfire-windows-x86_64.zip.sha256 trusted-candidate/
+          cp trusted-windows/windows-trust.json trusted-candidate/
+          cp trusted-macos/Spurfire-macos-universal.zip trusted-candidate/
+          cp trusted-macos/Spurfire-macos-universal.zip.sha256 trusted-candidate/
+          cp trusted-macos/macos-trust.json trusted-candidate/
+
+      - name: Attest protected signed candidate provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v3
+        with:
+          subject-path: trusted-candidate/Spurfire-*
 
       - name: Verify signed platform records and protected eligibility
         shell: bash
