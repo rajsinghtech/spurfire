@@ -17,7 +17,7 @@ use spurfire_net::{
     rustscale::RustScalePeer,
     v2::{
         decode_m3, encode_m3, fragment_m3_checkpoint, M3ActorInput, M3ActorLoadout,
-        M3ActorSnapshot, M3HorseSnapshot, M3PeerPayloadV2, M3SecureSession,
+        M3ActorSnapshot, M3HorseSnapshot, M3PeerPayloadV2, M3SecureSession, M5MatchStateV2,
     },
     AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
@@ -1156,7 +1156,33 @@ impl PeerSession {
             "scoreboard_json",
             serde_json::to_string(&bounty.players().collect::<Vec<_>>()).unwrap_or_default(),
         );
+        result.set(
+            "state_json",
+            serde_json::to_string(&M5MatchStateV2::from_snapshot(&bounty.snapshot()))
+                .unwrap_or_default(),
+        );
         result
+    }
+
+    /// Build the authority-only signed two-hertz M5 presentation keyframe.
+    #[func]
+    fn make_m5_match_state(&mut self, tick: i64) -> PackedByteArray {
+        if !self.m3_wire_active
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return PackedByteArray::new();
+        }
+        let Ok(tick_value) = u64::try_from(tick).map(SimulationTick::new) else {
+            return PackedByteArray::new();
+        };
+        let Some(bounty) = self.m5_match_authority.as_ref() else {
+            return PackedByteArray::new();
+        };
+        if bounty.current_tick() != tick_value {
+            return PackedByteArray::new();
+        }
+        let state = M5MatchStateV2::from_snapshot(&bounty.snapshot());
+        self.make_m3_packet(tick, M3PeerPayloadV2::MatchState { state })
     }
 
     /// Build a bounded, sequenced heartbeat datagram for `send_packet`.
@@ -2638,6 +2664,13 @@ impl PeerSession {
                 result.set(
                     "result_json",
                     serde_json::to_string(&shot_result).unwrap_or_default(),
+                );
+            }
+            M3PeerPayloadV2::MatchState { state } => {
+                result.set("type", "match_state");
+                result.set(
+                    "state_json",
+                    serde_json::to_string(&state).unwrap_or_default(),
                 );
             }
             M3PeerPayloadV2::Authority { authority, epoch } => {

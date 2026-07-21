@@ -304,8 +304,78 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 				_send_to_all(snapshot)
 	var match_tick := peer_session.advance_m5_match(tick) as Dictionary
 	if bool(match_tick.get("advanced", false)):
-		_m5_state = match_tick
+		_install_m5_state_json(str(match_tick.get("state_json", "")))
+		if tick % 30 == 0:
+			var match_packet: PackedByteArray = peer_session.make_m5_match_state(tick)
+			if not match_packet.is_empty():
+				_send_to_all(match_packet)
 	_flush_m3_metrics(tick, false)
+
+func _install_m5_state_json(state_json: String) -> void:
+	var decoded = JSON.parse_string(state_json)
+	if not decoded is Dictionary:
+		return
+	var source := decoded as Dictionary
+	var players: Array[Dictionary] = []
+	var player_rows = source.get("p", source.get("players", []))
+	if player_rows is Array:
+		for value in player_rows:
+			if value is Array and (value as Array).size() == 9:
+				var tuple := value as Array
+				players.append({
+					"player_id": str(tuple[0]), "score": int(tuple[1]),
+					"eliminations": int(tuple[2]), "assists": int(tuple[3]),
+					"deaths": int(tuple[4]), "alive": bool(tuple[5]),
+					"respawn_at_tick": -1 if tuple[6] == null else int(tuple[6]),
+					"speed_buff_end_tick": -1 if tuple[7] == null else int(tuple[7]),
+					"horse_buff_end_tick": -1 if tuple[8] == null else int(tuple[8]),
+				})
+			elif value is Dictionary:
+				var row := value as Dictionary
+				players.append({
+					"player_id": str(row.get("i", row.get("player_id", ""))),
+					"score": int(row.get("s", row.get("score", 0))),
+					"eliminations": int(row.get("k", row.get("eliminations", 0))),
+					"assists": int(row.get("a", row.get("assists", 0))),
+					"deaths": int(row.get("d", row.get("deaths", 0))),
+					"alive": bool(row.get("l", row.get("alive", true))),
+					"respawn_at_tick": int(row.get("r", row.get("respawn_at_tick", -1))),
+					"speed_buff_end_tick": int(row.get("v", row.get("respawn_speed_buff_end_tick", -1))),
+					"horse_buff_end_tick": int(row.get("h", row.get("horse_buff_end_tick", -1))),
+				})
+	var reveal := {}
+	var reveal_value = source.get("w", source.get("active_reveal"))
+	if reveal_value is Dictionary:
+		var reveal_row := reveal_value as Dictionary
+		reveal = {
+			"player_id": str(reveal_row.get("i", reveal_row.get("player_id", ""))),
+			"started_tick": int(reveal_row.get("s", reveal_row.get("started_tick", 0))),
+			"end_tick": int(reveal_row.get("e", reveal_row.get("end_tick", 0))),
+		}
+	var objective := {}
+	var objective_value = source.get("o", source.get("active_objective"))
+	if objective_value is Dictionary:
+		var objective_row := objective_value as Dictionary
+		objective = {
+			"objective_id": int(objective_row.get("i", objective_row.get("objective_id", 0))),
+			"kind": str(objective_row.get("k", objective_row.get("kind", ""))),
+			"started_tick": int(objective_row.get("s", objective_row.get("started_tick", 0))),
+			"end_tick": int(objective_row.get("e", objective_row.get("end_tick", 0))),
+			"completed": bool(objective_row.get("c", objective_row.get("completed", false))),
+		}
+	_m5_state = {
+		"authority_epoch": int(source.get("e", source.get("authority_epoch", 0))),
+		"current_tick": int(source.get("t", source.get("current_tick", 0))),
+		"end_tick": int(source.get("n", source.get("end_tick", 0))),
+		"players": players,
+		"active_reveal": reveal,
+		"active_objective": objective,
+		"finished": bool(source.get("f", source.get("finished", false))),
+		"winner": str(source.get("x", source.get("winner", ""))),
+	}
+
+func get_m5_state() -> Dictionary:
+	return _m5_state.duplicate(true)
 
 func _update_authority_horse_presentation(
 	player_id: String, state: Dictionary, actor_tick: Dictionary, tick: int
@@ -746,7 +816,7 @@ func measurement_report() -> Dictionary:
 
 func get_peer_status() -> Array:
 	var rows: Array = [{
-		"name": "you", "you": true, "authority": local_is_authority,
+		"player_id": local_player_id, "name": "you", "you": true, "authority": local_is_authority,
 		"route": "LOCAL", "endpoint": "--", "rtt_ms": 0, "last_seen_ms": 0,
 	}]
 	var ids := _peers.keys()
@@ -755,7 +825,7 @@ func get_peer_status() -> Array:
 	for player_id: String in ids:
 		var peer := _peers[player_id] as Dictionary
 		rows.append({
-			"name": player_id.left(8), "you": false,
+			"player_id": player_id, "name": player_id.left(8), "you": false,
 			"authority": player_id == _authority_player_id,
 			"route": str(peer.route),
 			"endpoint": "%s:%d" % [str(peer.address), int(peer.port)],
@@ -855,6 +925,8 @@ func _on_packet_received(
 				_resolve_and_broadcast_command(payload)
 		"shot_result":
 			_apply_shot_result_once(payload)
+		"match_state":
+			_install_m5_state_json(str(payload.get("state_json", "")))
 		"migration_snapshot":
 			_install_checkpoint(str(payload.get("checkpoint_json", "")))
 			_authority_player_id = str(payload.get("authority", _authority_player_id))

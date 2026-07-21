@@ -219,6 +219,102 @@ pub struct ActiveDynamicObjective {
     signal_paid_intervals: u8,
 }
 
+/// Public, bounded reveal row used by signed M5 presentation keyframes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BountyRevealSnapshot {
+    pub player_id: PlayerId,
+    pub started_tick: SimulationTick,
+    pub end_tick: SimulationTick,
+}
+
+/// Public, bounded objective row used by signed M5 presentation keyframes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BountyObjectiveSnapshot {
+    pub objective_id: u64,
+    pub kind: DynamicObjectiveKind,
+    pub started_tick: SimulationTick,
+    pub end_tick: SimulationTick,
+    pub completed: bool,
+}
+
+/// Authority-signed M5 state sent at two hertz for follower presentation.
+/// Private damage contribution and objective hold bookkeeping never leave the
+/// authority except inside the fragmented migration checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BountyMatchSnapshot {
+    pub authority_epoch: u64,
+    pub current_tick: SimulationTick,
+    pub end_tick: SimulationTick,
+    pub players: Vec<BountyPlayerState>,
+    pub active_reveal: Option<BountyRevealSnapshot>,
+    pub active_objective: Option<BountyObjectiveSnapshot>,
+    pub finished: bool,
+    pub winner: Option<PlayerId>,
+}
+
+impl BountyMatchSnapshot {
+    /// Rejects oversized, unsorted, internally inconsistent presentation state.
+    #[must_use]
+    pub fn is_canonical(&self) -> bool {
+        if self.players.is_empty()
+            || self.players.len() > MAX_M3_AUTHORITY_ACTORS
+            || self.finished != (self.current_tick >= self.end_tick)
+            || self
+                .players
+                .windows(2)
+                .any(|rows| rows[0].player_id >= rows[1].player_id)
+        {
+            return false;
+        }
+        let effective_tick =
+            SimulationTick::new(self.current_tick.as_u64().min(self.end_tick.as_u64()));
+        if self.players.iter().any(|row| {
+            row.total_score() > MAX_BOUNTY_SCORE
+                || row.mounted_long_hit_bonus > LONG_HIT_BONUS_CAP
+                || row.score.mounted_long_hit != u32::from(row.mounted_long_hit_bonus)
+                || row.alive == row.respawn_at_tick.is_some()
+                || row
+                    .respawn_at_tick
+                    .is_some_and(|respawn| !self.finished && respawn <= effective_tick)
+                || row
+                    .respawn_speed_buff_end_tick
+                    .is_some_and(|end| end <= effective_tick)
+                || row
+                    .horse_buff_end_tick
+                    .is_some_and(|end| end <= effective_tick)
+        }) {
+            return false;
+        }
+        let contains_player = |player| self.players.iter().any(|row| row.player_id == player);
+        if self.active_reveal.is_some_and(|reveal| {
+            self.finished
+                || !contains_player(reveal.player_id)
+                || reveal.end_tick != reveal.started_tick.saturating_add(MOST_WANTED_REVEAL_TICKS)
+                || effective_tick >= reveal.end_tick
+        }) || self.active_objective.is_some_and(|objective| {
+            self.finished
+                || objective.objective_id == 0
+                || objective.end_tick
+                    != objective
+                        .started_tick
+                        .saturating_add(OBJECTIVE_LIFETIME_TICKS)
+                || effective_tick >= objective.end_tick
+        }) {
+            return false;
+        }
+        let expected_winner = self.players.iter().max_by(|left, right| {
+            left.total_score()
+                .cmp(&right.total_score())
+                .then_with(|| right.player_id.cmp(&left.player_id))
+        });
+        match (self.finished, self.winner, expected_winner) {
+            (false, None, Some(_)) => true,
+            (true, Some(winner), Some(expected)) => winner == expected.player_id,
+            _ => false,
+        }
+    }
+}
+
 /// Absolute-tick match output.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BountyMatchTickOutput {
@@ -359,6 +455,33 @@ impl BountyMatchKernel {
     #[must_use]
     pub const fn active_objective(&self) -> Option<ActiveDynamicObjective> {
         self.active_objective
+    }
+
+    /// Produces the bounded public keyframe; map order is already canonical.
+    #[must_use]
+    pub fn snapshot(&self) -> BountyMatchSnapshot {
+        BountyMatchSnapshot {
+            authority_epoch: self.authority_epoch,
+            current_tick: self.current_tick,
+            end_tick: self.end_tick,
+            players: self.players.values().cloned().collect(),
+            active_reveal: self.active_reveal.map(|reveal| BountyRevealSnapshot {
+                player_id: reveal.player_id,
+                started_tick: reveal.started_tick,
+                end_tick: reveal.end_tick,
+            }),
+            active_objective: self
+                .active_objective
+                .map(|objective| BountyObjectiveSnapshot {
+                    objective_id: objective.objective_id,
+                    kind: objective.kind,
+                    started_tick: objective.started_tick,
+                    end_tick: objective.end_tick,
+                    completed: objective.completed,
+                }),
+            finished: self.finished,
+            winner: if self.finished { self.winner() } else { None },
+        }
     }
 
     #[must_use]
@@ -998,5 +1121,34 @@ mod tests {
             BountyMatchKernel::new(1, 0, SimulationTick::new(0), vec![player(1), player(1)]),
             Err(BountyMatchError::InvalidRoster)
         );
+    }
+
+    #[test]
+    fn public_match_snapshot_is_sorted_bounded_and_hides_private_authority_state() {
+        let mut match_state = kernel();
+        match_state.advance_tick(SimulationTick::new(30)).unwrap();
+        match_state
+            .record_damage(SimulationTick::new(30), player(2), player(3), 30)
+            .unwrap();
+        let snapshot = match_state.snapshot();
+        assert!(snapshot.is_canonical());
+        assert_eq!(
+            snapshot
+                .players
+                .iter()
+                .map(|row| row.player_id)
+                .collect::<Vec<_>>(),
+            vec![player(1), player(2), player(3)]
+        );
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(!encoded.contains("damage"));
+        assert!(!encoded.contains("signal_paid_intervals"));
+
+        let mut unsorted = snapshot.clone();
+        unsorted.players.swap(0, 1);
+        assert!(!unsorted.is_canonical());
+        let mut false_winner = snapshot;
+        false_winner.winner = Some(player(1));
+        assert!(!false_winner.is_canonical());
     }
 }

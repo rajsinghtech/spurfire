@@ -328,7 +328,10 @@ speed-buff timers, deterministic Most Wanted reveals/survival payouts, dynamic-o
 locked objective payouts, long-hit cap, winner tie-break, and fail-closed epoch checkpoint. Combat
 score producers update a cloned combat/match transaction, and the signed wire-2.0 checkpoint now
 restores both authorities only after exact epoch, tick, and roster validation. Spawn placement,
-objective world interactions, replicated HUD/results, and acceptance telemetry remain.
+objective world interactions, results, and acceptance telemetry remain. Authority-only MatchState
+keyframes are signed at 2 Hz, bind their epoch/tick/roster, stay within the 1,200-byte datagram cap
+for eight worst-case timer rows, and drive the follower match clock, local bounty, pressure banner,
+K/A/D scoreboard, respawn/buff status, and route health.
 
 **Goal:** full 15-min matches with score pressure, Most Wanted drama, and event-driven
 convergence. Fun verdict gate for the whole prototype.

@@ -15,6 +15,7 @@ func _ready() -> void:
 	_check_m3_horse_presentation_path(failures)
 	_check_m4_remote_charge_proxy(failures)
 	_check_m4_follower_charge_snapshot(failures)
+	_check_m5_match_state_normalization(failures)
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
@@ -228,6 +229,26 @@ func _check_m4_follower_charge_snapshot(failures: Array[String]) -> void:
 	bridge.local_horse.free()
 	bridge.free()
 
+func _check_m5_match_state_normalization(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	bridge.call("_install_m5_state_json", JSON.stringify({
+		"e": 2, "t": 7200, "n": 54000, "f": false,
+		"p": [[PLAYER_A, 275, 2, 1, 1, false, 7500, null, null]],
+		"w": {"i": PLAYER_A, "s": 7200, "e": 7800},
+		"o": {"i": 1, "k": "moving_bounty", "s": 5400, "e": 9000, "c": false},
+	}))
+	var state := bridge.call("get_m5_state") as Dictionary
+	var players := state.get("players", []) as Array
+	if (
+		int(state.get("current_tick", -1)) != 7200 or players.size() != 1
+		or int((players[0] as Dictionary).get("score", 0)) != 275
+		or int((players[0] as Dictionary).get("respawn_at_tick", 0)) != 7500
+		or str((state.get("active_reveal", {}) as Dictionary).get("player_id", "")) != PLAYER_A
+		or str((state.get("active_objective", {}) as Dictionary).get("kind", "")) != "moving_bounty"
+	):
+		failures.append("M5 compact MatchState did not normalize into follower HUD state")
+	bridge.free()
+
 func _check_secret_storage_contract(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
 	var scene_source := FileAccess.get_file_as_string("res://lobby/lobby_shell.tscn")
@@ -267,6 +288,7 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"_migration_pending or not local_is_authority", "dive_id",
 		"activate_m3_wire", "make_m3_actor_input", "make_m3_actor_snapshot_from_pose",
 		"poll_m3_migration", "record_m3_horse_pose", "actor_snapshot",
+		"advance_m5_match", "make_m5_match_state", "match_state", "get_m5_state",
 		"M3_INPUT_BUFFER_TICKS := 9", "_jump_buffer_until_tick",
 		"_crouch_buffer_until_tick", "reload_active_ticks",
 		"_update_authority_horse_presentation", "_apply_remote_horse_snapshot",

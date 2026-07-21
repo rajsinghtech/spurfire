@@ -10,14 +10,17 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{
-    canonical_envelope_digest, canonical_manifest_digest, EntityId, HorseVitalityClass,
-    HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId, QuantizedDirection, RecallState,
-    RosterHash, RosterManifest, SessionBinding, SessionIdentityError, SessionPublicKey,
-    SessionSignature, ShotCommand, ShotResult, SimulationTick, WeaponId, WireVersion,
-    DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS, ON_FOOT_STAMINA_TICKS, SPUR_METER_MAX,
+    canonical_envelope_digest, canonical_manifest_digest, BountyMatchSnapshot,
+    BountyObjectiveSnapshot, BountyRevealSnapshot, DynamicObjectiveKind, EntityId,
+    HorseVitalityClass, HorseVitalityState, LobbyId, M3ActorStance, NodeKey, PlayerId,
+    QuantizedDirection, RecallState, RosterHash, RosterManifest, SessionBinding,
+    SessionIdentityError, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
+    SimulationTick, WeaponId, WireVersion, DIRECTION_UNITS, M3_WIRE_VERSION, MAJESTIC_CHARGE_TICKS,
+    MAX_BOUNTY_SCORE, MAX_M3_AUTHORITY_ACTORS, MOST_WANTED_REVEAL_TICKS, OBJECTIVE_LIFETIME_TICKS,
+    ON_FOOT_STAMINA_TICKS, SPUR_METER_MAX,
 };
 
 use crate::{
@@ -274,6 +277,253 @@ impl M3ActorSnapshot {
     }
 }
 
+/// Compact public score row kept below the live UDP MTU for eight-player Alpha matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct M5ScoreRowV2 {
+    pub player_id: PlayerId,
+    pub score: u32,
+    pub eliminations: u16,
+    pub assists: u16,
+    pub deaths: u16,
+    pub alive: bool,
+    pub respawn_at_tick: Option<SimulationTick>,
+    pub respawn_speed_buff_end_tick: Option<SimulationTick>,
+    pub horse_buff_end_tick: Option<SimulationTick>,
+}
+
+impl Serialize for M5ScoreRowV2 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut row = serializer.serialize_tuple(9)?;
+        row.serialize_element(&self.player_id)?;
+        row.serialize_element(&self.score)?;
+        row.serialize_element(&self.eliminations)?;
+        row.serialize_element(&self.assists)?;
+        row.serialize_element(&self.deaths)?;
+        row.serialize_element(&self.alive)?;
+        row.serialize_element(&self.respawn_at_tick)?;
+        row.serialize_element(&self.respawn_speed_buff_end_tick)?;
+        row.serialize_element(&self.horse_buff_end_tick)?;
+        row.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for M5ScoreRowV2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (
+            player_id,
+            score,
+            eliminations,
+            assists,
+            deaths,
+            alive,
+            respawn_at_tick,
+            respawn_speed_buff_end_tick,
+            horse_buff_end_tick,
+        ) = <(
+            PlayerId,
+            u32,
+            u16,
+            u16,
+            u16,
+            bool,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+            Option<SimulationTick>,
+        )>::deserialize(deserializer)?;
+        Ok(Self {
+            player_id,
+            score,
+            eliminations,
+            assists,
+            deaths,
+            alive,
+            respawn_at_tick,
+            respawn_speed_buff_end_tick,
+            horse_buff_end_tick,
+        })
+    }
+}
+
+/// Compact reveal row for a routine MatchState keyframe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M5RevealV2 {
+    #[serde(rename = "i", alias = "player_id")]
+    pub player_id: PlayerId,
+    #[serde(rename = "s", alias = "started_tick")]
+    pub started_tick: SimulationTick,
+    #[serde(rename = "e", alias = "end_tick")]
+    pub end_tick: SimulationTick,
+}
+
+/// Compact objective row for a routine MatchState keyframe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M5ObjectiveV2 {
+    #[serde(rename = "i", alias = "objective_id")]
+    pub objective_id: u64,
+    #[serde(rename = "k", alias = "kind")]
+    pub kind: DynamicObjectiveKind,
+    #[serde(rename = "s", alias = "started_tick")]
+    pub started_tick: SimulationTick,
+    #[serde(rename = "e", alias = "end_tick")]
+    pub end_tick: SimulationTick,
+    #[serde(rename = "c", alias = "completed")]
+    pub completed: bool,
+}
+
+/// Signed two-hertz M5 presentation keyframe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct M5MatchStateV2 {
+    #[serde(rename = "e", alias = "authority_epoch")]
+    pub authority_epoch: u64,
+    #[serde(rename = "t", alias = "current_tick")]
+    pub current_tick: SimulationTick,
+    #[serde(rename = "n", alias = "end_tick")]
+    pub end_tick: SimulationTick,
+    #[serde(rename = "p", alias = "players")]
+    pub players: Vec<M5ScoreRowV2>,
+    #[serde(
+        default,
+        rename = "w",
+        alias = "active_reveal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_reveal: Option<M5RevealV2>,
+    #[serde(
+        default,
+        rename = "o",
+        alias = "active_objective",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_objective: Option<M5ObjectiveV2>,
+    #[serde(rename = "f", alias = "finished")]
+    pub finished: bool,
+    #[serde(
+        default,
+        rename = "x",
+        alias = "winner",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub winner: Option<PlayerId>,
+}
+
+impl M5MatchStateV2 {
+    #[must_use]
+    pub fn from_snapshot(snapshot: &BountyMatchSnapshot) -> Self {
+        Self {
+            authority_epoch: snapshot.authority_epoch,
+            current_tick: snapshot.current_tick,
+            end_tick: snapshot.end_tick,
+            players: snapshot
+                .players
+                .iter()
+                .map(|row| M5ScoreRowV2 {
+                    player_id: row.player_id,
+                    score: row.total_score(),
+                    eliminations: row.eliminations,
+                    assists: row.assists,
+                    deaths: row.deaths,
+                    alive: row.alive,
+                    respawn_at_tick: row.respawn_at_tick,
+                    respawn_speed_buff_end_tick: row.respawn_speed_buff_end_tick,
+                    horse_buff_end_tick: row.horse_buff_end_tick,
+                })
+                .collect(),
+            active_reveal: snapshot.active_reveal.map(
+                |BountyRevealSnapshot {
+                     player_id,
+                     started_tick,
+                     end_tick,
+                 }| M5RevealV2 {
+                    player_id,
+                    started_tick,
+                    end_tick,
+                },
+            ),
+            active_objective: snapshot.active_objective.map(
+                |BountyObjectiveSnapshot {
+                     objective_id,
+                     kind,
+                     started_tick,
+                     end_tick,
+                     completed,
+                 }| M5ObjectiveV2 {
+                    objective_id,
+                    kind,
+                    started_tick,
+                    end_tick,
+                    completed,
+                },
+            ),
+            finished: snapshot.finished,
+            winner: snapshot.winner,
+        }
+    }
+
+    #[must_use]
+    pub fn is_canonical(&self) -> bool {
+        if self.players.is_empty()
+            || self.players.len() > MAX_M3_AUTHORITY_ACTORS
+            || self.finished != (self.current_tick >= self.end_tick)
+            || self
+                .players
+                .windows(2)
+                .any(|rows| rows[0].player_id >= rows[1].player_id)
+        {
+            return false;
+        }
+        let effective_tick =
+            SimulationTick::new(self.current_tick.as_u64().min(self.end_tick.as_u64()));
+        if self.players.iter().any(|row| {
+            row.score > MAX_BOUNTY_SCORE
+                || row.alive == row.respawn_at_tick.is_some()
+                || row
+                    .respawn_at_tick
+                    .is_some_and(|respawn| !self.finished && respawn <= effective_tick)
+                || row
+                    .respawn_speed_buff_end_tick
+                    .is_some_and(|end| end <= effective_tick)
+                || row
+                    .horse_buff_end_tick
+                    .is_some_and(|end| end <= effective_tick)
+        }) {
+            return false;
+        }
+        let contains_player = |player| self.players.iter().any(|row| row.player_id == player);
+        if self.active_reveal.is_some_and(|reveal| {
+            self.finished
+                || !contains_player(reveal.player_id)
+                || reveal.end_tick != reveal.started_tick.saturating_add(MOST_WANTED_REVEAL_TICKS)
+                || effective_tick >= reveal.end_tick
+        }) || self.active_objective.is_some_and(|objective| {
+            self.finished
+                || objective.objective_id == 0
+                || objective.end_tick
+                    != objective
+                        .started_tick
+                        .saturating_add(OBJECTIVE_LIFETIME_TICKS)
+                || effective_tick >= objective.end_tick
+        }) {
+            return false;
+        }
+        let expected_winner = self.players.iter().max_by(|left, right| {
+            left.score
+                .cmp(&right.score)
+                .then_with(|| right.player_id.cmp(&left.player_id))
+        });
+        match (self.finished, self.winner, expected_winner) {
+            (false, None, Some(_)) => true,
+            (true, Some(winner), Some(expected)) => winner == expected.player_id,
+            _ => false,
+        }
+    }
+}
+
 /// Candidate v2 gameplay payload set. No v1 stance/input interpretation is reused.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -308,6 +558,10 @@ pub enum M3PeerPayloadV2 {
     ShotResult {
         #[serde(rename = "r", alias = "result")]
         result: ShotResult,
+    },
+    MatchState {
+        #[serde(rename = "m", alias = "state")]
+        state: M5MatchStateV2,
     },
     Authority {
         #[serde(rename = "a", alias = "authority")]
@@ -451,6 +705,11 @@ impl M3SecureSession {
         let subject_is_valid = match &payload {
             M3PeerPayloadV2::ActorSnapshot { snapshot } => {
                 local == authority && self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::MatchState { state } => {
+                local == authority
+                    && state.authority_epoch == self.state.authority_epoch
+                    && state.current_tick.as_u64() == tick
             }
             M3PeerPayloadV2::ShotResult { result } => {
                 local == authority
@@ -630,7 +889,9 @@ impl M3SecureSession {
         }
         if matches!(
             envelope.payload,
-            M3PeerPayloadV2::ActorSnapshot { .. } | M3PeerPayloadV2::ShotResult { .. }
+            M3PeerPayloadV2::ActorSnapshot { .. }
+                | M3PeerPayloadV2::ShotResult { .. }
+                | M3PeerPayloadV2::MatchState { .. }
         ) && envelope.sender != self.state.authority
         {
             return AcceptOutcome::InvalidPayloadRole;
@@ -646,6 +907,14 @@ impl M3SecureSession {
             }
             M3PeerPayloadV2::ActorSnapshot { snapshot } => {
                 !self.state.peers.contains_key(&snapshot.rider_player_id)
+            }
+            M3PeerPayloadV2::MatchState { state } => {
+                state.authority_epoch != envelope.authority_epoch
+                    || state.current_tick.as_u64() != envelope.simulation_tick
+                    || state
+                        .players
+                        .iter()
+                        .any(|row| !self.state.peers.contains_key(&row.player_id))
             }
             M3PeerPayloadV2::Authority { authority, epoch } => {
                 *authority != envelope.sender || *epoch != envelope.authority_epoch
@@ -891,6 +1160,7 @@ fn validate_payload(payload: &M3PeerPayloadV2) -> Result<(), CodecError> {
         M3PeerPayloadV2::Hello { hostname } => !hostname.is_empty() && hostname.len() <= 255,
         M3PeerPayloadV2::ActorInput { input } => input.is_canonical(),
         M3PeerPayloadV2::ActorSnapshot { snapshot } => snapshot.is_canonical(),
+        M3PeerPayloadV2::MatchState { state } => state.is_canonical(),
         M3PeerPayloadV2::MigrationFragment {
             fragment_index,
             fragment_count,
@@ -1008,6 +1278,56 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
             out.extend_from_slice(fragment.as_bytes());
         }
         M3PeerPayloadV2::Leave => out.push(10),
+        M3PeerPayloadV2::MatchState { state } => {
+            out.push(11);
+            out.extend_from_slice(&state.authority_epoch.to_be_bytes());
+            out.extend_from_slice(&state.current_tick.as_u64().to_be_bytes());
+            out.extend_from_slice(&state.end_tick.as_u64().to_be_bytes());
+            out.extend_from_slice(
+                &u16::try_from(state.players.len())
+                    .unwrap_or(u16::MAX)
+                    .to_be_bytes(),
+            );
+            for row in &state.players {
+                out.extend_from_slice(row.player_id.as_bytes());
+                out.extend_from_slice(&row.score.to_be_bytes());
+                out.extend_from_slice(&row.eliminations.to_be_bytes());
+                out.extend_from_slice(&row.assists.to_be_bytes());
+                out.extend_from_slice(&row.deaths.to_be_bytes());
+                out.push(u8::from(row.alive));
+                option_tick(&mut out, row.respawn_at_tick);
+                option_tick(&mut out, row.respawn_speed_buff_end_tick);
+                option_tick(&mut out, row.horse_buff_end_tick);
+            }
+            match state.active_reveal {
+                Some(reveal) => {
+                    out.push(1);
+                    out.extend_from_slice(reveal.player_id.as_bytes());
+                    out.extend_from_slice(&reveal.started_tick.as_u64().to_be_bytes());
+                    out.extend_from_slice(&reveal.end_tick.as_u64().to_be_bytes());
+                }
+                None => out.push(0),
+            }
+            match state.active_objective {
+                Some(objective) => {
+                    out.push(1);
+                    out.extend_from_slice(&objective.objective_id.to_be_bytes());
+                    out.push(objective_kind_code(objective.kind));
+                    out.extend_from_slice(&objective.started_tick.as_u64().to_be_bytes());
+                    out.extend_from_slice(&objective.end_tick.as_u64().to_be_bytes());
+                    out.push(u8::from(objective.completed));
+                }
+                None => out.push(0),
+            }
+            out.push(u8::from(state.finished));
+            match state.winner {
+                Some(winner) => {
+                    out.push(1);
+                    out.extend_from_slice(winner.as_bytes());
+                }
+                None => out.push(0),
+            }
+        }
     }
     out
 }
@@ -1186,6 +1506,16 @@ const fn recall_state_code(value: RecallState) -> u8 {
     }
 }
 
+const fn objective_kind_code(value: DynamicObjectiveKind) -> u8 {
+    match value {
+        DynamicObjectiveKind::MovingBounty => 0,
+        DynamicObjectiveKind::SupplyHerd => 1,
+        DynamicObjectiveKind::AmmoWagon => 2,
+        DynamicObjectiveKind::SignalTower => 3,
+        DynamicObjectiveKind::HorseBuffStation => 4,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1558,18 @@ mod tests {
             charge_started_tick: None,
             charge_end_tick: None,
         }
+    }
+
+    fn match_state(epoch: u64, tick: u64, player_count: u8) -> M5MatchStateV2 {
+        let mut kernel = spurfire_protocol::BountyMatchKernel::new(
+            epoch,
+            0,
+            SimulationTick::new(0),
+            (1..=player_count).map(player).collect(),
+        )
+        .unwrap();
+        kernel.advance_tick(SimulationTick::new(tick)).unwrap();
+        M5MatchStateV2::from_snapshot(&kernel.snapshot())
     }
 
     fn envelope(payload: M3PeerPayloadV2) -> M3EnvelopeV2 {
@@ -1536,12 +1878,75 @@ mod tests {
                 epoch: 2,
             },
             M3PeerPayloadV2::Leave,
+            M3PeerPayloadV2::MatchState {
+                state: match_state(4, 5, 3),
+            },
         ];
         let tags = payloads
             .iter()
             .map(|payload| canonical_m3_payload_bytes(payload)[0])
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(tags.len(), payloads.len());
+    }
+
+    #[test]
+    fn eight_player_match_state_with_reveal_and_objective_stays_mtu_safe() {
+        let mut state = match_state(4, 7_200, 8);
+        assert!(state.active_reveal.is_some());
+        assert!(state.active_objective.is_some());
+        for (index, row) in state.players.iter_mut().enumerate() {
+            row.horse_buff_end_tick = Some(SimulationTick::new(8_000));
+            if index < 4 {
+                row.alive = false;
+                row.respawn_at_tick = Some(SimulationTick::new(7_500));
+            } else {
+                row.respawn_speed_buff_end_tick = Some(SimulationTick::new(7_800));
+            }
+        }
+        assert!(state.is_canonical());
+        let mut packet = envelope(M3PeerPayloadV2::MatchState { state });
+        packet.simulation_tick = 7_200;
+        let encoded = encode_m3(&packet).unwrap();
+        assert!(encoded.len() <= MAX_DATAGRAM_BYTES, "{}", encoded.len());
+        assert_eq!(decode_m3(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn match_state_is_authority_only_and_binds_epoch_tick_and_roster() {
+        let mut authority = secure_session(player(1));
+        let packet = authority
+            .envelope(
+                30,
+                M3PeerPayloadV2::MatchState {
+                    state: match_state(1, 30, 3),
+                },
+                &signing_key(1),
+            )
+            .unwrap();
+        let mut follower = secure_session(player(2));
+        assert_eq!(
+            follower.accept_with_source(&packet, source(1), None, 30),
+            AcceptOutcome::Accepted
+        );
+        assert!(secure_session(player(2))
+            .envelope(
+                30,
+                M3PeerPayloadV2::MatchState {
+                    state: match_state(1, 30, 3),
+                },
+                &signing_key(2),
+            )
+            .is_err());
+
+        let mut wrong_tick = match_state(1, 30, 3);
+        wrong_tick.current_tick = SimulationTick::new(29);
+        assert!(secure_session(player(1))
+            .envelope(
+                30,
+                M3PeerPayloadV2::MatchState { state: wrong_tick },
+                &signing_key(1),
+            )
+            .is_err());
     }
 
     #[test]
