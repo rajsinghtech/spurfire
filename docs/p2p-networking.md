@@ -58,6 +58,9 @@ tailnet. It fails unless all 56 directed paths report telemetry, all seven follo
 seven authority-snapshot paths deliver, and each gameplay-HUD route/RTT row exactly matches the
 independent measurement emitted by that client. This is an insecure practice-wire integration
 qualification and must not be represented as the secure game-client lobby lifecycle acceptance test.
+On 2026-07-21, the eight-process Linux ARM64 qualification passed with all 56 routes Direct, a 20 ms
+median, 56 exact HUD matches, all seven authority input senders, and all seven snapshot receivers.
+An independent organization listing then confirmed exact absence of the disposable child tailnet.
 
 ## Security boundaries
 

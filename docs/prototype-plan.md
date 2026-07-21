@@ -461,9 +461,9 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
 **Acceptance checklist:**
 - [ ] 8-player match completes end-to-end on a real tailnet (create -> play -> results -> teardown) driven from the game client, not scripts.
 - [ ] Median RTT < 80ms direct; lobby health UI matches measured matrix. The live Rust probe has
-  measured a 3 ms direct median. `p2p-game-live` is wired to compare the in-match Godot HUD against
-  every directed measurement, but its credentialed run and the secure waiting-lobby UI still need
-  packaged-client evidence.
+  measured a 3 ms direct median. A live eight-process Godot qualification measured a 20 ms direct
+  median and matched all 56 in-match HUD rows to their independent directed measurements
+  (2026-07-21). The secure waiting-lobby UI still needs packaged-client evidence.
 - [x] Kill the authority mid-match: live signed `p2p-live` resumed in 2,044 ms with exact M3–M5 score/clock/objective continuity (2026-07-21).
 - [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
 - [ ] No movement desync > 200ms peak for any client over a 15-min soak.
