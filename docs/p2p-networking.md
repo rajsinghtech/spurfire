@@ -56,11 +56,18 @@ a local teardown warning only after traffic succeeds.
 `just p2p-game-live` separately launches eight real headless Godot processes on a disposable child
 tailnet. It fails unless all 56 directed paths report telemetry, all seven follower-input paths and
 seven authority-snapshot paths deliver, and each gameplay-HUD route/RTT row exactly matches the
-independent measurement emitted by that client. This is an insecure practice-wire integration
+independent route and rolling nine-sample RTT median emitted by that client. This is an insecure practice-wire integration
 qualification and must not be represented as the secure game-client lobby lifecycle acceptance test.
 On 2026-07-21, the eight-process Linux ARM64 qualification passed with all 56 routes Direct, a 20 ms
 median, 56 exact HUD matches, all seven authority input senders, and all seven snapshot receivers.
 An independent organization listing then confirmed exact absence of the disposable child tailnet.
+`just p2p-game-soak-live` holds the same eight-process matrix for 15 minutes while sending a
+changing authoritative qualification transform. It fails if any follower sees a snapshot gap over
+200 ms, receives fewer than 16 snapshots per second, or observes less than 30 m of motion, or if
+the authority does not continuously receive all seven input streams. Followers also compare the
+interpolated rider with the known qualification trajectory at least 30 times per second and fail
+above 200 ms of equivalent planar presentation error. Shortened runs are development
+checks only; this remains practice-wire replication evidence rather than secure lifecycle proof.
 
 ## Security boundaries
 

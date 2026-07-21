@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Open interactive Godot clients or qualify an eight-process HUD matrix on one
-# disposable RustScale tailnet.
+# Open interactive Godot clients, qualify an eight-process HUD matrix, or run
+# its changing-transform soak on one disposable RustScale tailnet.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -8,10 +8,11 @@ MODE="interactive"
 case "${1:-}" in
   "") ;;
   --qualify) MODE="qualify" ;;
-  *) echo "usage: $0 [--qualify]" >&2; exit 2 ;;
+  --soak) MODE="soak" ;;
+  *) echo "usage: $0 [--qualify|--soak]" >&2; exit 2 ;;
 esac
 
-if [[ "$MODE" == "qualify" ]]; then
+if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
   NODES=(a b c d e f g h)
 else
   NODES=(a b c)
@@ -30,6 +31,11 @@ command -v curl >/dev/null
 command -v jq >/dev/null
 GODOT_BIN="${GODOT_BIN:-$(command -v godot4 || command -v godot || true)}"
 [[ -n "$GODOT_BIN" ]] || { echo "Godot 4 was not found; set GODOT_BIN" >&2; exit 1; }
+SOAK_MS=0
+if [[ "$MODE" == "soak" ]]; then
+  SOAK_MS="${SPURFIRE_P2P_SOAK_MS:-900000}"
+  [[ "$SOAK_MS" =~ ^[1-9][0-9]*$ ]] || { echo "SPURFIRE_P2P_SOAK_MS must be a positive integer" >&2; exit 2; }
+fi
 
 # Build before provisioning so a compiler failure cannot leave a live child tailnet.
 scripts/build-gdext.sh debug
@@ -135,8 +141,10 @@ for index in "${!NODES[@]}"; do
     "SPURFIRE_P2P_DEMO_DIR=$TMP"
     "SPURFIRE_P2P_DEMO_KEY_FILE=$TMP/key-$node"
   )
-  if [[ "$MODE" == "qualify" ]]; then
-    env "${common_env[@]}" SPURFIRE_P2P_DEMO_QUALIFY=1 SPURFIRE_P2P_DEMO_TIMEOUT_MS=150000 \
+  if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
+    timeout_ms=$((SOAK_MS + 150000))
+    env "${common_env[@]}" SPURFIRE_P2P_DEMO_QUALIFY=1 \
+      SPURFIRE_P2P_DEMO_SOAK_MS="$SOAK_MS" SPURFIRE_P2P_DEMO_TIMEOUT_MS="$timeout_ms" \
       "$GODOT_BIN" --headless --path game >"$TMP/client-$node.log" 2>&1 &
   else
     x=$((20 + (index % 3) * 640))
@@ -148,20 +156,26 @@ for index in "${!NODES[@]}"; do
   # probe bursts on a single qualification host. Real players run on separate
   # machines; staggering preserves the network threshold without measuring an
   # artificial same-frame scheduler stampede.
-  if [[ "$MODE" == "qualify" ]]; then
+  if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
     sleep 0.15
   fi
 done
 
 wait_status=0
-for pid in "${PIDS[@]}"; do
-  if ! wait "$pid"; then
+for index in "${!PIDS[@]}"; do
+  pid="${PIDS[$index]}"
+  if wait "$pid"; then
+    :
+  else
+    client_status=$?
+    printf 'SPURFIRE_GODOT_P2P_PROCESS_FAILED node=%s status=%d\n' \
+      "${NODES[$index]}" "$client_status" >&2
     wait_status=1
   fi
 done
 PIDS=()
 
-if [[ "$MODE" == "qualify" ]]; then
+if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
   if [[ "$wait_status" -ne 0 ]]; then
     for log in "$TMP"/client-*.log; do
       echo "--- ${log##*/}" >&2
@@ -170,7 +184,16 @@ if [[ "$MODE" == "qualify" ]]; then
     done
     exit 1
   fi
-  scripts/check-godot-p2p-evidence.py "$TMP" "$NODE_CSV"
+  if ! evidence=$(scripts/check-godot-p2p-evidence.py "$TMP" "$NODE_CSV" "$SOAK_MS" 2>&1); then
+    printf '%s\n' "$evidence" >&2
+    for log in "$TMP"/client-*.log; do
+      echo "--- ${log##*/}" >&2
+      grep -E 'SPURFIRE_GODOT_P2P_(SOAK|QUALIFY_FAILED|MEASURED|HUD)' "$log" \
+        | tail -30 >&2 || true
+    done
+    exit 1
+  fi
+  printf '%s\n' "$evidence"
 elif [[ "$wait_status" -ne 0 ]]; then
   exit 1
 fi

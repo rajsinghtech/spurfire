@@ -211,8 +211,9 @@ just p2p-game-live
 This enrolls eight independent Godot processes, requires all 56 directed relationships to deliver
 measured route/RTT telemetry, all seven followers to deliver rider input to the authority, and all
 seven followers to receive an authoritative rider snapshot. It compares each displayed HUD route
-and RTT with that client's measurement and uses a file barrier so early clients remain online until
-the entire matrix is complete. A direct-path median of 80 ms or more fails. Success prints one
+and rolling nine-sample median RTT with that client's measurement, requires at least five samples
+per directed pair before accepting it, and uses a file barrier so early
+clients remain online until the entire matrix is complete. A direct-path median of 80 ms or more fails. Success prints one
 aggregate marker:
 
 ```text
@@ -223,6 +224,21 @@ The qualification mode is still the explicitly insecure wire-1 practice harness:
 Godot/RustScale processes and gameplay-HUD agreement, not the secure private-lobby create, results,
 or teardown flow. Its cleanup trap deletes the child tailnet on every exit and retains the mode-0700
 recovery directory if provider deletion cannot be established.
+
+For an eight-process 15-minute changing-transform replication soak, run:
+
+```bash
+just p2p-game-soak-live
+```
+
+The authority sends a deterministic circular qualification transform so the live path cannot pass
+with static snapshots. Every follower must receive at least 16 snapshots/second, observe at least
+30 m of motion, and report no snapshot gap over 200 ms; the authority must continuously receive
+input traffic from all seven followers. Each follower also samples its interpolated rider against
+the known qualification trajectory at least 30 times per second and fails above 200 ms of equivalent
+planar presentation error. `SPURFIRE_P2P_SOAK_MS` may shorten development runs, but
+only the default 900,000 ms run is 15-minute evidence. This remains practice-wire transport and
+presentation evidence, not horse-physics, secure lobby lifecycle, or human-play qualification.
 
 ## 8. Automated UDP and authority-loss test
 
