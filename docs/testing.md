@@ -247,8 +247,12 @@ CPU on Linux. Neither setting relaxes the 200 ms threshold or the evidence check
 The 2026-07-21 default run failed with 225–334 ms gaps during fixed-phase five-minute RustScale
 endpoint refreshes. A two-worker-per-client follow-up reduced the boundary to 131–202 ms but still
 failed one follower at 202 ms. See
-[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). Do not treat a shortened
-run or the successful static matrix as completion of the 15-minute movement gate.
+[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The exact PR #101
+candidate revision `eea0e4cd40d60a7c143ad7671439d66d2912df08` then passed a 360,000 ms
+refresh-boundary run with all eight Godot clients and all 56 directed routes. The authority received
+at least 21,599 inputs from each follower; the peak snapshot gap was 145 ms and peak presentation
+desync was 1 ms. Exact cleanup deleted the child tailnet. Do not treat that shortened regression
+proof or the successful static matrix as completion of the 15-minute movement gate.
 
 ## 8. Automated UDP and authority-loss test
 

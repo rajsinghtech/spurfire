@@ -1,6 +1,11 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. Both direct RustScale dependencies are pinned to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; do not update the pin without rerunning the dependency gates and live lifecycle probe.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The Alpha
+validation branch currently pins both direct dependencies to RustScale PR
+[#101](https://github.com/rajsinghtech/rustscale/pull/101) candidate revision
+`eea0e4cd40d60a7c143ad7671439d66d2912df08`; the last released pin was v0.1.4 revision
+`272ee212c7c339c3d028ea474554154bc28ae381`. Do not promote the candidate pin until its complete
+dependency gates and live lifecycle/soak probes pass on the reviewed revision.
 
 ## Components
 
@@ -79,6 +84,15 @@ was deleted and an independent organization listing found no `spurfire-godot-*` 
 fix is tracked in [RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100); this
 remains an open M6 blocker until the default 900,000 ms run passes on a reviewed dependency revision.
 
+RustScale PR #101 randomizes the periodic refresh per peer and limits that maintenance pass to the
+STUN endpoint work needed by magicsock. On 2026-07-21, its exact candidate revision
+`eea0e4cd40d60a7c143ad7671439d66d2912df08` passed a shortened 360,000 ms eight-Godot
+refresh-boundary run: all 56 directed routes were Direct, all seven follower input and authority
+snapshot paths remained live, the authority received at least 21,599 inputs from each follower,
+peak snapshot gap was 145 ms, and peak presentation desync was 1 ms. Cleanup exactly deleted the
+child tailnet. This is strong regression evidence, but it does not close the movement gate: the
+unmodified 900,000 ms run is still required.
+
 ## Security boundaries
 
 Canonical formats, key custody, validation ordering, and rotation rules for signed sessions
@@ -111,6 +125,8 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a
   live qualification item.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
-- RustScale's fixed-phase five-minute endpoint refresh can synchronize embedded peers and breach
-  the 200 ms gameplay gap gate; track and requalify
-  [issue #100](https://github.com/rajsinghtech/rustscale/issues/100) before closing the movement soak.
+- RustScale's fixed-phase five-minute endpoint refresh in v0.1.4 can synchronize embedded peers and
+  breach the 200 ms gameplay gap gate. Candidate PR
+  [#101](https://github.com/rajsinghtech/rustscale/pull/101) passed the shortened six-minute
+  refresh-boundary regression at 145 ms peak; rerun the full 15-minute gate on the reviewed
+  revision before closing the movement soak.

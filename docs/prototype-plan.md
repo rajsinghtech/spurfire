@@ -468,8 +468,11 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
 - [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
 - [ ] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
   eight-Godot run delivered all 18,000 snapshots per follower but failed at 225–334 ms during
-  RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. Track
-  [RustScale #100](https://github.com/rajsinghtech/rustscale/issues/100) and rerun the full gate.
+  RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. RustScale
+  PR #101 then passed the six-minute refresh-boundary regression at 145 ms peak snapshot gap and
+  1 ms peak presentation desync across eight Godot clients. Track
+  [RustScale #100](https://github.com/rajsinghtech/rustscale/issues/100) and rerun the full gate on
+  the reviewed dependency revision.
 - [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 23 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
 - [x] 16-peer live signed churn: 240-direction mesh, four leaves/re-enrollments, roster revision 2, replacement input, and 240-direction remesh (2026-07-21).
 - [ ] Ephemeral devices and tailnet cleaned up after match (no leaked state).
