@@ -811,7 +811,7 @@ jobs:
             if file "$code" | grep -q 'Mach-O'; then
               codesign --force --options runtime --timestamp --sign "$identity" --keychain "$keychain" "$code"
             fi
-          done < <(find "$app/Contents" -type f \( -perm -111 -o -name '*.dylib' \) -print)
+          done < <(find "$app/Contents" -type f -print)
           codesign --force --options runtime --timestamp --sign "$identity" --keychain "$keychain" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           details="$(codesign -dv --verbose=4 "$app" 2>&1)"
