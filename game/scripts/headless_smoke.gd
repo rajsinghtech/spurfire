@@ -34,11 +34,17 @@ const HUD_SETTLE_PROCESS_FRAMES := 3
 
 func _ready() -> void:
 	var failures: Array[String] = []
+	print("SPURFIRE_DIAG_STAGE input_map")
 	_check_input_map(failures)
+	print("SPURFIRE_DIAG_STAGE render_interpolation")
 	_check_render_interpolation(failures)
+	print("SPURFIRE_DIAG_STAGE airborne_yaw")
 	_check_airborne_yaw_limiter(failures)
+	print("SPURFIRE_DIAG_STAGE network_rider")
 	_check_network_rider(failures)
+	print("SPURFIRE_DIAG_STAGE peer_session")
 	_check_peer_session(failures)
+	print("SPURFIRE_DIAG_STAGE m3_controller")
 	_check_m3_gameplay_controller(failures)
 	if not ClassDB.class_exists(&"HorseController"):
 		failures.append("native class HorseController is unavailable")
@@ -49,6 +55,7 @@ func _ready() -> void:
 		_finish(failures)
 		return
 
+	print("SPURFIRE_DIAG_STAGE course_load")
 	var packed := load("res://scenes/graybox_course.tscn") as PackedScene
 	if packed == null:
 		failures.append("graybox_course.tscn could not be loaded")
