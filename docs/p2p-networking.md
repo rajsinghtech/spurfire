@@ -82,7 +82,7 @@ each embedded Tokio runtime to two workers reduced a six-minute refresh-boundary
 but one follower still failed closed at 202 ms. Every disposable child tailnet from these attempts
 was deleted and an independent organization listing found no `spurfire-godot-*` child. The upstream
 fix is tracked in [RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100); this
-remains an open M6 blocker until the default 900,000 ms run passes on a reviewed dependency revision.
+was an open M6 blocker until the candidate passed the default run below.
 
 RustScale PR #101 randomizes the periodic refresh per peer and limits that maintenance pass to the
 STUN endpoint work needed by magicsock. On 2026-07-21, its exact candidate revision
@@ -90,8 +90,15 @@ STUN endpoint work needed by magicsock. On 2026-07-21, its exact candidate revis
 refresh-boundary run: all 56 directed routes were Direct, all seven follower input and authority
 snapshot paths remained live, the authority received at least 21,599 inputs from each follower,
 peak snapshot gap was 145 ms, and peak presentation desync was 1 ms. Cleanup exactly deleted the
-child tailnet. This is strong regression evidence, but it does not close the movement gate: the
-unmodified 900,000 ms run is still required.
+child tailnet. The subsequent default 900,000 ms run on the same exact candidate also passed. All
+eight Godot clients and 56 directed Direct routes remained live through three independently
+randomized maintenance cycles; the authority received at least 53,999 inputs from each follower,
+peak snapshot gap was 153 ms, maximum last-snapshot age was 48 ms, minimum motion span was
+39,999 mm, and peak presentation desync was 2 ms across at least 130,435 presentation samples per
+follower. The cleanup trap deleted the child tailnet, builder credentials and run files were absent
+afterward, and an independent organization listing contained no `spurfire-godot-*` child. This
+closes the M6 practice-wire transport/presentation soak, not secure packaged-client lifecycle, horse
+physics, or human-play qualification.
 
 ## Security boundaries
 
@@ -127,6 +134,6 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
 - RustScale's fixed-phase five-minute endpoint refresh in v0.1.4 can synchronize embedded peers and
   breach the 200 ms gameplay gap gate. Candidate PR
-  [#101](https://github.com/rajsinghtech/rustscale/pull/101) passed the shortened six-minute
-  refresh-boundary regression at 145 ms peak; rerun the full 15-minute gate on the reviewed
-  revision before closing the movement soak.
+  [#101](https://github.com/rajsinghtech/rustscale/pull/101) passed both the shortened six-minute
+  refresh-boundary regression at 145 ms peak and the full 15-minute gate at 153 ms peak. Promote
+  only the reviewed/released dependency revision; secure packaged-client and human gates remain.

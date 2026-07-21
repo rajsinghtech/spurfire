@@ -259,7 +259,17 @@ candidate revision `eea0e4cd40d60a7c143ad7671439d66d2912df08` then passed a 360,
 refresh-boundary run with all eight Godot clients and all 56 directed routes. The authority received
 at least 21,599 inputs from each follower; the peak snapshot gap was 145 ms and peak presentation
 desync was 1 ms. Exact cleanup deleted the child tailnet. Do not treat that shortened regression
-proof or the successful static matrix as completion of the 15-minute movement gate.
+proof or the successful static matrix as completion of the 15-minute movement gate. The subsequent
+exact-candidate default run completed the gate:
+
+```text
+SPURFIRE_GODOT_P2P_SOAK_OK peers=8 duration_ms=900000 min_sender_inputs=53999 peak_gap_ms=153 max_last_age_ms=48 min_motion_span_mm=39999 min_presentation_samples=130435 peak_presentation_desync_ms=2
+```
+
+All 56 directed routes were Direct with a 14 ms median. Exact cleanup deleted the disposable child,
+the builder retained no credential or run directory, and an independent organization listing found
+no `spurfire-godot-*` tailnet. This completes the practice-wire transport/presentation soak only;
+secure packaged lifecycle, horse physics, and human-play evidence remain separate gates.
 
 ## 8. Automated UDP and authority-loss test
 

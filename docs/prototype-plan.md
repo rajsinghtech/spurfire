@@ -466,13 +466,16 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
   (2026-07-21). The secure waiting-lobby UI still needs packaged-client evidence.
 - [x] Kill the authority mid-match: live signed `p2p-live` resumed in 2,044 ms with exact M3–M5 score/clock/objective continuity (2026-07-21).
 - [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
-- [ ] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
+- [x] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
   eight-Godot run delivered all 18,000 snapshots per follower but failed at 225–334 ms during
   RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. RustScale
   PR #101 then passed the six-minute refresh-boundary regression at 145 ms peak snapshot gap and
-  1 ms peak presentation desync across eight Godot clients. Track
-  [RustScale #100](https://github.com/rajsinghtech/rustscale/issues/100) and rerun the full gate on
-  the reviewed dependency revision.
+  1 ms peak presentation desync across eight Godot clients. Its exact candidate subsequently passed
+  the full 900,000 ms run across all eight clients and 56 directed routes at 153 ms peak snapshot
+  gap and 2 ms peak presentation desync, followed by exact cleanup and independent absence proof.
+  Track [RustScale #100](https://github.com/rajsinghtech/rustscale/issues/100) through reviewed pin
+  promotion. This checkbox is practice-wire transport/presentation evidence, not horse-physics or
+  human-play qualification.
 - [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 23 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
 - [x] 16-peer live signed churn: 240-direction mesh, four leaves/re-enrollments, roster revision 2, replacement input, and 240-direction remesh (2026-07-21).
 - [ ] Ephemeral devices and tailnet cleaned up after match (no leaked state).
