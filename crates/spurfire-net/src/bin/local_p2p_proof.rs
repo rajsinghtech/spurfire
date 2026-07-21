@@ -35,6 +35,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 const PROOF_TIMEOUT: Duration = Duration::from_secs(20);
 const UDP_TIMEOUT: Duration = Duration::from_millis(25);
 const SEND_INTERVAL: Duration = Duration::from_millis(75);
+const FRAGMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const CONTROL_HEADER_BYTES: usize = size_of::<u32>();
 const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
 
@@ -1980,6 +1981,9 @@ fn run_wire2_migration_child(
     }
     let started = Instant::now();
     let mut last_send = started;
+    let mut last_fragment_send = started
+        .checked_sub(FRAGMENT_RETRY_INTERVAL)
+        .unwrap_or(started);
     let mut seen_peers = BTreeSet::new();
     let mut mesh_reported = false;
     let mut migrated_reported = false;
@@ -2062,17 +2066,30 @@ fn run_wire2_migration_child(
 
         if last_send.elapsed() >= SEND_INTERVAL {
             last_send = Instant::now();
-            if node == Node::B && migrated_reported && !fragments_sent {
+            if node == Node::B
+                && migrated_reported
+                && !checkpoint_acknowledged
+                && last_fragment_send.elapsed() >= FRAGMENT_RETRY_INTERVAL
+            {
                 for payload in fragment_m3_checkpoint(Node::B.id()?, 2, &checkpoint)? {
                     let envelope =
                         session.envelope(checkpoint.combat.tick, payload, &signing_key)?;
                     send_v2_envelope(&socket, &envelope, endpoint_for(&manifest, Node::C)?)?;
                 }
                 fragments_sent = true;
+                last_fragment_send = Instant::now();
             } else {
                 let payload = if node == Node::B && checkpoint_acknowledged {
                     M3PeerPayloadV2::MatchState {
                         state: continued.clone(),
+                    }
+                } else if node == Node::C && checkpoint_installed && !score_continued {
+                    // C repeats the receipt until B advances the match. UDP may
+                    // drop either a checkpoint fragment or the first receipt;
+                    // neither event is permitted to make the proof flaky.
+                    M3PeerPayloadV2::Probe {
+                        nonce: WIRE2_CHECKPOINT_ACK,
+                        reply: true,
                     }
                 } else {
                     M3PeerPayloadV2::Heartbeat

@@ -87,6 +87,24 @@ func _refresh_roster() -> void:
 		lines.append("RIDER %s%-11s  %-10s  %7s  %s\n    ENDPOINT  %s" % [name, badges, route, rtt_text, health, endpoint])
 	roster_label.text = "\n".join(lines)
 
+## Returns the route and RTT values rendered by the live roster. The bounded
+## multi-client qualification compares these HUD values with the independent
+## replication measurements for every directed peer relationship.
+func qualification_peer_rows() -> Array:
+	_refresh_roster()
+	var rows: Array = []
+	if replication == null or not replication.has_method("get_peer_status"):
+		return rows
+	for peer: Dictionary in replication.get_peer_status():
+		if bool(peer.get("you", false)):
+			continue
+		rows.append({
+			"name": str(peer.get("name", "")),
+			"route": _route_label(str(peer.get("route", "UNKNOWN"))),
+			"rtt_ms": int(peer.get("rtt_ms", -1)),
+		})
+	return rows
+
 func _refresh_match_banner() -> void:
 	var state := _match_state()
 	match_panel.visible = not state.is_empty()

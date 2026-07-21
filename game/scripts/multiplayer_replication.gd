@@ -20,6 +20,11 @@ var _demo_snapshot_count := 0
 var _demo_max_gap_msec := 0
 var _demo_last_snapshot_msec := 0
 var _last_route_query_msec := 0
+var _demo_qualify := false
+var _demo_qualify_deadline_msec := 0
+var _demo_qualification_emitted := false
+var _demo_quit_requested := false
+var _demo_nodes: Array[String] = []
 var _peers: Dictionary = {}
 var _remote_riders: Dictionary = {}
 var _seen_snapshot_senders: Dictionary = {}
@@ -29,8 +34,12 @@ const DEMO_PLAYERS := {
 	"a": "00000000-0000-4000-8000-000000000002",
 	"b": "00000000-0000-4000-8000-000000000003",
 	"c": "00000000-0000-4000-8000-000000000004",
+	"d": "00000000-0000-4000-8000-000000000005",
+	"e": "00000000-0000-4000-8000-000000000006",
+	"f": "00000000-0000-4000-8000-000000000007",
+	"g": "00000000-0000-4000-8000-000000000008",
+	"h": "00000000-0000-4000-8000-000000000009",
 }
-const DEMO_NODES := ["a", "b", "c"]
 const RIDER_COLORS := [Color("5ec8e5"), Color("ffb84d"), Color("d979ff")]
 
 func _ready() -> void:
@@ -51,14 +60,41 @@ func _process(_delta: float) -> void:
 		_last_route_query_msec = now
 		for peer: Dictionary in _peers.values():
 			peer_session.query_route(str(peer.ip))
+	if _demo_qualify:
+		_try_finish_demo_qualification(now)
 
 func _start_demo() -> void:
 	_demo_node = OS.get_environment("SPURFIRE_P2P_DEMO_NODE").to_lower()
 	_demo_dir = OS.get_environment("SPURFIRE_P2P_DEMO_DIR")
 	var enrollment_file := OS.get_environment("SPURFIRE_P2P_DEMO_KEY_FILE")
-	if _demo_node not in DEMO_NODES or _demo_dir.is_empty() or not FileAccess.file_exists(enrollment_file):
+	var requested_nodes := OS.get_environment("SPURFIRE_P2P_DEMO_NODES").strip_edges().to_lower()
+	if requested_nodes.is_empty():
+		requested_nodes = "a,b,c"
+	for requested_node in requested_nodes.split(",", false):
+		var clean_node := str(requested_node).strip_edges()
+		if not clean_node.is_empty() and clean_node not in _demo_nodes:
+			_demo_nodes.append(clean_node)
+	_demo_qualify = OS.get_environment("SPURFIRE_P2P_DEMO_QUALIFY") == "1"
+	var timeout_msec := maxi(30000, int(OS.get_environment("SPURFIRE_P2P_DEMO_TIMEOUT_MS")))
+	_demo_qualify_deadline_msec = Time.get_ticks_msec() + timeout_msec
+	if (
+		_demo_nodes.size() < 2
+		or _demo_nodes.size() > DEMO_PLAYERS.size()
+		or _demo_node not in _demo_nodes
+		or not DEMO_PLAYERS.has(_demo_node)
+		or _demo_dir.is_empty()
+		or not FileAccess.file_exists(enrollment_file)
+	):
 		push_error("P2P demo environment is incomplete")
+		if _demo_qualify:
+			get_tree().quit.call_deferred(1)
 		return
+	for node_name in _demo_nodes:
+		if not DEMO_PLAYERS.has(node_name):
+			push_error("P2P demo node is unsupported: %s" % node_name)
+			if _demo_qualify:
+				get_tree().quit.call_deferred(1)
+			return
 	if not peer_session.configure_session(
 		DEMO_LOBBY,
 		DEMO_PLAYERS[_demo_node],
@@ -73,11 +109,11 @@ func _start_demo() -> void:
 		push_error("P2P demo RustScale worker did not start")
 		return
 	local_is_authority = _demo_node == "a"
-	local_horse.global_position.x = float(DEMO_NODES.find(_demo_node) - 1) * 8.0
+	local_horse.global_position.x = float(_demo_nodes.find(_demo_node)) * 4.0
 	DisplayServer.window_set_title("Spurfire P2P — Rider %s" % _demo_node.to_upper())
 
 func _discover_demo_peers() -> void:
-	for node_name in DEMO_NODES:
+	for node_name in _demo_nodes:
 		if node_name == _demo_node or _peers.has(node_name):
 			continue
 		var endpoint_path := _demo_dir.path_join("endpoint-%s" % node_name)
@@ -96,9 +132,61 @@ func _discover_demo_peers() -> void:
 			"rtt_logged": false,
 			"last_seen_ms": 0,
 		}
-	if _peers.size() == DEMO_NODES.size() - 1 and not _demo_ready_logged:
+	if _peers.size() == _demo_nodes.size() - 1 and not _demo_ready_logged:
 		_demo_ready_logged = true
 		print("SPURFIRE_GODOT_P2P_READY local=%s peers=%d" % [_demo_node, _peers.size()])
+
+func _try_finish_demo_qualification(now: int) -> void:
+	if _demo_quit_requested:
+		return
+	if now >= _demo_qualify_deadline_msec:
+		push_error("SPURFIRE_GODOT_P2P_QUALIFY_FAILED local=%s reason=timeout" % _demo_node)
+		_demo_quit_requested = true
+		get_tree().quit.call_deferred(1)
+		return
+	if not _demo_qualification_emitted:
+		if _peers.size() != _demo_nodes.size() - 1:
+			return
+		if _seen_snapshot_senders.size() != _demo_nodes.size() - 1:
+			return
+		for peer: Dictionary in _peers.values():
+			if str(peer.route).to_upper() == "UNKNOWN" or int(peer.rtt_ms) < 0 or int(peer.last_seen_ms) <= 0:
+				return
+		var network_layer := get_parent().get_node_or_null("NetworkLayer")
+		if network_layer == null or not network_layer.has_method("qualification_peer_rows"):
+			return
+		var hud_rows := {}
+		for row: Dictionary in network_layer.call("qualification_peer_rows"):
+			hud_rows[str(row.get("name", ""))] = row
+		if hud_rows.size() != _peers.size():
+			return
+		var names := _peers.keys()
+		names.sort()
+		for peer_name: String in names:
+			var measured: Dictionary = _peers[peer_name]
+			var hud := hud_rows.get(peer_name, {}) as Dictionary
+			print("SPURFIRE_GODOT_P2P_MEASURED local=%s peer=%s route=%s rtt_ms=%d" % [
+				_demo_node, peer_name, str(measured.route).to_upper(), int(measured.rtt_ms),
+			])
+			print("SPURFIRE_GODOT_P2P_HUD local=%s peer=%s route=%s rtt_ms=%d" % [
+				_demo_node, peer_name, str(hud.get("route", "UNKNOWN")), int(hud.get("rtt_ms", -1)),
+			])
+		var marker := FileAccess.open(_demo_dir.path_join("qualified-%s" % _demo_node), FileAccess.WRITE)
+		if marker == null:
+			push_error("SPURFIRE_GODOT_P2P_QUALIFY_FAILED local=%s reason=barrier_write" % _demo_node)
+			_demo_quit_requested = true
+			get_tree().quit.call_deferred(1)
+			return
+		marker.store_string("ready\n")
+		_demo_qualification_emitted = true
+	for node_name in _demo_nodes:
+		if not FileAccess.file_exists(_demo_dir.path_join("qualified-%s" % node_name)):
+			return
+	print("SPURFIRE_GODOT_P2P_QUALIFIED local=%s peers=%d snapshots=%d" % [
+		_demo_node, _peers.size(), _demo_snapshot_count,
+	])
+	_demo_quit_requested = true
+	get_tree().quit.call_deferred(0)
 
 func _on_demo_connected(ip: String, port: int) -> void:
 	var file := FileAccess.open(_demo_dir.path_join("endpoint-%s" % _demo_node), FileAccess.WRITE)

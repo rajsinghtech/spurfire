@@ -202,6 +202,27 @@ cleanup: deleted P2P demo tailnet ...
 
 `just game-run` is intentionally a single local client and therefore displays `NET OFFLINE`; it is not the three-player launcher.
 
+For a bounded, headless qualification of the same arena and gameplay HUD, run:
+
+```bash
+just p2p-game-live
+```
+
+This enrolls eight independent Godot processes, requires every one of the 56 directed peer
+relationships to deliver rider snapshots and measured route/RTT telemetry, compares each displayed
+HUD route and RTT with that client's measurement, and uses a file barrier so early clients remain
+online until the entire matrix is complete. A direct-path median of 80 ms or more fails. Success
+prints one aggregate marker:
+
+```text
+SPURFIRE_GODOT_P2P_MATRIX_OK peers=8 directed_routes=56 hud_matches=56 snapshot_directions=56 direct_median_rtt_ms=<measured> route_classes=<measured>
+```
+
+The qualification mode is still the explicitly insecure wire-1 practice harness: it proves real
+Godot/RustScale processes and gameplay-HUD agreement, not the secure private-lobby create, results,
+or teardown flow. Its cleanup trap deletes the child tailnet on every exit and retains the mode-0700
+recovery directory if provider deletion cannot be established.
+
 ## 8. Automated UDP and authority-loss test
 
 Run:

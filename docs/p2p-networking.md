@@ -53,6 +53,12 @@ not the private packaged-client artifact required by the terminal release gate. 
 RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as
 a local teardown warning only after traffic succeeds.
 
+`just p2p-game-live` separately launches eight real headless Godot processes on a disposable child
+tailnet. It fails unless all 56 directed gameplay paths deliver snapshots and each gameplay-HUD
+route/RTT row exactly matches the independent measurement emitted by that client. This is an
+insecure practice-wire integration qualification and must not be represented as the secure
+game-client lobby lifecycle acceptance test.
+
 ## Security boundaries
 
 Canonical formats, key custody, validation ordering, and rotation rules for signed sessions

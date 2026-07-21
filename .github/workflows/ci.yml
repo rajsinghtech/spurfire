@@ -125,12 +125,14 @@ jobs:
             scripts/check-godot-secret-paths.sh \
             scripts/prove-local-p2p.sh \
             scripts/prove-local-scale.sh \
+            scripts/run-p2p-demo.sh \
             scripts/run-alpha-two-client.sh \
             scripts/check-release-metadata.sh
           python3 -m py_compile \
             scripts/aggregate-playtest.py \
             scripts/check-alpha-evidence.py \
             scripts/check-alpha-lifecycle-evidence.py \
+            scripts/check-godot-p2p-evidence.py \
             scripts/make-alpha-candidate-metadata.py
           python3 -m unittest discover -s scripts/tests -v
           scripts/check-godot-secret-paths.sh

@@ -69,6 +69,11 @@ func _ready() -> void:
 		title_status.text = "Checking private-lobby availability…"
 		api.probe_lobby_readiness()
 	_show(Screen.TITLE)
+	# The credentialed RustScale demo is an explicit local-only mode. Enter the
+	# arena without requiring UI automation so headless multi-client qualification
+	# exercises the same scene and HUD as the interactive practice launcher.
+	if OS.get_environment("SPURFIRE_P2P_DEMO") == "1":
+		_start_practice.call_deferred()
 
 func _process(delta: float) -> void:
 	if _screen not in [Screen.WAITING, Screen.TEARDOWN, Screen.MATCH] or _lobby_id.is_empty():

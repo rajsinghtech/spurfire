@@ -83,6 +83,10 @@ scale-live:
 p2p-demo:
     scripts/run-p2p-demo.sh
 
+# Qualify an eight-process Godot route/RTT/HUD matrix on a disposable child tailnet
+p2p-game-live:
+    scripts/run-p2p-demo.sh --qualify
+
 # Remove build artifacts
 clean:
     cargo clean
