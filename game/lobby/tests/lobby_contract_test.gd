@@ -12,6 +12,7 @@ func _ready() -> void:
 	_check_peer_roster_binding(failures)
 	_check_m3_loadout_projection(failures)
 	_check_m3_input_buffer(failures)
+	_check_m3_horse_presentation_path(failures)
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
@@ -132,6 +133,49 @@ func _check_m3_input_buffer(failures: Array[String]) -> void:
 		failures.append("M3 jump/crouch input latch was not exactly nine 60 Hz ticks")
 	bridge.free()
 
+func _check_m3_horse_presentation_path(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	var state := {
+		"position": Vector3.ZERO, "velocity": Vector3.ZERO, "yaw_degrees": 0.0,
+		"horse_position": Vector3.ZERO, "horse_velocity": Vector3.ZERO,
+		"horse_yaw_degrees": 0.0,
+	}
+	bridge.call("_update_authority_horse_presentation", PLAYER_B, state, {
+		"horse_state_id": 1, "recall_state_id": 0,
+		"horse_bolt_started_tick": 100, "horse_bolt_direction": Vector2.RIGHT,
+	}, 160)
+	if not (state.horse_position as Vector3).is_equal_approx(Vector3(12.0, 0.0, 0.0)):
+		failures.append("M3 remote horse bolt did not use its authority tick/direction")
+	state["horse_position"] = Vector3.ZERO
+	bridge.call("_update_authority_horse_presentation", PLAYER_B, state, {
+		"horse_state_id": 2, "recall_state_id": 5, "recall_phase_enter_tick": 200,
+	}, 290)
+	if not (state.horse_position as Vector3).is_equal_approx(Vector3(0.0, 0.0, 31.5)):
+		failures.append("M3 Majestic Return did not traverse 60m to the rider deterministically")
+	var presentation_root := Node3D.new()
+	add_child(presentation_root)
+	presentation_root.add_child(bridge)
+	var local_horse := CharacterBody3D.new()
+	presentation_root.add_child(local_horse)
+	var visual := MeshInstance3D.new()
+	visual.mesh = BoxMesh.new()
+	local_horse.add_child(visual)
+	var remote_template := Node3D.new()
+	presentation_root.add_child(remote_template)
+	bridge.local_horse = local_horse
+	bridge.remote_rider_template = remote_template
+	state["horse_state"] = "despawned"
+	state["recall_state"] = "gallop_in"
+	bridge.call("_apply_remote_horse_snapshot", PLAYER_B, 290, state)
+	var remote_horses := bridge.get("_remote_horses") as Dictionary
+	var presented := remote_horses.get(PLAYER_B) as Node3D
+	if (
+		presented == null or not presented.visible or not presented.has_method("push_snapshot")
+		or presented.get_node_or_null("M3PhaseCue") == null
+	):
+		failures.append("M3 remote horse proxy did not instantiate its interpolated return visual")
+	presentation_root.free()
+
 func _check_secret_storage_contract(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
 	var scene_source := FileAccess.get_file_as_string("res://lobby/lobby_shell.tscn")
@@ -173,6 +217,10 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"poll_m3_migration", "record_m3_horse_pose", "actor_snapshot",
 		"M3_INPUT_BUFFER_TICKS := 9", "_jump_buffer_until_tick",
 		"_crouch_buffer_until_tick", "reload_active_ticks",
+		"_update_authority_horse_presentation", "_apply_remote_horse_snapshot",
+		"_remote_horses.erase(player_id)", "M3_RETURN_SPAWN_DISTANCE_M := 60.0",
+		"m3_interval", "m3_horse_lost", "m3_duel_elimination",
+		"running_mount_attempts", "post_spook_deaths", "user://logs/m3-",
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)

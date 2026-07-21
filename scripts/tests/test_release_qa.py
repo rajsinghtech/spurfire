@@ -233,6 +233,29 @@ class AggregateTests(unittest.TestCase):
                 "angular_jerk": 3.0,
                 "repeated_transform": False,
             },
+            {
+                **base_record("m3_interval"),
+                "actor_slot": 0,
+                "mounted_ticks": 420,
+                "on_foot_ticks": 180,
+                "roll_ticks": 30,
+                "spook_stun_ticks": 36,
+                "horse_losses": 1,
+                "remounts": 1,
+                "running_mount_attempts": 2,
+                "running_remounts": 1,
+                "duel_wins": 2,
+                "on_foot_vs_mounted_duels": 4,
+                "on_foot_vs_mounted_wins": 1,
+                "post_spook_deaths": 1,
+            },
+            {
+                **base_record("m3_remount"),
+                "actor_slot": 0,
+                "lose_horse_to_remount_ticks": 1800,
+                "running_mount": True,
+            },
+            {**base_record("m3_horse_lost"), "actor_slot": 0, "notification_points": 15},
             {**base_record("session_ended"), "timestamp_ms": 900_000},
         ]
         for index, row in enumerate(rows, 1):
@@ -251,6 +274,13 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(metrics["landing_death_rate"], 1.0)
         self.assertEqual(metrics["remount_seconds_median"], 8.0)
         self.assertEqual(first["reload_rejection_counts"], {"recovering": 1})
+        m3 = first["m3_metrics"]
+        self.assertEqual(m3["mounted_time_share"], 0.7)
+        self.assertEqual(m3["lose_horse_to_remount_seconds_median"], 30.0)
+        self.assertEqual(m3["running_mount_success_rate"], 0.5)
+        self.assertEqual(m3["on_foot_vs_mounted_win_rate"], 0.25)
+        self.assertEqual(m3["post_spook_death_rate"], 1.0)
+        self.assertEqual(m3["bolt_notification_coverage"], 1.0)
 
     def test_secret_field_rejected(self):
         with self.assertRaises(AGGREGATE.InputError):

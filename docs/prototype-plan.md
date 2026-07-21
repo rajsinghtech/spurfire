@@ -27,7 +27,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 | M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
 | M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
-| M3 | Spook/bolt, on-foot kit, Majestic Return | **authority kernel in progress / integration pending** | median lose-horse-to-remount < 40s |
+| M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | not started | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | not started | 15-min match, winner 400–800 pts, "play again" >= 70% |
 | M6 | Scale and qualify the complete loop | **partial (spine built)** | 8p peer-hosted match, migration < 3s with score intact |
@@ -177,7 +177,7 @@ broken will poison playtest feedback; (3) airborne FOV/camera motion sickness.
 
 ## M3 — Horse vitality, spook/bolt, on-foot kit, Majestic Return
 
-**Status: native authority foundation in progress / not yet playable.**
+**Status: source complete / playtest pending.**
 `spurfire-protocol::m3` now owns replay-safe archetype vitality and regeneration, the fatal
 spook/three-second bolt edge, exact on-foot stamina/crouch/roll/stun timing, recall reductions,
 the Majestic Return phase clock, running-mount validation, acceptance telemetry, and validated
@@ -202,9 +202,14 @@ wire 1.2 remains only as the M2 proof/demo codec. The composed authority now own
 rollback-safe reload clock: an admitted reload pauses across stun/roll, resumes without losing
 progress, completes against canonical ammo, and migrates in an exact player-sorted wire-v2 row.
 The live scene boundary latches jump/crouch for exactly nine 60 Hz ticks, and the native on-foot
-kernel checkpoints explicit walk/sprint/crouch acceleration and deceleration. M3 remains incomplete
-until remote horse/spook/return presentation and playtest instrumentation consume this state end to
-end.
+kernel checkpoints explicit walk/sprint/crouch acceleration and deceleration. Authority snapshots
+drive a separate interpolated remote-horse proxy through spook, 12 m/s bolt, dust reveal, exact
+three-second Majestic Return, mount window, and running mount presentation. The authority also
+writes secret-free per-actor-slot interval and event rows for stance time, roll/stun time, horse
+losses, remount duration, running-mount attempts/success, cross-stance eliminations, post-spook
+deaths, and the fixed 15-point horse-loss notification. `scripts/aggregate-playtest.py` validates
+and summarizes those rows. Automated checks establish the source path, not the observational exit
+gate below; M3 remains playtest pending until real sessions meet it.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.
@@ -473,7 +478,9 @@ Godot 4.7.1 with gdext and the acceptance checks held. See `docs/decisions.md` D
 
 ---
 
-## 4. Playtest instrumentation: tuning the Saddle Dive risk/reward
+## 4. Playtest instrumentation
+
+### M2 Saddle Dive risk/reward
 
 The secret-free schema-v1 row is keyed by `(actor, dive_id)` and records authority epoch;
 launch tick, locked weapon/gait, pre-launch velocity and speed; requested/clamped direction
@@ -501,6 +508,17 @@ endpoint, or client-claimed style credit.
 **Deferred metrics:** M4 owns bond gain and its value; M5 owns outcome score delta, dive-elim
 share, score bonuses, and match-half reward pressure. M2 instrumentation must not synthesize
 those future systems.
+
+### M3 horse-loss and on-foot arc
+
+The authority appends one-second `m3_interval` counters plus discrete horse-loss, remount, and
+rider-elimination rows to a separate per-session JSONL file. Stable roster UUIDs are converted to
+sorted integer actor slots before persistence; credentials, endpoints, join codes, and player IDs
+are never stored. Terminal and authority-loss flushes preserve partial observations. The shared
+aggregator reports mounted/on-foot share, roll and stun seconds, horse losses, remount count and
+median duration, rising-edge running-mount success, cross-stance win rate, post-spook death rate,
+and exact 15-point bolt-notification coverage. These are observational evidence only: M4 owns Spur
+credit and M5 owns score and match outcomes.
 
 Kill criteria (redesign, not tune): dive elim share >25% (dominant) for 2 consecutive
 milestones, or usage <1/match after two buff passes (players have voted it's not fun).

@@ -23,13 +23,13 @@ use spurfire_net::{
 };
 use spurfire_protocol::{
     canonical_keyreg_digest, ActorM3Mode, ActorM3TickInput, CombatAuthority, CombatGait, DiveId,
-    EntityId, HorseVitalityClass, LobbyId, LobbySessionProjection, M3ActorStance, M3AuthorityBank,
-    M3AuthorityShot, M3CombatAuthority, M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput,
-    PlayerId, QuantizedDirection, QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot,
-    RiderStance, RidingState, RosterManifest, RosterManifestEntry, SessionPublicKey,
-    SessionSignature, ShotCommand, ShotResult, SimulationTick, TargetDefinition,
-    TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS,
-    M3_WIRE_VERSION,
+    EntityId, HorseVitalityClass, HorseVitalityState, LobbyId, LobbySessionProjection,
+    M3ActorStance, M3AuthorityBank, M3AuthorityShot, M3CombatAuthority, M3HorseTargetPose, NodeKey,
+    OnFootState, OnFootTickInput, PlayerId, QuantizedDirection, QuantizedOrigin, RecallState,
+    RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState, RosterManifest,
+    RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand, ShotResult,
+    SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo,
+    WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -1551,11 +1551,60 @@ impl PeerSession {
         result.set("tick", i64::try_from(tick.as_u64()).unwrap_or(i64::MAX));
         result.set("horse_health", i64::from(actor.horse().health()));
         result.set("horse_max_health", i64::from(actor.horse().max_health()));
+        result.set(
+            "horse_state_id",
+            match actor.horse().state() {
+                HorseVitalityState::Available => 0_i64,
+                HorseVitalityState::Bolting => 1,
+                HorseVitalityState::Despawned => 2,
+            },
+        );
+        result.set(
+            "horse_bolt_started_tick",
+            actor.horse().bolt_started_tick().map_or(-1, |value| {
+                i64::try_from(value.as_u64()).unwrap_or(i64::MAX)
+            }),
+        );
+        let [bolt_x, bolt_z] = actor.horse().bolt_away_delta_mm();
+        result.set(
+            "horse_bolt_direction",
+            Vector2::new(bolt_x as f32, bolt_z as f32).normalized(),
+        );
         result.set("stamina_ticks", i64::from(actor.on_foot().stamina_ticks()));
+        result.set(
+            "recall_state_id",
+            match actor.recall().state() {
+                RecallState::HorsePresent => 0_i64,
+                RecallState::CoolingDown => 1,
+                RecallState::Ready => 2,
+                RecallState::Hoofbeats => 3,
+                RecallState::DustReveal => 4,
+                RecallState::GallopIn => 5,
+                RecallState::MountWindow => 6,
+                RecallState::WaitingMount => 7,
+            },
+        );
+        result.set(
+            "recall_phase_enter_tick",
+            actor.recall().phase_enter_tick().map_or(-1, |value| {
+                i64::try_from(value.as_u64()).unwrap_or(i64::MAX)
+            }),
+        );
         result.set("horse_despawned", output.horse_despawned);
         result.set("remounted", output.remounted);
+        result.set("running_mount", output.running_mount);
         if let Some(on_foot) = output.on_foot {
             result.set("on_foot_active", true);
+            result.set(
+                "on_foot_state_id",
+                match on_foot.state {
+                    OnFootState::SpookStunned => 0_i64,
+                    OnFootState::Standing => 1,
+                    OnFootState::Sprinting => 2,
+                    OnFootState::Crouched => 3,
+                    OnFootState::Rolling => 4,
+                },
+            );
             result.set(
                 "on_foot_velocity",
                 Vector2::new(
@@ -1834,11 +1883,30 @@ impl PeerSession {
         ) else {
             return VarDictionary::new();
         };
+        let shooter_on_foot = authority
+            .actor(command.shooter_peer_id)
+            .is_some_and(|actor| actor.mode() != ActorM3Mode::Mounted);
+        let eliminated_rider = resolved
+            .shot
+            .result
+            .target_id
+            .filter(|_| resolved.shot.result.eliminated)
+            .and_then(|target| authority.rider_owner(target));
+        let target_on_foot = eliminated_rider.is_some_and(|player| {
+            authority
+                .actor(player)
+                .is_some_and(|actor| actor.mode() != ActorM3Mode::Mounted)
+        });
         let mut result = VarDictionary::new();
         result.set(
             "result_json",
             serde_json::to_string(&resolved.shot.result).unwrap_or_default(),
         );
+        result.set("shooter_on_foot", shooter_on_foot);
+        if let Some(player) = eliminated_rider {
+            result.set("eliminated_rider_player_id", player.to_string());
+            result.set("eliminated_rider_on_foot", target_on_foot);
+        }
         if let Some(horse_damage) = resolved.horse_damage {
             result.set(
                 "horse_damage_json",

@@ -320,6 +320,12 @@ impl HorseVitalityKernel {
         self.bolt_away_delta_mm
     }
 
+    /// Exact fatal-damage tick anchoring the three-second presentation bolt.
+    #[must_use]
+    pub const fn bolt_started_tick(&self) -> Option<SimulationTick> {
+        self.bolt_started_tick
+    }
+
     /// Applies a unique command. Duplicates and post-spook damage do not mutate state.
     pub fn apply_damage(&mut self, command: HorseDamageCommand) -> Option<HorseDamageApplication> {
         if self.state != HorseVitalityState::Available
@@ -989,6 +995,12 @@ impl RecallKernel {
         self.telemetry
     }
 
+    /// Exact entry tick for the current cooldown/return phase.
+    #[must_use]
+    pub const fn phase_enter_tick(&self) -> Option<SimulationTick> {
+        self.phase_enter_tick
+    }
+
     /// Starts recall timing when the spooked horse completes its bolt.
     pub fn lose_horse(
         &mut self,
@@ -1288,6 +1300,8 @@ pub struct ActorM3TickOutput {
     pub horse_despawned: bool,
     /// True on the exact successful running/stationary remount tick.
     pub remounted: bool,
+    /// True exactly when that remount used the moving-horse window.
+    pub running_mount: bool,
 }
 
 /// Serializable native authority state required to migrate during a bolt,
@@ -1637,6 +1651,8 @@ impl ActorGameplayKernel {
             }
         }
 
+        let running_mount_candidate =
+            self.recall.state() == RecallState::MountWindow && input.return_horse_moving;
         let remounted = if matches!(
             self.recall.state(),
             RecallState::MountWindow | RecallState::WaitingMount
@@ -1665,6 +1681,7 @@ impl ActorGameplayKernel {
             recall,
             horse_despawned: horse_despawn_tick.is_some(),
             remounted,
+            running_mount: remounted && running_mount_candidate,
         })
     }
 }

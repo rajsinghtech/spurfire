@@ -145,6 +145,9 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
     notifications: Counter[str] = Counter()
     notifications_by_session: dict[str, set[str]] = defaultdict(set)
     reload_rejections: Counter[str] = Counter()
+    m3: Counter[str] = Counter()
+    m3_remount_ticks: list[int] = []
+    m3_bolt_notifications = 0
     render: dict[int, dict[str, Any]] = defaultdict(
         lambda: {"frame_deltas_ms": [], "linear_jerk": [], "angular_jerk": [], "repeated": 0}
     )
@@ -231,6 +234,39 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
                 _number(record.get("angular_jerk", 0.0), f"{source}: angular_jerk", minimum=0.0)
             )
             bucket["repeated"] += int(bool(record.get("repeated_transform", False)))
+        elif event == "m3_interval":
+            for field in (
+                "mounted_ticks",
+                "on_foot_ticks",
+                "roll_ticks",
+                "spook_stun_ticks",
+                "horse_losses",
+                "remounts",
+                "running_mount_attempts",
+                "running_remounts",
+                "duel_wins",
+                "on_foot_vs_mounted_duels",
+                "on_foot_vs_mounted_wins",
+                "post_spook_deaths",
+            ):
+                m3[field] += _integer(record.get(field, 0), f"{source}: {field}", minimum=0)
+        elif event == "m3_remount":
+            ticks = _integer(
+                record.get("lose_horse_to_remount_ticks", -1),
+                f"{source}: lose_horse_to_remount_ticks",
+                minimum=-1,
+            )
+            if ticks >= 0:
+                m3_remount_ticks.append(ticks)
+        elif event == "m3_horse_lost":
+            points = _integer(
+                record.get("notification_points"),
+                f"{source}: notification_points",
+                minimum=0,
+            )
+            if points != 15:
+                raise InputError(f"{source}: M3 horse-loss notification must be 15 points")
+            m3_bolt_notifications += 1
 
     incomplete = sorted(starts - set(finalized))
     terminal_without_start = sorted(set(finalized) - starts)
@@ -285,6 +321,10 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
         else None
     )
     dives_per_15 = len(dive_rows) * 900_000.0 / total_player_ms if total_player_ms else None
+    m3_observed_ticks = m3["mounted_ticks"] + m3["on_foot_ticks"]
+    m3_cross_duels = m3["on_foot_vs_mounted_duels"]
+    m3_horse_losses = m3["horse_losses"]
+    m3_running_attempts = m3["running_mount_attempts"]
 
     render_rows: list[dict[str, Any]] = []
     for refresh_hz in sorted(render):
@@ -344,6 +384,46 @@ def aggregate(records: list[dict[str, Any]], *, strict: bool) -> dict[str, Any]:
             name in first_three_notifications for name in NOTIFICATIONS
         ),
         "reload_rejection_counts": dict(sorted(reload_rejections.items())),
+        "m3_metrics": {
+            "observed_actor_ticks": m3_observed_ticks,
+            "mounted_time_share": _rounded(
+                m3["mounted_ticks"] / m3_observed_ticks if m3_observed_ticks else None
+            ),
+            "on_foot_time_share": _rounded(
+                m3["on_foot_ticks"] / m3_observed_ticks if m3_observed_ticks else None
+            ),
+            "roll_seconds": _rounded(m3["roll_ticks"] / TICK_RATE),
+            "spook_stun_seconds": _rounded(m3["spook_stun_ticks"] / TICK_RATE),
+            "horse_losses": m3_horse_losses,
+            "remounts": m3["remounts"],
+            "lose_horse_to_remount_seconds_median": _rounded(
+                statistics.median(m3_remount_ticks) / TICK_RATE
+                if m3_remount_ticks
+                else None
+            ),
+            "running_mount_attempts": m3_running_attempts,
+            "running_mount_successes": m3["running_remounts"],
+            "running_mount_success_rate": _rounded(
+                m3["running_remounts"] / m3_running_attempts
+                if m3_running_attempts
+                else None
+            ),
+            "on_foot_vs_mounted_duels": m3_cross_duels,
+            "on_foot_vs_mounted_wins": m3["on_foot_vs_mounted_wins"],
+            "on_foot_vs_mounted_win_rate": _rounded(
+                m3["on_foot_vs_mounted_wins"] / m3_cross_duels
+                if m3_cross_duels
+                else None
+            ),
+            "post_spook_deaths": m3["post_spook_deaths"],
+            "post_spook_death_rate": _rounded(
+                m3["post_spook_deaths"] / m3_horse_losses if m3_horse_losses else None
+            ),
+            "bolt_notification_rows": m3_bolt_notifications,
+            "bolt_notification_coverage": _rounded(
+                m3_bolt_notifications / m3_horse_losses if m3_horse_losses else None
+            ),
+        },
         "render_metrics": render_rows,
         "integrity": {
             "accepted_dive_count": len(starts),

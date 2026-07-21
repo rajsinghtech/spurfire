@@ -332,6 +332,14 @@ impl M3CombatAuthority {
         self.actors.actor(rider_player_id)
     }
 
+    /// Roster rider owning one registered rider target entity.
+    #[must_use]
+    pub fn rider_owner(&self, entity_id: EntityId) -> Option<PlayerId> {
+        self.rider_entities
+            .iter()
+            .find_map(|(player, rider)| (*rider == entity_id).then_some(*player))
+    }
+
     /// Advances one actor and synchronizes horse regeneration/remount health to
     /// the rewind registry as one transaction.
     pub fn advance_actor(
