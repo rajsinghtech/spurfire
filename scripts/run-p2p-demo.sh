@@ -37,6 +37,16 @@ if [[ "$MODE" == "soak" ]]; then
   [[ "$SOAK_MS" =~ ^[1-9][0-9]*$ ]] || { echo "SPURFIRE_P2P_SOAK_MS must be a positive integer" >&2; exit 2; }
 fi
 
+PIN_CLIENTS=0
+if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
+  if [[ "${SPURFIRE_P2P_PIN_CLIENTS:-1}" == "1" ]] \
+    && command -v taskset >/dev/null \
+    && [[ "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)" -ge "${#NODES[@]}" ]]; then
+    PIN_CLIENTS=1
+    printf 'pinning each Godot/RustScale client pair to a dedicated CPU\n' >&2
+  fi
+fi
+
 # Build before provisioning so a compiler failure cannot leave a live child tailnet.
 scripts/build-gdext.sh debug
 
@@ -143,9 +153,19 @@ for index in "${!NODES[@]}"; do
   )
   if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
     timeout_ms=$((SOAK_MS + 150000))
-    env "${common_env[@]}" SPURFIRE_P2P_DEMO_QUALIFY=1 \
-      SPURFIRE_P2P_DEMO_SOAK_MS="$SOAK_MS" SPURFIRE_P2P_DEMO_TIMEOUT_MS="$timeout_ms" \
-      "$GODOT_BIN" --headless --path game >"$TMP/client-$node.log" 2>&1 &
+    qualify_env=(
+      "${common_env[@]}"
+      "SPURFIRE_P2P_DEMO_QUALIFY=1"
+      "SPURFIRE_P2P_DEMO_SOAK_MS=$SOAK_MS"
+      "SPURFIRE_P2P_DEMO_TIMEOUT_MS=$timeout_ms"
+    )
+    if [[ "$PIN_CLIENTS" -eq 1 ]]; then
+      env "${qualify_env[@]}" taskset --cpu-list "$index" \
+        "$GODOT_BIN" --headless --path game >"$TMP/client-$node.log" 2>&1 &
+    else
+      env "${qualify_env[@]}" \
+        "$GODOT_BIN" --headless --path game >"$TMP/client-$node.log" 2>&1 &
+    fi
   else
     x=$((20 + (index % 3) * 640))
     y=$((50 + (index / 3) * 460))
@@ -179,8 +199,8 @@ if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
   if [[ "$wait_status" -ne 0 ]]; then
     for log in "$TMP"/client-*.log; do
       echo "--- ${log##*/}" >&2
-      grep -E 'SPURFIRE_GODOT_P2P_|SCRIPT ERROR|Parse Error|ERROR:' "$log" \
-        | tail -30 >&2 || true
+      grep -E 'SPURFIRE_GODOT_P2P_(LONG_GAP|SOAK|QUALIFY_FAILED)|SCRIPT ERROR|Parse Error|ERROR:' "$log" \
+        | tail -40 >&2 || true
     done
     exit 1
   fi

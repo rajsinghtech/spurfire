@@ -21,6 +21,7 @@ var _demo_input_count := 0
 var _demo_input_counts: Dictionary = {}
 var _demo_max_gap_msec := 0
 var _demo_peak_snapshot_gap_msec := 0
+var _demo_long_gap_count := 0
 var _demo_last_snapshot_msec := 0
 var _demo_latest_snapshot_position := Vector3.ZERO
 var _demo_has_snapshot_position := false
@@ -222,6 +223,7 @@ func _try_finish_demo_qualification(now: int) -> void:
 			_demo_soak_input_baseline = _demo_input_count
 			_demo_soak_input_baselines = _demo_input_counts.duplicate(true)
 			_demo_peak_snapshot_gap_msec = 0
+			_demo_long_gap_count = 0
 			_demo_last_snapshot_msec = now
 			_demo_soak_motion_span_mm = 0
 			_demo_presentation_samples = 0
@@ -483,6 +485,12 @@ func _apply_remote_snapshot(payload: Dictionary, now: int) -> void:
 			var snapshot_gap := now - _demo_last_snapshot_msec
 			_demo_max_gap_msec = maxi(_demo_max_gap_msec, snapshot_gap)
 			_demo_peak_snapshot_gap_msec = maxi(_demo_peak_snapshot_gap_msec, snapshot_gap)
+			if _demo_soak_started_msec > 0 and snapshot_gap > 100 and _demo_long_gap_count < 20:
+				_demo_long_gap_count += 1
+				print(
+					"SPURFIRE_GODOT_P2P_LONG_GAP local=%s gap_ms=%d snapshots=%d tick=%d event=%d"
+					% [_demo_node, snapshot_gap, _demo_snapshot_count, simulation_tick, _demo_long_gap_count]
+				)
 		_demo_last_snapshot_msec = now
 		_demo_latest_snapshot_position = snapshot_position
 		_demo_has_snapshot_position = true
