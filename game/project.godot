@@ -54,6 +54,14 @@ hard_brake={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":4194328), Object(InputEventJoypadMotion,"axis":4,"axis_value":1.0)]
 }
+on_foot_sprint={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194325)]
+}
+on_foot_crouch={
+"deadzone": 0.15,
+"events": [Object(InputEventKey,"physical_keycode":4194326)]
+}
 jump={
 "deadzone": 0.15,
 "events": [Object(InputEventKey,"physical_keycode":32), Object(InputEventJoypadButton,"button_index":0)]

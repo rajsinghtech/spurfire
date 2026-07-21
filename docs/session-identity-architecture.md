@@ -1,8 +1,8 @@
 # Spurfire P2P session-identity architecture
 
 Branch `agent/alpha-completion`. RustScale dependencies pinned at released v0.1.4 revision
-`272ee212c7c339c3d028ea474554154bc28ae381`. Status: **implemented** (wire 1.2 signed
-sessions) and validated in a secret-free isolated checkout on the alpha builder
+`272ee212c7c339c3d028ea474554154bc28ae381`. Status: **implemented** (wire-1.2 signed-session
+foundation, extended by the live M3 wire-2.0 payload/session path) and validated in a secret-free isolated checkout on the alpha builder
 (formatting, warnings-denied Clippy, tests, dependency/secret guards). Real admission
 remains force-closed; the control service stays out of gameplay.
 
@@ -117,9 +117,9 @@ manifest_public_key 32B || canonical_roster_bytes
 - `LobbySessionPeer` += `session_public_key`, `node_key`; `LobbySessionProjection` +=
   `session_generation`, `secure`, `roster_hash`, `manifest_signature`, `manifest_public_key`.
 - `JoinLobbyResponse`/`LobbyResponse` += `session_generation`, `manifest_public_key`.
-- Wire version is **1.2**. The server start guard requires every roster member ≥ 1.2 and a
-  complete secure projection for real (non-dry-run) lobbies; unsigned envelopes are accepted
-  only after explicit local demo/test opt-in.
+- This foundation introduced wire **1.2**. The live M3 lobby now requires compatible wire 2.0
+  members and a complete secure projection; unsigned envelopes remain available only after
+  explicit local demo/test opt-in on the legacy proof codec.
 
 ### 3.5 Receiver validation ordering (single native gate)
 
@@ -186,7 +186,7 @@ on epoch change.
   complete roster + `roster_hash` + manifest signature and a `secure` flag that requires every
   roster member to hold a fresh key registration; per-lobby memory-only manifest key in
   `AppState` (redacted, removed on destroy); restart reconciliation bumps active session
-  generations; real (non-dry-run) start requires wire ≥ 1.2 from every member plus a secure
+  generations; real (non-dry-run) start requires the active compatible signed wire from every member plus a secure
   projection; start clears the endpoint cache. **Real admission stays disabled**: the
   readiness gate in `docs/p2p-networking.md` remains force-closed on the native secret-handoff
   and coherent-authority items, and this change opens no real path.
@@ -221,9 +221,9 @@ on epoch change.
 ## 5. Migration compatibility
 
 HTTP is additive/optional (old clients get `session_identity_required` on real lobbies;
-dry-run/dev tolerate keyless registration). Wire 1.2 is major-compatible; security comes from
-the server start guard refusing sub-1.2 rosters and from secure-mode receivers rejecting
-unsigned envelopes — 1.1 readers decode but are never admitted to signed lobbies. The wire
+dry-run/dev tolerate keyless registration). Wire 1.2 remains internally major-compatible for
+the legacy proof path, while live M3 admission requires major 2. Security comes from the server
+start guard and from secure-mode receivers rejecting unsigned envelopes. The wire
 version is hashed into the canonical election input, so the election golden hash moved with
 the bump (expected). `check-control-plane-deps.sh` is unchanged.
 

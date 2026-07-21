@@ -5,6 +5,7 @@ signal authority_departed
 
 var peer_session: Node
 var local_rider: CharacterBody3D
+var local_horse: CharacterBody3D
 var remote_rider_template: Node3D
 var combat_router: Node
 var local_player_id := ""
@@ -23,13 +24,21 @@ var _applied_shot_results: Dictionary = {}
 var _migration_pending := false
 var _last_migration_poll_ms := 0
 
+const M3_INPUT_JUMP := 1 << 0
+const M3_INPUT_INTERACT := 1 << 1
+const M3_INPUT_SPRINT := 1 << 2
+const M3_INPUT_CROUCH := 1 << 3
+const M3_INPUT_RELOAD := 1 << 4
+const M3_INPUT_ADS := 1 << 5
+
 func configure(nodes: Dictionary, player_id: String) -> bool:
 	peer_session = nodes.get("peer_session") as Node
 	local_rider = nodes.get("local_rider") as CharacterBody3D
+	local_horse = nodes.get("local_horse") as CharacterBody3D
 	remote_rider_template = nodes.get("remote_rider") as Node3D
 	combat_router = nodes.get("combat_router") as Node
 	local_player_id = player_id
-	if peer_session == null or local_rider == null or remote_rider_template == null:
+	if peer_session == null or local_rider == null or local_horse == null or remote_rider_template == null:
 		return false
 	if combat_router:
 		combat_router.call("set_networked_match", true)
@@ -68,6 +77,9 @@ func apply_projection(response: Dictionary) -> bool:
 		if not peer_session.configure_roster_session(
 			lobby_id, local_player_id, authority_id, roster_ids, Time.get_ticks_msec()
 		):
+			return false
+		var loadouts := _m3_loadouts(roster_value)
+		if loadouts.is_empty() or not peer_session.activate_m3_wire(JSON.stringify(loadouts)):
 			return false
 		_session_binding_key = binding_key
 	_authority_player_id = authority_id
@@ -131,6 +143,10 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	if _quiesced or tick <= simulation_tick or peer_session == null or local_rider == null:
 		return
 	simulation_tick = tick
+	if peer_session.is_m3_wire_active():
+		_advance_m3_tick(tick, stance_changed)
+		_send_periodic_probe(tick)
+		return
 	var packet := PackedByteArray()
 	if local_is_authority:
 		_record_actor_state(local_player_id, local_rider, tick)
@@ -160,10 +176,111 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 		packet = peer_session.make_rider_input(tick, throttle, steer, buttons)
 	if not packet.is_empty():
 		_send_to_all(packet)
-	if tick % 60 == 0:
-		for peer: Dictionary in _peers.values():
-			var probe: PackedByteArray = peer_session.make_probe(tick, Time.get_ticks_msec(), false)
-			peer_session.send_packet(probe, str(peer.address), int(peer.port))
+	_send_periodic_probe(tick)
+
+func _send_periodic_probe(tick: int) -> void:
+	if tick % 60 != 0:
+		return
+	for peer: Dictionary in _peers.values():
+		var probe: PackedByteArray = peer_session.make_probe(tick, Time.get_ticks_msec(), false)
+		peer_session.send_packet(probe, str(peer.address), int(peer.port))
+
+func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
+	var local_input := _sample_m3_input()
+	if not local_is_authority:
+		var packet: PackedByteArray = peer_session.make_m3_actor_input(
+			tick,
+			int(local_input.throttle_milli), int(local_input.steer_milli),
+			int(local_input.move_x_milli), int(local_input.move_z_milli),
+			int(local_input.buttons)
+		)
+		if not packet.is_empty():
+			_send_to_all(packet)
+		return
+
+	_record_actor_state(local_player_id, local_rider, tick)
+	var local_state := _actor_states[local_player_id] as Dictionary
+	local_state["horse_position"] = local_horse.global_position
+	local_state["horse_velocity"] = local_horse.velocity
+	local_state["horse_yaw_degrees"] = rad_to_deg(local_horse.rotation.y)
+	for player_id: String in _peers:
+		var input := _latest_inputs.get(player_id, _zero_m3_input()) as Dictionary
+		_simulate_remote_actor(player_id, input, tick)
+		var state := _actor_states[player_id] as Dictionary
+		state["horse_position"] = state.position
+		state["horse_velocity"] = state.velocity
+		state["horse_yaw_degrees"] = float(state.yaw_degrees)
+
+	var ids := _actor_states.keys()
+	ids.sort()
+	for player_id: String in ids:
+		var state := _actor_states[player_id] as Dictionary
+		var input := local_input if player_id == local_player_id else (
+			_latest_inputs.get(player_id, _zero_m3_input()) as Dictionary
+		)
+		var buttons := int(input.get("buttons", 0))
+		var movement := Vector2(
+			float(input.get("move_x_milli", 0)) / 1000.0,
+			float(input.get("move_z_milli", 0)) / 1000.0
+		)
+		var actor_tick := peer_session.advance_m3_actor(
+			player_id, tick, movement,
+			buttons & M3_INPUT_SPRINT != 0, buttons & M3_INPUT_CROUCH != 0,
+			buttons & M3_INPUT_RELOAD != 0, buttons & M3_INPUT_INTERACT != 0,
+			state.position, state.horse_position, (state.horse_velocity as Vector3).length() > 0.1
+		) as Dictionary
+		if not bool(actor_tick.get("advanced", false)):
+			continue
+		_record_authority_combat_state(player_id, state)
+		_record_m3_horse_state(player_id, state, tick)
+		if tick % 2 == 0 or (player_id == local_player_id and stance_changed):
+			var snapshot: PackedByteArray = peer_session.make_m3_actor_snapshot_from_pose(
+				tick, player_id, state.position, state.velocity,
+				float(state.yaw_degrees), int(state.stance_id),
+				state.horse_position, state.horse_velocity,
+				float(state.horse_yaw_degrees)
+			)
+			if not snapshot.is_empty():
+				_send_to_all(snapshot)
+
+func _sample_m3_input() -> Dictionary:
+	var throttle := roundi(Input.get_axis(&"move_back", &"move_forward") * 1000.0)
+	var steer := roundi(Input.get_axis(&"steer_left", &"steer_right") * 1000.0)
+	var buttons := 0
+	if Input.is_action_just_pressed(&"jump"):
+		buttons |= M3_INPUT_JUMP
+	if Input.is_action_just_pressed(&"combat_interact"):
+		buttons |= M3_INPUT_INTERACT
+	if Input.is_action_pressed(&"on_foot_sprint"):
+		buttons |= M3_INPUT_SPRINT
+	if Input.is_action_pressed(&"on_foot_crouch"):
+		buttons |= M3_INPUT_CROUCH
+	if Input.is_action_pressed(&"combat_reload"):
+		buttons |= M3_INPUT_RELOAD
+	if Input.is_action_pressed(&"combat_aim"):
+		buttons |= M3_INPUT_ADS
+	var on_foot_move := Vector2(float(steer), float(-throttle))
+	if on_foot_move.length() > 1000.0:
+		on_foot_move = on_foot_move.normalized() * 1000.0
+	return {
+		"throttle_milli": throttle, "steer_milli": steer,
+		"move_x_milli": roundi(on_foot_move.x), "move_z_milli": roundi(on_foot_move.y),
+		"buttons": buttons,
+	}
+
+func _zero_m3_input() -> Dictionary:
+	return {
+		"throttle_milli": 0, "steer_milli": 0,
+		"move_x_milli": 0, "move_z_milli": 0, "buttons": 0,
+	}
+
+func _record_m3_horse_state(player_id: String, state: Dictionary, tick: int) -> void:
+	var yaw := deg_to_rad(float(state.horse_yaw_degrees))
+	var forward := Vector3.FORWARD.rotated(Vector3.UP, yaw)
+	var center := (state.horse_position as Vector3) + Vector3.UP * 0.9
+	peer_session.record_m3_horse_pose(
+		player_id, tick, center, forward, center + Vector3.UP * 0.65 + forward * 0.9
+	)
 
 func send_leave() -> void:
 	if peer_session == null or _quiesced:
@@ -280,6 +397,19 @@ func _on_packet_received(
 					"steer_milli": int(payload.get("steer_milli", 0)),
 					"buttons": int(payload.get("buttons", 0)),
 				}
+		"actor_input":
+			if local_is_authority:
+				var decoded = JSON.parse_string(str(payload.get("input_json", "")))
+				if decoded is Dictionary:
+					var input := decoded as Dictionary
+					_latest_inputs[sender] = {
+						"tick": int(payload.get("tick", 0)),
+						"throttle_milli": int(input.get("t", input.get("throttle_milli", 0))),
+						"steer_milli": int(input.get("s", input.get("steer_milli", 0))),
+						"move_x_milli": int(input.get("x", input.get("move_x_milli", 0))),
+						"move_z_milli": int(input.get("z", input.get("move_z_milli", 0))),
+						"buttons": int(input.get("b", input.get("buttons", 0))),
+					}
 		"rider_snapshot":
 			var subject := str(payload.get("rider_player_id", ""))
 			if subject.is_empty():
@@ -300,6 +430,8 @@ func _on_packet_received(
 						payload.get("velocity", Vector3.ZERO), float(payload.get("yaw_degrees", 0.0)),
 						int(payload.get("stance_id", 1))
 					)
+		"actor_snapshot":
+			_apply_m3_snapshot(str(payload.get("snapshot_json", "")))
 		"shot_command":
 			if local_is_authority:
 				_resolve_and_broadcast_command(payload)
@@ -310,6 +442,11 @@ func _on_packet_received(
 			_authority_player_id = str(payload.get("authority", _authority_player_id))
 			local_is_authority = _authority_player_id == local_player_id
 			_migration_pending = false
+		"migration_fragment", "authority":
+			_authority_player_id = str(peer_session.get("authority_player_id"))
+			local_is_authority = _authority_player_id == local_player_id
+			if int(peer_session.get("authority_epoch")) >= int(payload.get("authority_epoch", 0)):
+				_migration_pending = false
 		"leave":
 			_remove_peer(sender)
 			if sender == _authority_player_id:
@@ -325,7 +462,14 @@ func _on_local_shot_command(tick: int, command_json: String) -> void:
 			_send_to_all(packet)
 
 func _resolve_and_broadcast_command(payload: Dictionary) -> void:
-	var result_json := str(peer_session.resolve_shot_command(str(payload.get("command_json", ""))))
+	var result_json := ""
+	if peer_session.is_m3_wire_active():
+		var resolved := peer_session.resolve_m3_shot_command(
+			str(payload.get("command_json", "")), simulation_tick
+		) as Dictionary
+		result_json = str(resolved.get("result_json", ""))
+	else:
+		result_json = str(peer_session.resolve_shot_command(str(payload.get("command_json", ""))))
 	if result_json.is_empty():
 		return
 	var tick := int(payload.get("tick", 0))
@@ -392,13 +536,21 @@ func _attempt_migration(now_ms: int) -> void:
 		"source_epoch": int(peer_session.get("authority_epoch")),
 		"tick": simulation_tick, "riders": riders, "resolved_shots": resolved_value,
 	}
-	var packet: PackedByteArray = peer_session.poll_migration(
-		now_ms, JSON.stringify(checkpoint)
-	)
+	var packets: Array[PackedByteArray] = []
+	if peer_session.is_m3_wire_active():
+		for value in peer_session.poll_m3_migration(now_ms, JSON.stringify(checkpoint)):
+			packets.append(value as PackedByteArray)
+	else:
+		var packet: PackedByteArray = peer_session.poll_migration(
+			now_ms, JSON.stringify(checkpoint)
+		)
+		if not packet.is_empty():
+			packets.append(packet)
 	_authority_player_id = str(peer_session.get("authority_player_id"))
 	local_is_authority = _authority_player_id == local_player_id
-	if not packet.is_empty():
-		_send_to_all(packet)
+	if not packets.is_empty():
+		for packet: PackedByteArray in packets:
+			_send_to_all(packet)
 		_migration_pending = false
 
 func _install_checkpoint(checkpoint_json: String) -> void:
@@ -425,6 +577,69 @@ func _install_checkpoint(checkpoint_json: String) -> void:
 			"stance_id": int(row.get("s", 1)),
 			"health": int(row.get("h", 0)),
 		}
+
+func _apply_m3_snapshot(snapshot_json: String) -> void:
+	var decoded = JSON.parse_string(snapshot_json)
+	if not decoded is Dictionary:
+		return
+	var row := decoded as Dictionary
+	var player_id := str(row.get("i", row.get("rider_player_id", "")))
+	var position = row.get("p", row.get("rider_position_mm", []))
+	var velocity = row.get("v", row.get("rider_velocity_mmps", []))
+	var horse_value = row.get("o", row.get("horse", {}))
+	if (
+		player_id.is_empty() or not position is Array or (position as Array).size() != 3
+		or not velocity is Array or (velocity as Array).size() != 3
+		or not horse_value is Dictionary
+	):
+		return
+	var horse := horse_value as Dictionary
+	var horse_position = horse.get("p", horse.get("position_mm", []))
+	var horse_velocity = horse.get("v", horse.get("velocity_mmps", []))
+	if (
+		not horse_position is Array or (horse_position as Array).size() != 3
+		or not horse_velocity is Array or (horse_velocity as Array).size() != 3
+	):
+		return
+	var rider_position := _mm_vector(position as Array)
+	var rider_velocity := _mm_vector(velocity as Array)
+	var stance_name := str(row.get("s", row.get("stance", "on_foot_standing")))
+	var stance_id := _legacy_stance_from_m3(stance_name)
+	_actor_states[player_id] = {
+		"tick": int(row.get("tick", simulation_tick)),
+		"position": rider_position, "velocity": rider_velocity,
+		"yaw_degrees": float(row.get("y", row.get("rider_yaw_millidegrees", 0))) / 1000.0,
+		"stance_id": stance_id, "dive_id": -1,
+		"horse_position": _mm_vector(horse_position as Array),
+		"horse_velocity": _mm_vector(horse_velocity as Array),
+		"horse_yaw_degrees": float(horse.get("y", horse.get("yaw_millidegrees", 0))) / 1000.0,
+		"m3_stance": stance_name,
+		"horse_health": int(horse.get("h", horse.get("health", 0))),
+		"horse_state": str(horse.get("s", horse.get("state", "despawned"))),
+	}
+	if player_id == local_player_id:
+		var correction := rider_position - local_rider.global_position
+		local_rider.global_position += correction if correction.length() >= 2.0 else correction * 0.35
+		local_rider.velocity = rider_velocity
+	else:
+		var rider := _remote_rider_for(player_id)
+		if rider and rider.has_method("push_snapshot"):
+			rider.push_snapshot(
+			simulation_tick, rider_position, rider_velocity,
+			float(_actor_states[player_id].yaw_degrees), stance_id
+		)
+
+func _mm_vector(values: Array) -> Vector3:
+	return Vector3(float(values[0]), float(values[1]), float(values[2])) / 1000.0
+
+func _legacy_stance_from_m3(stance: String) -> int:
+	match stance:
+		"mounted": return 1
+		"mounted_airborne": return 2
+		"saddle_dive_airborne": return 3
+		"landing_prone": return 4
+		"landing_recovery": return 5
+		_: return 6
 
 func _vector_mm(value: Vector3) -> Array[int]:
 	return [roundi(value.x * 1000.0), roundi(value.y * 1000.0), roundi(value.z * 1000.0)]
@@ -462,20 +677,22 @@ func _record_authority_combat_state(player_id: String, state: Dictionary) -> voi
 	)
 
 func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> void:
-	if int(input.get("tick", -1)) > tick or tick - int(input.get("tick", -1)) > 6:
+	var input_tick := int(input.get("tick", -1))
+	if input_tick > tick:
 		return
+	var stale := input_tick < 0 or tick - input_tick > 6
 	var state := _actor_states.get(player_id, {
 		"tick": tick - 1, "position": Vector3.ZERO, "velocity": Vector3.ZERO,
 		"yaw_degrees": 0.0, "stance_id": 1, "dive_id": -1,
 	}) as Dictionary
-	var throttle := clampf(float(input.get("throttle_milli", 0)) / 1000.0, -1.0, 1.0)
-	var steer := clampf(float(input.get("steer_milli", 0)) / 1000.0, -1.0, 1.0)
+	var throttle := 0.0 if stale else clampf(float(input.get("throttle_milli", 0)) / 1000.0, -1.0, 1.0)
+	var steer := 0.0 if stale else clampf(float(input.get("steer_milli", 0)) / 1000.0, -1.0, 1.0)
 	var yaw := float(state.yaw_degrees) + steer * 90.0 / 60.0
 	var forward := Vector3.FORWARD.rotated(Vector3.UP, deg_to_rad(yaw))
 	var velocity := forward * throttle * 13.0
 	var position := (state.position as Vector3) + velocity / 60.0
 	var stance := int(state.stance_id)
-	var buttons := int(input.get("buttons", 0))
+	var buttons := 0 if stale else int(input.get("buttons", 0))
 	if buttons & 1 and stance == 1:
 		stance = 2
 	if buttons & 2:
@@ -518,6 +735,26 @@ func _authority_id(lobby: Dictionary) -> String:
 	if authority_value is Dictionary:
 		return str((authority_value as Dictionary).get("candidate_player_id", ""))
 	return ""
+
+func _m3_loadouts(roster: Array) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	for value in roster:
+		if not value is Dictionary:
+			return []
+		var player := value as Dictionary
+		var player_id := str(player.get("player_id", ""))
+		var horse_class := str(player.get("horse_selection", ""))
+		if player_id.is_empty() or horse_class not in ["courser", "warhorse", "mustang"]:
+			return []
+		rows.append({
+			"player_id": player_id,
+			"horse_class": horse_class,
+			"weapon_id": "dustwalker",
+		})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return str(a.player_id) < str(b.player_id)
+	)
+	return rows
 
 func _route_name(route: String) -> String:
 	var normalized := route.to_lower()

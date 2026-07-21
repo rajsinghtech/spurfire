@@ -188,19 +188,19 @@ rewindable horizontal horse-body capsule/head sphere and commits ammo, target he
 vitality, and fatal-spook effects transactionally without misreporting a horse bolt as a rider
 elimination. `M3MatchCheckpointV2` binds that gameplay bank to the existing sorted combat roster,
 ammo, health, command receipts, authority epoch, and canonical digest. M3 changes signed actor
-input/snapshot/checkpoint canonicalization, so a separate strict wire-2.0 candidate now defines
+input/snapshot/checkpoint canonicalization, so strict wire 2.0 defines
 bounded loadouts, mounted/on-foot input, complete actor/horse snapshots, hash-bound MTU-safe
-migration fragments, and fixed-layout signing bytes without changing the active 1.2 transport.
+migration fragments, and fixed-layout signing bytes.
 `M3SecureSession` now applies exact-roster signatures, endpoint identity, replay/role checks, and
 atomic out-of-order checkpoint assembly; composed combat restoration validates the complete
-rider/horse target graph before installation. `PeerSession` can now atomically activate that v2
-owner from an exact roster/loadout graph, keeps the RustScale worker wire-opaque, advances and
-rewinds rider/horse state through `M3CombatAuthority`, and preflights combined migration state
-before authority mutation. Wire 1.2 remains the default until the live lobby flow selects v2. M3
-remains incomplete until the
-paused-reload combat path, jump/crouch input buffers, per-stance acceleration/deceleration, live
-scene activation, remote horse presentation, and playtest instrumentation consume this state end
-to end.
+rider/horse target graph before installation. The live lobby advertises wire 2.0, derives one
+immutable loadout graph from the control-authoritative roster horse choices and locked Alpha rifle,
+and activates it before secure manifest binding. `PeerSession` keeps the RustScale worker
+wire-opaque, while `SpurfireLobbyPeerBridge` advances and rewinds rider/horse state through
+`M3CombatAuthority`, emits complete actor snapshots, and uses fragmented atomic migration. Legacy
+wire 1.2 remains only as the M2 proof/demo codec. M3 remains incomplete until paused reload,
+jump/crouch input buffering at the scene boundary, per-stance acceleration/deceleration, remote
+horse/spook/return presentation, and playtest instrumentation consume this state end to end.
 
 **Goal:** losing your horse is a dramatic mid-match arc, not a death sentence — and on-foot
 play is a real, butter-smooth kit that stays deliberately weaker than mounted play.

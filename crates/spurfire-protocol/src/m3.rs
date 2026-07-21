@@ -62,8 +62,8 @@ const DUST_REVEAL_TICKS: u64 = 3 * M3_TICK_RATE_HZ as u64 / 2;
 const GALLOP_IN_TICKS: u64 = 3 * M3_TICK_RATE_HZ as u64;
 
 /// M3 changes signed input/snapshot/checkpoint canonicalization and therefore
-/// starts a new gameplay wire major. The existing 1.2 transport remains active
-/// until its send/receive path is replaced atomically.
+/// starts a new live gameplay wire major. Wire 1.2 remains available only for
+/// bounded M2 proof/demo coverage.
 pub const M3_WIRE_VERSION: WireVersion = WireVersion::new(2, 0);
 /// Invited-friends alpha roster ceiling retained by the M3 authority checkpoint.
 pub const MAX_M3_AUTHORITY_ACTORS: usize = 16;

@@ -58,7 +58,7 @@ const MAX_BODY: usize = 65_536;
 const NATIVE_MAX_PLAYERS: u8 = 2;
 const SAFE_ERROR: &str = "Lobby unavailable or invite code invalid. Check the code and try again.";
 const JOIN_PREFIX: &[u8] = b"SPURFIRE1:";
-const WIRE_VERSION: &str = "1.2";
+const WIRE_VERSION: &str = "2.0";
 const AUTHORITY_FORMULA: &str = "election_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

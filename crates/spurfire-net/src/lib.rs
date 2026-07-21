@@ -122,8 +122,8 @@ impl MatchCheckpoint {
     }
 }
 
-/// Complete wire-v2 migration candidate. The active wire-1.2 transport does
-/// not encode this type until M3 input/snapshot activation is atomic.
+/// Complete wire-v2 migration state. Live M3 sessions encode this type; the
+/// retained wire-1.2 proof codec cannot interpret it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct M3MatchCheckpointV2 {
     /// Exact M3 schema boundary.

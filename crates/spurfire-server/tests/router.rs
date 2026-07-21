@@ -405,7 +405,7 @@ async fn create(app: &Router, key: &str, mode: &str, max_players: u8) -> (Status
 }
 
 async fn join(app: &Router, lobby_id: &str, player_id: &str, key: &str) -> (StatusCode, Value) {
-    join_with(app, lobby_id, player_id, key, "1.0", "election_v1").await
+    join_with(app, lobby_id, player_id, key, "2.0", "election_v1").await
 }
 
 async fn join_with(
@@ -1570,7 +1570,7 @@ async fn idle_ttl_expires_and_mixed_formula_or_major_wire_cannot_start() {
         lobby_id,
         PLAYER_3,
         "major-mismatch",
-        "2.0",
+        "3.0",
         "election_v1",
     )
     .await;
@@ -1582,7 +1582,7 @@ async fn idle_ttl_expires_and_mixed_formula_or_major_wire_cannot_start() {
         StatusCode::CREATED
     );
     assert_eq!(
-        join_with(&app, lobby_id, PLAYER_2, "formula-p2", "1.9", "election_v2",)
+        join_with(&app, lobby_id, PLAYER_2, "formula-p2", "2.9", "election_v2",)
             .await
             .0,
         StatusCode::CREATED

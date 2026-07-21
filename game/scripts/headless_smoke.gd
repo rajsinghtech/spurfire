@@ -483,6 +483,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 	for method in [
 		"activate_m3_wire", "is_m3_wire_active", "make_m3_actor_input",
 		"make_m3_actor_snapshot", "make_m3_actor_loadout", "m3_checkpoint_json",
+		"make_m3_actor_snapshot_from_pose", "m3_actor_state_json",
 		"poll_m3_migration", "advance_m3_actor", "record_m3_horse_pose",
 		"resolve_m3_shot_command",
 	]:
@@ -556,6 +557,11 @@ func _check_peer_session(failures: Array[String]) -> void:
 		) as Dictionary
 		if not bool(actor_tick.get("advanced", false)):
 			failures.append("PeerSession did not advance its private composed M3 actor")
+		var actor_state = JSON.parse_string(str(peer_session.call(
+			"m3_actor_state_json", "00000000-0000-4000-8000-000000000002"
+		)))
+		if not actor_state is Dictionary or int((actor_state as Dictionary).get("horse_health", 0)) != 200:
+			failures.append("PeerSession did not expose its private M3 snapshot source state")
 		elif not bool(peer_session.call(
 			"record_authority_rider_snapshot",
 			"00000000-0000-4000-8000-000000000002", 10,

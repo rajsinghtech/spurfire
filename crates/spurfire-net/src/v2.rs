@@ -1,7 +1,7 @@
-//! Candidate wire-v2 actor replication contract for M3 activation.
+//! Live wire-v2 actor replication contract for M3 lobbies.
 //!
-//! This module is deliberately separate from the active wire-1.2 codec. Its
-//! types, validation, and canonical signing bytes must be integrated together.
+//! This module remains separate from the retained wire-1.2 M2 proof codec so
+//! its types, validation, and canonical signing bytes switch atomically.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -23,25 +23,25 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use spurfire_protocol::{
     canonical_keyreg_digest, canonical_manifest_digest, elect_authority,
-    elect_authority_for_roster, validate_secure_start_roster, validate_start_roster,
-    AcceptedHeartbeatReference, ApplicationQuality, AuthorityCandidate, AuthorityElection,
-    AuthorityElectionError, AuthorityHeartbeatRequest, AuthorityHeartbeatResponse,
-    AuthorityResponse, AuthoritySummary, BackingMode, CapabilitiesResponse,
-    ControlElectionReference, CreateInvitationRequest, CreateInvitationResponse,
-    CreateLobbyFirstResponse, CreateLobbyRequest, CreateLobbyResponse, DestroyLobbyResponse, Fact,
-    FactAssurance, FactSource, FinalScore, Freshness, InspectedLobbyLifecycle, JoinCredential,
-    JoinCredentialReceipt, JoinLobbyReplayResponse, JoinLobbyRequest, JoinLobbyResponse,
-    LeaveLobbyRequest, LeaveLobbyResponse, Lobby, LobbyCapabilityScope, LobbyId, LobbyNetworkView,
-    LobbyResponse, LobbySessionPeer, LobbySessionProjection, LobbyState, LobbyTtl,
-    NetworkAuthority, NetworkBacking, NetworkCleanup, NetworkCounts, NetworkIsolation,
-    NetworkLifecycle, NetworkTruthLabel, OpaqueCapability, ParticipantCleanupReason, Player,
-    PlayerId, PlayerJoinState, ProvisioningMode, RegisterSessionEndpointRequest,
-    RegisterSessionEndpointResponse, ResponseMetadata, RosterManifest, RosterManifestEntry,
-    RouteAggregate, SessionPublicKey, SessionSignature, StartLobbyRequest, StartLobbyResponse,
-    SubmitMeasurementsRequest, SubmitMeasurementsResponse, SubmitResultsRequest,
-    SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS, DRY_RUN_AUTH_KEY,
-    IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION, MEASUREMENT_FRESHNESS_MS,
-    PROTOTYPE_MIN_PLAYERS, WIRE_VERSION,
+    elect_authority_for_roster, validate_secure_start_roster_against,
+    validate_start_roster_against, AcceptedHeartbeatReference, ApplicationQuality,
+    AuthorityCandidate, AuthorityElection, AuthorityElectionError, AuthorityHeartbeatRequest,
+    AuthorityHeartbeatResponse, AuthorityResponse, AuthoritySummary, BackingMode,
+    CapabilitiesResponse, ControlElectionReference, CreateInvitationRequest,
+    CreateInvitationResponse, CreateLobbyFirstResponse, CreateLobbyRequest, CreateLobbyResponse,
+    DestroyLobbyResponse, Fact, FactAssurance, FactSource, FinalScore, Freshness,
+    InspectedLobbyLifecycle, JoinCredential, JoinCredentialReceipt, JoinLobbyReplayResponse,
+    JoinLobbyRequest, JoinLobbyResponse, LeaveLobbyRequest, LeaveLobbyResponse, Lobby,
+    LobbyCapabilityScope, LobbyId, LobbyNetworkView, LobbyResponse, LobbySessionPeer,
+    LobbySessionProjection, LobbyState, LobbyTtl, NetworkAuthority, NetworkBacking, NetworkCleanup,
+    NetworkCounts, NetworkIsolation, NetworkLifecycle, NetworkTruthLabel, OpaqueCapability,
+    ParticipantCleanupReason, Player, PlayerId, PlayerJoinState, ProvisioningMode,
+    RegisterSessionEndpointRequest, RegisterSessionEndpointResponse, ResponseMetadata,
+    RosterManifest, RosterManifestEntry, RouteAggregate, SessionPublicKey, SessionSignature,
+    StartLobbyRequest, StartLobbyResponse, SubmitMeasurementsRequest, SubmitMeasurementsResponse,
+    SubmitResultsRequest, SubmitResultsResponse, UnixMillis, UnknownReason, ABSOLUTE_TTL_MS,
+    DRY_RUN_AUTH_KEY, IDLE_TTL_MS, JOIN_CREDENTIAL_TTL_MS, LOBBY_NETWORK_SCHEMA_VERSION,
+    M3_WIRE_VERSION, MEASUREMENT_FRESHNESS_MS, PROTOTYPE_MIN_PLAYERS,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
 use uuid::Uuid;
@@ -1163,7 +1163,7 @@ async fn create_lobby_impl(
             idle_expires_at: now.saturating_add(idle_ttl_ms),
             absolute_expires_at: now.saturating_add(absolute_ttl_ms),
         },
-        wire_version: WIRE_VERSION,
+        wire_version: M3_WIRE_VERSION,
         provisioning_mode: effective_mode,
         created_at: now,
         cleanup_pending: false,
@@ -1677,7 +1677,7 @@ async fn join_lobby(
 
     ensure_new_lobby_work_authorized(&state, &stored)?;
     request
-        .validate(WIRE_VERSION)
+        .validate(M3_WIRE_VERSION)
         .map_err(|error| ApiError::validation(&error, dry_run))?;
     if request.authority_formula_version.trim().is_empty() {
         return Err(ApiError::new(
@@ -2499,11 +2499,19 @@ async fn start_lobby(
         )
         .dry_run(dry_run));
     }
-    validate_start_roster(&stored.lobby.roster)
-        .map_err(|error| ApiError::validation(&error, dry_run))?;
+    validate_start_roster_against(
+        &stored.lobby.roster,
+        M3_WIRE_VERSION,
+        spurfire_protocol::AUTHORITY_FORMULA_VERSION,
+    )
+    .map_err(|error| ApiError::validation(&error, dry_run))?;
     if !dry_run {
-        validate_secure_start_roster(&stored.lobby.roster)
-            .map_err(|error| ApiError::validation(&error, dry_run))?;
+        validate_secure_start_roster_against(
+            &stored.lobby.roster,
+            M3_WIRE_VERSION,
+            spurfire_protocol::AUTHORITY_FORMULA_VERSION,
+        )
+        .map_err(|error| ApiError::validation(&error, dry_run))?;
         if !session_projection(&state, &stored, now).await?.secure {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
@@ -3951,7 +3959,7 @@ fn migrate_silent_authority(
         return Ok(None);
     }
     let election =
-        elect_authority_for_roster(&candidates, now, WIRE_VERSION, stored.lobby.roster.len())
+        elect_authority_for_roster(&candidates, now, M3_WIRE_VERSION, stored.lobby.roster.len())
             .map_err(|error| authority_error(&error, dry_run))?;
     apply_election(stored, election.clone(), now, dry_run)?;
     stored.last_authority_heartbeat_at = Some(now);

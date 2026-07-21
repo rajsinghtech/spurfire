@@ -198,13 +198,14 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 		if _course is Node3D:
 			(_course as Node3D).visible = false
 	var rider := _course.get_node_or_null("Rider") as CharacterBody3D
+	var horse := _course.get_node_or_null("Horse") as CharacterBody3D
 	var remote := _course.get_node_or_null("RemoteRider") as Node3D
 	var old_peer := _course.get_node_or_null("PeerSession")
 	var old_replication := _course.get_node_or_null("NetworkReplication")
 	var m2 := _course.get_node_or_null("M2Gameplay")
 	var combat_router := _course.get_node_or_null("Rider/CombatInput")
 	var network_layer := _course.get_node_or_null("NetworkLayer")
-	if rider == null or remote == null or m2 == null:
+	if rider == null or horse == null or remote == null or m2 == null:
 		return false
 	peer_session.set("gameplay_rider_path", rider.get_path())
 	_bridge = SpurfireLobbyPeerBridge.new()
@@ -212,7 +213,7 @@ func _prepare_network_course(projection: Dictionary) -> bool:
 	_course.add_child(_bridge)
 	_bridge.authority_departed.connect(_on_authority_departed)
 	if not _bridge.configure({
-		"peer_session": peer_session, "local_rider": rider,
+		"peer_session": peer_session, "local_rider": rider, "local_horse": horse,
 		"remote_rider": remote, "combat_router": combat_router,
 	}, _player_id):
 		return false

@@ -17,18 +17,19 @@ use spurfire_net::{
     rustscale::RustScalePeer,
     v2::{
         decode_m3, encode_m3, fragment_m3_checkpoint, M3ActorInput, M3ActorLoadout,
-        M3ActorSnapshot, M3PeerPayloadV2, M3SecureSession,
+        M3ActorSnapshot, M3HorseSnapshot, M3PeerPayloadV2, M3SecureSession,
     },
     AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
 use spurfire_protocol::{
-    canonical_keyreg_digest, ActorM3TickInput, CombatAuthority, CombatGait, DiveId, EntityId,
-    HorseVitalityClass, LobbyId, LobbySessionProjection, M3AuthorityBank, M3AuthorityShot,
-    M3CombatAuthority, M3HorseTargetPose, NodeKey, OnFootTickInput, PlayerId, QuantizedDirection,
-    QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot, RiderStance, RidingState,
-    RosterManifest, RosterManifestEntry, SessionPublicKey, SessionSignature, ShotCommand,
-    ShotResult, SimulationTick, TargetDefinition, TargetPoseSnapshot, TargetRegistry, TeamId,
-    WeaponAmmo, WeaponId, DIRECTION_UNITS, M3_WIRE_VERSION,
+    canonical_keyreg_digest, ActorM3Mode, ActorM3TickInput, CombatAuthority, CombatGait, DiveId,
+    EntityId, HorseVitalityClass, LobbyId, LobbySessionProjection, M3ActorStance, M3AuthorityBank,
+    M3AuthorityShot, M3CombatAuthority, M3HorseTargetPose, NodeKey, OnFootState, OnFootTickInput,
+    PlayerId, QuantizedDirection, QuantizedOrigin, RiderSnapshot as CombatRiderSnapshot,
+    RiderStance, RidingState, RosterManifest, RosterManifestEntry, SessionPublicKey,
+    SessionSignature, ShotCommand, ShotResult, SimulationTick, TargetDefinition,
+    TargetPoseSnapshot, TargetRegistry, TeamId, WeaponAmmo, WeaponId, DIRECTION_UNITS,
+    M3_WIRE_VERSION,
 };
 use tokio::{
     sync::mpsc::{self as tokio_mpsc, UnboundedReceiver, UnboundedSender},
@@ -415,6 +416,7 @@ pub struct PeerSession {
     secure_session: Option<SecureSession>,
     m3_wire_active: bool,
     m3_secure_session: Option<M3SecureSession>,
+    m3_loadouts: BTreeMap<PlayerId, M3ActorLoadout>,
     session_key: Option<Zeroizing<[u8; 32]>>,
     session_key_generation: u64,
     pinned_manifest_key: Option<(u64, SessionPublicKey)>,
@@ -973,6 +975,7 @@ impl PeerSession {
         self.secure_session = None;
         self.m3_wire_active = false;
         self.m3_secure_session = None;
+        self.m3_loadouts.clear();
         self.allowed_players = allowed_players;
         self.local_player_id = GString::from(&local_player.to_string());
         self.authority_player_id = GString::from(&authority.to_string());
@@ -1001,7 +1004,7 @@ impl PeerSession {
         true
     }
 
-    /// Atomically replaces the wire-1.2 gameplay owner with the complete M3
+    /// Atomically replaces the retained wire-1.2 proof owner with the live M3
     /// actor/combat graph. This must happen before secure manifest binding.
     #[func]
     fn activate_m3_wire(&mut self, loadouts_json: GString) -> bool {
@@ -1053,6 +1056,18 @@ impl PeerSession {
             }
         }
         self.m3_combat_authority = Some(authority);
+        self.m3_loadouts = loadouts
+            .into_iter()
+            .map(|(player_id, (horse_class, weapon_id))| {
+                (
+                    player_id,
+                    M3ActorLoadout {
+                        horse_class,
+                        weapon_id,
+                    },
+                )
+            })
+            .collect();
         self.combat_authority = None;
         self.combat_targets = None;
         self.combat_receipts.clear();
@@ -1293,6 +1308,181 @@ impl PeerSession {
             return PackedByteArray::new();
         }
         self.make_m3_packet(tick, M3PeerPayloadV2::ActorLoadout { loadout })
+    }
+
+    /// Export the authority-owned fields needed to compose a presentation
+    /// snapshot. Transform fields remain collision-resolved scene inputs; no
+    /// health, lifecycle, loadout, or recall state crosses into Godot as an
+    /// authoritative mutation surface.
+    #[func]
+    fn m3_actor_state_json(&self, player_id: GString) -> GString {
+        let Ok(player_id) = PlayerId::parse(&player_id.to_string()) else {
+            return GString::new();
+        };
+        let (Some(authority), Some(loadout)) = (
+            self.m3_combat_authority.as_ref(),
+            self.m3_loadouts.get(&player_id),
+        ) else {
+            return GString::new();
+        };
+        let (Some(actor), Some(rider_health)) = (
+            authority.actor(player_id),
+            authority.targets().health(rider_entity_id(player_id)),
+        ) else {
+            return GString::new();
+        };
+        let ready_tick = actor.recall().ready_tick().map(SimulationTick::as_u64);
+        let value = serde_json::json!({
+            "player_id": player_id,
+            "horse_entity_id": horse_entity_id(player_id).0.to_string(),
+            "horse_class": loadout.horse_class,
+            "horse_state": actor.horse().state(),
+            "horse_health": actor.horse().health(),
+            "rider_health": rider_health,
+            "stamina_ticks": actor.on_foot().stamina_ticks(),
+            "recall_state": actor.recall().state(),
+            "recall_ready_tick": ready_tick,
+            "actor_mode": actor.mode(),
+            "on_foot_state": actor.on_foot().state(),
+            "bolt_away_delta_mm": actor.horse().bolt_away_delta_mm(),
+        });
+        GString::from(&serde_json::to_string(&value).unwrap_or_default())
+    }
+
+    /// Compose and sign a complete M3 snapshot from collision-resolved scene
+    /// poses plus the private authority-owned gameplay state.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn make_m3_actor_snapshot_from_pose(
+        &mut self,
+        tick: i64,
+        player_id: GString,
+        rider_position: Vector3,
+        rider_velocity: Vector3,
+        rider_yaw_degrees: f64,
+        legacy_stance_id: i64,
+        horse_position: Vector3,
+        horse_velocity: Vector3,
+        horse_yaw_degrees: f64,
+    ) -> PackedByteArray {
+        let millimetres = |value: f32| {
+            let scaled = f64::from(value) * 1_000.0;
+            (scaled.is_finite() && scaled >= f64::from(i32::MIN) && scaled <= f64::from(i32::MAX))
+                .then_some(scaled.round() as i32)
+        };
+        let millidegrees = |value: f64| {
+            let scaled = value * 1_000.0;
+            (scaled.is_finite() && scaled >= f64::from(i32::MIN) && scaled <= f64::from(i32::MAX))
+                .then_some(scaled.round() as i32)
+        };
+        let (Ok(player_id), Ok(tick), Some(rider_yaw), Some(horse_yaw)) = (
+            PlayerId::parse(&player_id.to_string()),
+            u64::try_from(tick),
+            millidegrees(rider_yaw_degrees),
+            millidegrees(horse_yaw_degrees),
+        ) else {
+            return PackedByteArray::new();
+        };
+        let Some(rider_position_mm) = [rider_position.x, rider_position.y, rider_position.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(rider_velocity_mmps) = [rider_velocity.x, rider_velocity.y, rider_velocity.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(horse_position_mm) = [horse_position.x, horse_position.y, horse_position.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(horse_velocity_mmps) = [horse_velocity.x, horse_velocity.y, horse_velocity.z]
+            .map(millimetres)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return PackedByteArray::new();
+        };
+        let Some(authority) = self.m3_combat_authority.as_ref() else {
+            return PackedByteArray::new();
+        };
+        let (Some(actor), Some(loadout), Some(rider_health)) = (
+            authority.actor(player_id),
+            self.m3_loadouts.get(&player_id),
+            authority.targets().health(rider_entity_id(player_id)),
+        ) else {
+            return PackedByteArray::new();
+        };
+        let stance = match actor.mode() {
+            ActorM3Mode::Mounted => match legacy_stance_id {
+                1 => M3ActorStance::Mounted,
+                2 => M3ActorStance::MountedAirborne,
+                3 => M3ActorStance::SaddleDiveAirborne,
+                4 => M3ActorStance::LandingProne,
+                5 => M3ActorStance::LandingRecovery,
+                _ => return PackedByteArray::new(),
+            },
+            ActorM3Mode::SpookStunned => M3ActorStance::SpookStunned,
+            ActorM3Mode::OnFoot | ActorM3Mode::ReturningHorse => match actor.on_foot().state() {
+                OnFootState::SpookStunned => M3ActorStance::SpookStunned,
+                OnFootState::Standing => M3ActorStance::OnFootStanding,
+                OnFootState::Sprinting => M3ActorStance::OnFootSprinting,
+                OnFootState::Crouched => M3ActorStance::OnFootCrouched,
+                OnFootState::Rolling => M3ActorStance::OnFootRolling,
+            },
+        };
+        let [bolt_x, bolt_z] = actor.horse().bolt_away_delta_mm();
+        let Ok(bolt_away_direction) =
+            QuantizedDirection::from_components(f64::from(bolt_x), 0.0, f64::from(bolt_z))
+        else {
+            return PackedByteArray::new();
+        };
+        let snapshot = M3ActorSnapshot {
+            rider_player_id: player_id,
+            rider_position_mm: [
+                rider_position_mm[0],
+                rider_position_mm[1],
+                rider_position_mm[2],
+            ],
+            rider_velocity_mmps: [
+                rider_velocity_mmps[0],
+                rider_velocity_mmps[1],
+                rider_velocity_mmps[2],
+            ],
+            rider_yaw_millidegrees: rider_yaw,
+            stance,
+            rider_health,
+            stamina_ticks: actor.on_foot().stamina_ticks(),
+            horse: M3HorseSnapshot {
+                entity_id: horse_entity_id(player_id),
+                class: loadout.horse_class,
+                state: actor.horse().state(),
+                position_mm: [
+                    horse_position_mm[0],
+                    horse_position_mm[1],
+                    horse_position_mm[2],
+                ],
+                velocity_mmps: [
+                    horse_velocity_mmps[0],
+                    horse_velocity_mmps[1],
+                    horse_velocity_mmps[2],
+                ],
+                yaw_millidegrees: horse_yaw,
+                health: actor.horse().health(),
+                bolt_away_direction,
+            },
+            recall_state: actor.recall().state(),
+            recall_ready_tick: actor.recall().ready_tick(),
+        };
+        self.make_m3_packet(tick as i64, M3PeerPayloadV2::ActorSnapshot { snapshot })
     }
 
     /// Advance the private composed M3 actor owner before recording collision
@@ -2661,6 +2851,7 @@ impl PeerSession {
         self.secure_session = None;
         self.m3_wire_active = false;
         self.m3_secure_session = None;
+        self.m3_loadouts.clear();
         self.session_key = None;
         self.session_key_generation = 0;
         self.pinned_manifest_key = None;
@@ -2948,6 +3139,7 @@ impl INode for PeerSession {
             secure_session: None,
             m3_wire_active: false,
             m3_secure_session: None,
+            m3_loadouts: BTreeMap::new(),
             session_key: None,
             session_key_generation: 0,
             pinned_manifest_key: None,

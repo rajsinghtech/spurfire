@@ -70,7 +70,7 @@ impl ApiError {
             ApiValidationError::SecureSessionWireVersionRequired { .. } => (
                 StatusCode::CONFLICT,
                 "session_identity_required",
-                "every real-lobby roster member must support signed wire 1.2 sessions",
+                "every real-lobby roster member must support the active signed gameplay wire",
             ),
             ApiValidationError::EmptyDisplayName
             | ApiValidationError::DisplayNameTooLong

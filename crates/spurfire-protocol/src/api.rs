@@ -850,7 +850,7 @@ pub enum ApiValidationError {
         /// Advertised version.
         version: WireVersion,
     },
-    /// Secure session admission requires wire 1.2 or newer from every member.
+    /// Secure session admission rejects every pre-signature wire member.
     #[error("player {player_id} uses unsigned-session wire version {version}")]
     SecureSessionWireVersionRequired {
         /// Incompatible player.
@@ -875,9 +875,22 @@ pub fn validate_start_roster(roster: &[Player]) -> Result<(), ApiValidationError
 
 /// Refuses mixed signed/unsigned rosters for secure real admission.
 pub fn validate_secure_start_roster(roster: &[Player]) -> Result<(), ApiValidationError> {
-    validate_start_roster(roster)?;
+    validate_secure_start_roster_against(roster, WIRE_VERSION, AUTHORITY_FORMULA_VERSION)
+}
+
+/// Refuses mixed, unsigned, or pre-signature rosters against an explicit
+/// gameplay wire. Wire 2 and later require signatures by definition; wire 1
+/// retains the 1.2 introduction floor.
+pub fn validate_secure_start_roster_against(
+    roster: &[Player],
+    wire_version: WireVersion,
+    formula_version: &str,
+) -> Result<(), ApiValidationError> {
+    validate_start_roster_against(roster, wire_version, formula_version)?;
     for player in roster {
-        if player.wire_version.major() != 1 || player.wire_version.minor() < 2 {
+        if player.wire_version.major() == 0
+            || (player.wire_version.major() == 1 && player.wire_version.minor() < 2)
+        {
             return Err(ApiValidationError::SecureSessionWireVersionRequired {
                 player_id: player.player_id,
                 version: player.wire_version,

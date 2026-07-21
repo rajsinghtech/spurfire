@@ -158,7 +158,8 @@ A RustScale-delivered UDP source address is authenticated by WireGuard cryptokey
 used only as channel binding. Tailscale node keys are Curve25519 transport keys and never sign
 Spurfire messages. Every client instead generates a fresh native-only Ed25519 key for each lobby
 session generation, proves possession through its participant-capability-bound endpoint
-registration, and signs canonical domain-separated wire 1.2 envelopes. The signature binds the
+registration, and signs canonical domain-separated envelopes (wire 2.0 in the live M3 lobby;
+wire 1.2 is retained for the M2 proof/demo path). The signature binds the
 lobby, network and session generations, complete signed roster hash, sender, authority epoch,
 sequence, simulation tick, and fixed-layout payload.
 

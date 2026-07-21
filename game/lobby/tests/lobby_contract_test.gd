@@ -10,6 +10,7 @@ func _ready() -> void:
 	_check_native_boundary(failures)
 	_check_roster_projection(failures)
 	_check_peer_roster_binding(failures)
+	_check_m3_loadout_projection(failures)
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
@@ -101,6 +102,25 @@ func _check_peer_roster_binding(failures: Array[String]) -> void:
 	receiver.queue_free()
 	outsider.queue_free()
 
+func _check_m3_loadout_projection(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	var loadouts := bridge.call("_m3_loadouts", [
+		{"player_id": PLAYER_B, "horse_selection": "warhorse"},
+		{"player_id": PLAYER_A, "horse_selection": "courser"},
+	]) as Array
+	if (
+		loadouts.size() != 2 or str((loadouts[0] as Dictionary).player_id) != PLAYER_A
+		or str((loadouts[0] as Dictionary).horse_class) != "courser"
+		or str((loadouts[1] as Dictionary).weapon_id) != "dustwalker"
+	):
+		failures.append("M3 lobby loadout graph was not exact, sorted, and Alpha-locked")
+	var invalid := bridge.call("_m3_loadouts", [
+		{"player_id": PLAYER_A, "horse_selection": "unknown"},
+	]) as Array
+	if not invalid.is_empty():
+		failures.append("M3 lobby loadout graph accepted an unknown horse selection")
+	bridge.free()
+
 func _check_secret_storage_contract(failures: Array[String]) -> void:
 	var shell_source := FileAccess.get_file_as_string("res://scripts/lobby_shell.gd")
 	var scene_source := FileAccess.get_file_as_string("res://lobby/lobby_shell.tscn")
@@ -138,6 +158,8 @@ func _check_control_glue(failures: Array[String]) -> void:
 		"_actor_states.erase(player_id)", "combat_checkpoint_state",
 		"combat_resolved_shots_json", "record_authority_rider_snapshot",
 		"_migration_pending or not local_is_authority", "dive_id",
+		"activate_m3_wire", "make_m3_actor_input", "make_m3_actor_snapshot_from_pose",
+		"poll_m3_migration", "record_m3_horse_pose", "actor_snapshot",
 	]:
 		if not bridge_source.contains(required):
 			failures.append("lobby peer bridge omitted M2 multiplayer behavior: %s" % required)
