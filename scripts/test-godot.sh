@@ -10,6 +10,7 @@ Environment:
   GODOT_BIN             Godot executable (auto-detected if unset)
   GODOT_TIMEOUT_SECONDS Per-command timeout, default 120
   GODOT_SMOKE_SCENE     Project-relative scene, default res://scenes/headless_smoke.tscn
+  GODOT_DISABLE_CRASH_HANDLER  Set to 1 to expose native faults to the platform
 EOF
 }
 
@@ -67,6 +68,16 @@ run_bounded() {
   return "$status"
 }
 
+run_godot_bounded() {
+  local seconds="$1"
+  shift
+  if [[ "${GODOT_DISABLE_CRASH_HANDLER:-0}" == "1" ]]; then
+    run_bounded "$seconds" "$godot_bin" --disable-crash-handler "$@"
+  else
+    run_bounded "$seconds" "$godot_bin" "$@"
+  fi
+}
+
 self_test() {
   run_bounded 2 bash -c 'exit 0'
   if run_bounded 1 sleep 3; then
@@ -114,7 +125,7 @@ if [[ "$needs_import" == true ]]; then
   import_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-import.XXXXXX")"
   mv "$descriptor" "$disabled_descriptor"
   import_status=0
-  run_bounded "$timeout_seconds" "$godot_bin" \
+  run_godot_bounded "$timeout_seconds" \
     --headless \
     --display-driver headless \
     --audio-driver Dummy \
@@ -133,7 +144,7 @@ if [[ "$needs_import" == true ]]; then
 fi
 
 printf 'Running %s headlessly (timeout %ss)...\n' "$smoke_scene" "$timeout_seconds"
-run_bounded "$timeout_seconds" "$godot_bin" \
+run_godot_bounded "$timeout_seconds" \
   --headless \
   --display-driver headless \
   --audio-driver Dummy \
@@ -142,7 +153,7 @@ run_bounded "$timeout_seconds" "$godot_bin" \
 
 for extra_scene in res://ui/tests/polish_smoke.tscn res://combat/tests/combat_smoke.tscn res://lobby/tests/lobby_contract_test.tscn; do
   printf 'Running %s...\n' "$extra_scene"
-  run_bounded "$timeout_seconds" "$godot_bin" \
+  run_godot_bounded "$timeout_seconds" \
     --headless \
     --display-driver headless \
     --audio-driver Dummy \
@@ -156,7 +167,7 @@ done
 runtime_log="$(mktemp "${TMPDIR:-/tmp}/spurfire-godot-runtime.XXXXXX")"
 trap 'rm -f "$runtime_log"' EXIT
 printf 'Running configured main scene for 30 frames...\n'
-run_bounded "$timeout_seconds" "$godot_bin" \
+run_godot_bounded "$timeout_seconds" \
   --headless \
   --display-driver headless \
   --audio-driver Dummy \

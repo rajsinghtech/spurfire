@@ -60,11 +60,7 @@ func _ready() -> void:
 		if not course.has_node(path):
 			failures.append("missing required node: %s" % path)
 	await _check_capture_contract(course, failures)
-	remove_child(course)
-	await get_tree().process_frame
 	await _check_frontier_arena_contract(course, failures)
-	add_child(course)
-	await get_tree().process_frame
 	# The remaining deterministic simulation scenarios drive InputMap directly;
 	# explicitly open the presentation gate after its dedicated assertions.
 	course.get_node("Horse").call("set_presentation_input_enabled", true, false)
