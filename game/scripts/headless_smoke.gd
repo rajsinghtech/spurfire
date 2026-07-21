@@ -526,6 +526,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 	if peer_session == null:
 		failures.append("PeerSession could not be instantiated")
 		return
+	print("SPURFIRE_DIAG_PEER instantiated")
 	for method in ["configure_session", "generate_session_key", "session_public_key", "key_proof", "configure_secure_session", "make_heartbeat", "make_probe", "make_rider_input", "make_rider_snapshot", "decode_packet", "accept_packet", "accept_packet_with_source", "connect_demo_peer", "send_packet", "query_route", "shutdown"]:
 		if not peer_session.has_method(method):
 			failures.append("PeerSession lacks %s" % method)
@@ -551,6 +552,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 			failures.append("PeerSession lacks M3 multiplayer method %s" % method)
 	if not peer_session.has_signal("results_completed"):
 		failures.append("PeerSession lacks native results completion signal")
+	print("SPURFIRE_DIAG_PEER api_checked")
 	peer_session.call("set_insecure_demo_mode", true)
 	var configured := bool(peer_session.call(
 		"configure_session",
@@ -562,6 +564,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 	if not configured:
 		failures.append("PeerSession rejected valid session identifiers")
 	else:
+		print("SPURFIRE_DIAG_PEER configured")
 		var heartbeat := peer_session.call("make_heartbeat", 1) as PackedByteArray
 		if heartbeat.is_empty() or int(peer_session.call("accept_packet", heartbeat, 1)) != 0:
 			failures.append("PeerSession heartbeat codec/validation failed")
@@ -601,6 +604,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 			0
 		)):
 			failures.append("PeerSession could not reset before M3 activation")
+		print("SPURFIRE_DIAG_PEER legacy_wire_checked")
 		var loadouts := JSON.stringify([{
 			"player_id": "00000000-0000-4000-8000-000000000002",
 			"horse_class": "courser",
@@ -612,6 +616,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 			failures.append("PeerSession did not report atomic M3 wire activation")
 		elif bool(peer_session.call("activate_m3_wire", loadouts)):
 			failures.append("PeerSession allowed M3 loadout reconfiguration")
+		print("SPURFIRE_DIAG_PEER m3_activated")
 		var actor_tick := peer_session.call(
 			"advance_m3_actor",
 			"00000000-0000-4000-8000-000000000002", 10, Vector2.ZERO,
@@ -622,6 +627,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 		var match_tick := peer_session.call("advance_m5_match", 10) as Dictionary
 		if not bool(match_tick.get("advanced", false)) or int(match_tick.get("remaining_ticks", 0)) != 53990:
 			failures.append("PeerSession did not advance its private M5 match authority")
+		print("SPURFIRE_DIAG_PEER authority_advanced")
 		var actor_state = JSON.parse_string(str(peer_session.call(
 			"m3_actor_state_json", "00000000-0000-4000-8000-000000000002"
 		)))
@@ -661,6 +667,7 @@ func _check_peer_session(failures: Array[String]) -> void:
 		})
 		if str(peer_session.call("m3_checkpoint_json", combat_checkpoint)).is_empty():
 			failures.append("PeerSession could not bind combat and private M3 checkpoint state")
+		print("SPURFIRE_DIAG_PEER checkpointed")
 		if not (peer_session.call("make_rider_input", 11, 0, 0, 0) as PackedByteArray).is_empty():
 			failures.append("PeerSession emitted legacy wire input after M3 activation")
 		if int(peer_session.call("m5_playable_radius_m")) != 450:
@@ -696,7 +703,9 @@ func _check_peer_session(failures: Array[String]) -> void:
 				) as Dictionary
 			if not bool(objective_outcome.get("accepted", false)) or str(objective_outcome.get("award_json", "")).is_empty():
 				failures.append("PeerSession rejected an authority-observed M5 objective payout")
+	print("SPURFIRE_DIAG_PEER freeing")
 	peer_session.free()
+	print("SPURFIRE_DIAG_PEER freed")
 
 func _check_m3_gameplay_controller(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"M3GameplayController"):
