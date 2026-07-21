@@ -1829,6 +1829,8 @@ fn run_migration_child(
                     )?;
                 }
                 if node == Node::B
+                    && session.state().authority() == Node::B.id()?
+                    && session.state().authority_epoch() == 2
                     && envelope.sender == Node::C.id()?
                     && envelope.authority_epoch == 2
                     && matches!(payload, PeerPayload::RiderInput { .. })
