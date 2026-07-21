@@ -30,21 +30,26 @@ The script requires the gitignored `.env` OAuth settings. It:
 2. Creates an API-only child tailnet.
 3. Immediately stores its one-time child credentials in a mode-0600 temporary file.
 4. Installs a disposable `tag:spurfire` allow policy.
-5. Mints seven non-reusable, ephemeral, preauthorized 15-minute keys.
+5. Mints 27 non-reusable, ephemeral, preauthorized 15-minute keys for the full suite.
 6. Enrolls two independent embedded RustScale servers with normal path selection.
 7. Exchanges bounded signed Spurfire traffic in both directions, reports the route class, and measures the median of nine application-path RTT probes; direct median RTT at or above 80 ms fails.
 8. Enrolls two additional peers with RustScale's test-only direct-path disable switch, repeats the signed RTT exchange, and requires both directions to report `Derp`.
-9. Starts three additional peers as separate OS processes with a signed exact-endpoint wire-2 roster, establishes the mesh, and forcibly kills authority process A without a Leave packet.
-10. Verifies surviving processes B and C elect B after the two-second silence boundary, installs B's fragmented complete M3–M5 checkpoint on C, proves exact score/clock/objective continuity plus continued rider input, and requires kill-to-continuation below three seconds.
-11. Closes survivors and exactly deletes the child tailnet under an exit trap.
+9. Enrolls 16 peers, waits for all 240 directed netmap relationships, and proves a pairwise signed wire-2 full mesh.
+10. Accepts four signed leaves, closes those nodes, re-enrolls them with fresh keys and endpoints under signed roster revision 2, and proves a second 240-direction mesh plus replacement gameplay input.
+11. Starts three additional peers as separate OS processes with a signed exact-endpoint wire-2 roster, establishes the mesh, and forcibly kills authority process A without a Leave packet.
+12. Verifies surviving processes B and C elect B after the two-second silence boundary, installs B's fragmented complete M3–M5 checkpoint on C, proves exact score/clock/objective continuity plus continued rider input, and requires kill-to-continuation below three seconds.
+13. Closes survivors and exactly deletes the child tailnet under an exit trap.
 
-On 2026-07-21, the complete Linux ARM64 probe used direct paths with a 2 ms application median,
-then forced DERP in both directions with a 25 ms median, printed signed complete-state continuity
-with `failover_ms=2044`, and ended with
-`SPURFIRE_P2P_LIFECYCLE_OK`. A separate
-organization-tailnet listing confirmed exact absence of that child and every disposable child
-created during the correction runs. This is live protocol/lifecycle development evidence, not the
-private packaged-client artifact required by the terminal release gate. Earlier runs exposed
+`just scale-live` runs steps 1–5, 9–10, and 13 with only the 20 scale/churn keys.
+
+On 2026-07-21, one complete Linux ARM64 run used direct paths with a 3 ms application median,
+forced DERP in both directions with a 23 ms median, proved 16 nodes and 240 initial signed
+directions, accepted 48 signed leaves, admitted four fresh endpoint replacements, proved 240
+revised signed directions plus replacement gameplay input, printed complete-state continuity with
+`failover_ms=2044`, and ended with `SPURFIRE_P2P_LIFECYCLE_OK`. All 240 scale routes were Direct.
+A separate organization-tailnet listing confirmed exact absence of that child and every disposable
+child created during the correction runs. This is live protocol/lifecycle development evidence,
+not the private packaged-client artifact required by the terminal release gate. Earlier runs exposed
 RustScale's retryable macOS port-mapper shutdown uncertainty, which the smoke retries and treats as
 a local teardown warning only after traffic succeeds.
 
@@ -54,7 +59,7 @@ Canonical formats, key custody, validation ordering, and rotation rules for sign
 are specified in `docs/session-identity-architecture.md` (decision D12).
 
 - Never pass organization or child OAuth credentials to Godot.
-- Never print auth keys. The live script writes them only to its private temporary directory and deletes that directory on every exit path.
+- Never print auth keys. The live script writes them only to its private temporary directory. It deletes that directory after proven provider cleanup; if cleanup cannot be proven, it fails and retains the permission-protected recovery directory so the child credential is not destroyed before remediation.
 - Datagram size is checked before JSON parsing and before send.
 - Live wire 2.0 binds each M3 gameplay datagram to the exact lobby, network generation, session generation, signed complete-roster hash, sender, authority epoch, sequence, tick, and canonical fixed-layout payload with a native-only ephemeral Ed25519 key. RustScale's cryptokey routing authenticates the tailnet source IP; the native receive gate checks that IP/port against the signed manifest before signature, replay, epoch, or authority state can mutate. A current netmap node-key claim is an advisory WireGuard cross-check, never an application signing key. The wire-1.2 codec remains for bounded M2 proof/demo coverage, not live lobby admission.
 - The capability-bound endpoint route verifies key possession, rejects duplicate IP/node claims, and returns a server-signed complete projection. Server restart cannot reuse its memory-only manifest key silently: active sessions bump generation and must re-key/re-register. Unknown senders never auto-insert. Unsigned packets remain available only after explicit local demo/test opt-in.
@@ -71,9 +76,10 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   recovery on the next base.
 - The credential-free three-process proof now kills the original authority, installs the fragmented
   complete wire-2 M3–M5 checkpoint, and verifies exact score, clock, and objective continuity.
-  Credentialed qualification still must exercise forced-DERP gameplay under packet loss, 8–16
-  peers, route transitions, roaming, and churn; the two-peer signed transport probe now proves
-  explicit DERP selection only.
+  Credentialed qualification still must exercise forced-DERP gameplay under packet loss, packaged
+  8–16-player sessions, route transitions, and roaming. The two-peer probe proves explicit DERP
+  selection, while the live 16-peer transport probe proves signed leave/re-enroll churn and revised
+  endpoint admission without claiming packaged-client play.
 - Authority rider inputs drive distinct actor and horse presentation state, and followers replay
   their bounded unacknowledged input history after each reconciliation snapshot. The credential-free
   scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a

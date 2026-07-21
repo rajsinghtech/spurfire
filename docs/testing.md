@@ -215,6 +215,7 @@ The headless probe creates a disposable child tailnet and should print:
 ```text
 SPURFIRE_P2P_UDP_OK mode=direct_allowed ... route_a_to_b=Direct|Derp|PeerRelay ... samples=9 median_rtt_ms=<measured>
 SPURFIRE_P2P_UDP_OK mode=forced_derp ... route_a_to_b=Derp route_b_to_a=Derp ... samples=9 median_rtt_ms=<measured>
+SPURFIRE_LIVE_SCALE_OK peers=16 initial_mesh_packets=240 signed_leaves=48 replacements=4 roster_revision=2 revised_mesh_packets=240 replacement_inputs=accepted directed_routes=240 route_classes=<measured>
 SPURFIRE_MIGRATION_OK authority=a successor=b epoch=2 continued_play=true checkpoint=complete_m3_m5 score_continuity=true clock_continuity=true objective_continuity=true failover_ms=<measured-under-3000>
 SPURFIRE_P2P_LIFECYCLE_OK tailnet=<deleted-tailnet>
 ```
@@ -227,7 +228,21 @@ was forcibly terminated, B and C agreed on B at epoch 2, C installed B's exact f
 checkpoint, score/clock/objective state continued, a rider-input packet was accepted, and the
 kill-to-continued-state interval remained below three seconds.
 
-The cleanup trap attempts to delete the tailnet on success, failure, interruption, or timeout. This development probe is **not Alpha lifecycle evidence**: its delete acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha lifecycle qualification even when UDP/migration markers appear.
+For an isolated scale/churn run, use `just scale-live`. It enrolls 16 real embedded nodes, requires
+all 240 signed wire-2 directions, accepts four signed leaves, closes and re-enrolls those players
+with fresh one-use keys and different endpoints under signed roster revision 2, then requires all
+240 revised directions and replacement `ActorInput` packets. On 2026-07-21 the combined suite
+completed with all 240 scale paths classified `Direct`, a 3 ms direct median, a 23 ms forced-DERP
+median, and 2,044 ms authority failover before exact child-tailnet deletion.
+
+The cleanup trap attempts to delete the tailnet on success, failure, interruption, or timeout. It
+removes its private temporary directory only after deletion succeeds; if provider failure prevents
+cleanup, it fails closed and retains the mode-0700 recovery directory instead of discarding the
+only child credential. This development probe is **not Alpha lifecycle evidence**: its delete
+acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it
+uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains
+uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha
+lifecycle qualification even when transport markers appear.
 
 The RustScale probe proves real signed transport, complete-state process-loss recovery, and the
 provider deletion acknowledgement, while `just p2p-proof` is the credential-free deterministic

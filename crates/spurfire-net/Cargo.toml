@@ -42,3 +42,8 @@ required-features = ["rustscale-test-support"]
 name = "spurfire-migration-smoke"
 path = "src/bin/migration_smoke.rs"
 required-features = ["rustscale"]
+
+[[bin]]
+name = "spurfire-live-scale-smoke"
+path = "src/bin/live_scale_smoke.rs"
+required-features = ["rustscale"]

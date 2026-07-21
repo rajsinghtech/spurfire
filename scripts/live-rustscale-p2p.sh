@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Provisions an API-only child tailnet, runs two real RustScale UDP peers, and deletes it.
+# Provisions an API-only child tailnet, runs real RustScale qualification peers, and deletes it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+MODE=all
+case "${1-}" in
+  '') ;;
+  --scale-only) MODE=scale ;;
+  *) echo "usage: scripts/live-rustscale-p2p.sh [--scale-only]" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "usage: scripts/live-rustscale-p2p.sh [--scale-only]" >&2; exit 2; }
 
 if [[ -f .env ]]; then
   set -a
@@ -28,10 +36,11 @@ cleanup() {
     cid=$(jq -r '.clientId // empty' "$CREDS")
     secret=$(jq -r '.clientSecret // empty' "$CREDS")
     if [[ -n "$dns" && -n "$cid" && -n "$secret" ]]; then
-      token=$(curl -fsS -X POST "$API/api/v2/oauth/token" \
+      token=$(curl -fsS --retry 8 --retry-delay 3 --retry-all-errors \
+        -X POST "$API/api/v2/oauth/token" \
         -d client_id="$cid" -d client_secret="$secret" 2>/dev/null | jq -r '.access_token // empty' || true)
       if [[ -n "$token" ]]; then
-        code=$(curl -sS --retry 3 --retry-delay 2 -o /dev/null -w '%{http_code}' \
+        code=$(curl -sS --fail --retry 8 --retry-delay 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
           -X DELETE "$API/api/v2/tailnet/$dns" -H "Authorization: Bearer $token" || true)
         if [[ "$code" == "200" || "$code" == "204" || "$code" == "404" ]]; then
           echo "cleanup: deleted child tailnet $dns" >&2
@@ -39,10 +48,16 @@ cleanup() {
         else
           echo "ERROR: cleanup returned HTTP $code for $dns" >&2
         fi
+      else
+        echo "ERROR: cleanup could not mint a child token for $dns" >&2
       fi
     fi
   fi
-  rm -rf "$TMP"
+  if [[ "$DELETED" -eq 1 || ! -f "$CREDS" ]]; then
+    rm -rf "$TMP"
+  else
+    echo "ERROR: cleanup recovery material retained in mode-0700 directory $TMP" >&2
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -82,23 +97,38 @@ mint_key() {
   jq -er '.key' <<<"$response" >"$destination"
   chmod 600 "$destination"
 }
-mint_key "$TMP/key-a"
-mint_key "$TMP/key-b"
-mint_key "$TMP/derp-a"
-mint_key "$TMP/derp-b"
-mint_key "$TMP/migration-a"
-mint_key "$TMP/migration-b"
-mint_key "$TMP/migration-c"
+if [[ "$MODE" == all ]]; then
+  mint_key "$TMP/key-a"
+  mint_key "$TMP/key-b"
+  mint_key "$TMP/derp-a"
+  mint_key "$TMP/derp-b"
+  mint_key "$TMP/migration-a"
+  mint_key "$TMP/migration-b"
+  mint_key "$TMP/migration-c"
+fi
+mkdir "$TMP/scale-keys"
+for index in $(seq -w 0 15); do
+  mint_key "$TMP/scale-keys/initial-$index"
+done
+for index in 03 07 11 15; do
+  mint_key "$TMP/scale-keys/replacement-$index"
+done
 unset CHILD_TOKEN ORG_TOKEN
 
-cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
-  --key-a "$TMP/key-a" --key-b "$TMP/key-b"
-cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
-  --force-derp --key-a "$TMP/derp-a" --key-b "$TMP/derp-b"
-mkdir "$TMP/migration"
-cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-migration-smoke -- \
-  --key-a "$TMP/migration-a" --key-b "$TMP/migration-b" --key-c "$TMP/migration-c" \
-  --dir "$TMP/migration"
+if [[ "$MODE" == all ]]; then
+  cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
+    --key-a "$TMP/key-a" --key-b "$TMP/key-b"
+  cargo run --locked --quiet -p spurfire-net --features rustscale-test-support --bin spurfire-p2p-smoke -- \
+    --force-derp --key-a "$TMP/derp-a" --key-b "$TMP/derp-b"
+fi
+cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-live-scale-smoke -- \
+  --key-dir "$TMP/scale-keys"
+if [[ "$MODE" == all ]]; then
+  mkdir "$TMP/migration"
+  cargo run --locked --quiet -p spurfire-net --features rustscale --bin spurfire-migration-smoke -- \
+    --key-a "$TMP/migration-a" --key-b "$TMP/migration-b" --key-c "$TMP/migration-c" \
+    --dir "$TMP/migration"
+fi
 
 # Cleanup now (the trap remains a fallback) and fail if exact deletion did not succeed.
 cleanup

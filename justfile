@@ -75,6 +75,10 @@ scale-proof:
 p2p-live:
     scripts/live-rustscale-p2p.sh
 
+# Provision a disposable child tailnet for the isolated signed 16-peer churn proof
+scale-live:
+    scripts/live-rustscale-p2p.sh --scale-only
+
 # Open three real Godot clients with route/RTT telemetry on a disposable child tailnet
 p2p-demo:
     scripts/run-p2p-demo.sh

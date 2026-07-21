@@ -263,6 +263,11 @@ status and sampled RTT agreement; cleanup/removal after `close`; and 16-peer chu
 loss, route convergence time, median/p95 RTT, and auth-to-online time. Ensure logs and CI artifacts
 redact credentials.
 
+Spurfire's 2026-07-21 live development probe now covers explicit forced DERP and signed 16-peer
+leave/re-enroll churn with a complete 240-direction remesh. Direct/DERP transitions, peer relay,
+roaming, packet-loss qualification, close-time device disappearance, and packaged-client scale
+remain required before beta.
+
 ## Dependency recommendation
 
 **Use a git dependency pinned to an exact RustScale commit for CI/releases, with an optional local
