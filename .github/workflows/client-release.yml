@@ -301,6 +301,16 @@ jobs:
           New-Item -ItemType Directory -Force $destination | Out-Null
           Copy-Item 'godot-templates/templates/*' $destination -Recurse -Force
 
+      - name: Enable full Windows crash dumps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:RUNNER_TEMP 'godot-dumps'
+          New-Item -ItemType Directory -Force $dumpDir | Out-Null
+          $key = 'HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\godot4.exe'
+          reg.exe add $key /v DumpFolder /t REG_EXPAND_SZ /d $dumpDir /f
+          reg.exe add $key /v DumpType /t REG_DWORD /d 2 /f
+
       - name: Test, build, and export
         shell: bash
         run: |
@@ -317,21 +327,12 @@ jobs:
           for attempt in 1 2 3 4 5; do
             echo "SPURFIRE_DIAG_WINDOWS_ATTEMPT $attempt" | tee -a "$RUNNER_TEMP/godot-smoke.log"
             set +e
-            GODOT_BIN="$PWD/godot4.exe" GODOT_SINGLE_THREADED_SCENE=1 scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            GODOT_BIN="$PWD/godot4.exe" scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
             smoke_status="${PIPESTATUS[0]}"
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then
               MSYS2_ARG_CONV_EXCL='*' wevtutil.exe qe Application /c:20 /rd:true /f:text || true
-              timeout 180 gdb --batch \
-                -ex 'set pagination off' \
-                -ex run \
-                -ex 'thread apply all bt' \
-                -ex 'set confirm off' \
-                -ex kill \
-                --args "$PWD/godot4.exe" \
-                --single-threaded-scene \
-                --headless --display-driver headless --audio-driver Dummy \
-                --path "$PWD/game" --scene res://scenes/headless_smoke.tscn || true
+              find "$RUNNER_TEMP/godot-dumps" -maxdepth 1 -type f -print
               exit "$smoke_status"
             fi
           done
@@ -345,6 +346,19 @@ jobs:
           mkdir -p dist/windows
           ./godot4.exe --headless --path game --export-release Windows
           test -f dist/windows/Spurfire.exe
+
+      - name: Upload Windows crash dump
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-godot-crash-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/godot-dumps
+            target/debug/spurfire_godot.pdb
+            game/bin/windows/spurfire_godot.debug.x86_64.dll
+            godot4.exe
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Launch, package, and record unsigned blocker
         shell: pwsh
