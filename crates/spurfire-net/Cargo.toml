@@ -29,6 +29,10 @@ name = "spurfire-local-p2p-proof"
 path = "src/bin/local_p2p_proof.rs"
 
 [[bin]]
+name = "spurfire-local-scale-soak"
+path = "src/bin/local_scale_soak.rs"
+
+[[bin]]
 name = "spurfire-p2p-smoke"
 path = "src/bin/p2p_smoke.rs"
 required-features = ["rustscale"]

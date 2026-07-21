@@ -94,9 +94,11 @@ jobs:
           scripts/test-godot.sh --self-test
           scripts/check-release-metadata.sh
 
-      - name: Run credential-free signed peer and migration process proofs
+      - name: Run credential-free signed peer, migration, and scale proofs
         shell: bash
-        run: just p2p-proof
+        run: |
+          just p2p-proof
+          just scale-proof
 
       - name: Build extension and run bounded gameplay and one-lobby smoke tests
         shell: bash
@@ -122,6 +124,7 @@ jobs:
             scripts/check-alpha-smoke-log.sh \
             scripts/check-godot-secret-paths.sh \
             scripts/prove-local-p2p.sh \
+            scripts/prove-local-scale.sh \
             scripts/run-alpha-two-client.sh \
             scripts/check-release-metadata.sh
           python3 -m py_compile \
@@ -136,6 +139,11 @@ jobs:
             exit 1
           fi
           grep -Fqx 'error: TS_CLIENT_ID must be unset for the credential-free process proof' <<<"$proof_output"
+          if scale_output="$(TS_CLIENT_ID=sentinel scripts/prove-local-scale.sh 2>&1)"; then
+            echo 'error: signed scale proof accepted an inherited credential variable' >&2
+            exit 1
+          fi
+          grep -Fqx 'error: TS_CLIENT_ID must be unset for the credential-free scale proof' <<<"$scale_output"
 
       - name: Confirm the evidence template fails closed
         shell: bash

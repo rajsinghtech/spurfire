@@ -146,6 +146,30 @@ source/contract smoke this is **implemented source proof**, not credentialed or 
 does not replace separately packaged invited-client play, real RustScale route coverage,
 production key custody, natural M2 tuning, or provider lifecycle/cleanup evidence.
 
+### Signed scale and soak proof
+
+```bash
+just scale-proof
+```
+
+This credential-free release-mode gate runs full virtual 15-minute sessions at 6, 8, 12, and 16
+players. Every actor emits signed 20 Hz full/delta state, MatchState runs at 2 Hz with hash-bound
+fragmentation when needed, and every datagram remains within 1,200 bytes. Each case also exercises
+modeled packet-loss and forced-relay presentation, signed leave/reconnect churn, and deterministic
+epoch-2 failover. A deterministic moving-target bot duel requires the authority-versus-peer hit-rate
+gap to remain below five percent. The wrapper rejects recognized credentials and runs the proof
+under `env -i`; it does not make provider calls.
+
+Expected marker prefixes are one each for `peers=6`, `peers=8`, `peers=12`, and `peers=16`, followed
+by this exact final marker:
+
+```text
+SPURFIRE_LOCAL_SCALE_SOAK_OK cases=6,8,12,16 virtual_minutes=15 packet_loss=modeled forced_relay=modeled fairness_gap_percent=0.00
+```
+
+This is deterministic source evidence. It does not satisfy the acceptance checklist's real
+tailnet, packaged-client, measured-route, or human-play requirements.
+
 ## 7. Visible three-client P2P demo
 
 Create the gitignored `.env` if needed:

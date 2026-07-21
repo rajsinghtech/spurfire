@@ -62,7 +62,7 @@ jobs:
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
           git fetch --no-tags origin "$source_sha"
           test "$(git rev-parse FETCH_HEAD)" = "$source_sha"
-          bash -n scripts/check-alpha-smoke-log.sh scripts/prove-local-p2p.sh scripts/run-alpha-two-client.sh
+          bash -n scripts/check-alpha-smoke-log.sh scripts/prove-local-p2p.sh scripts/prove-local-scale.sh scripts/run-alpha-two-client.sh
           python3 -m py_compile \
             scripts/aggregate-playtest.py \
             scripts/check-alpha-evidence.py \

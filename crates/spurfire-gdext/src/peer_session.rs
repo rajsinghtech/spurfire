@@ -16,8 +16,9 @@ use spurfire_net::{
     decode, encode,
     rustscale::RustScalePeer,
     v2::{
-        decode_m3, encode_m3, fragment_m3_checkpoint, M3ActorInput, M3ActorLoadout,
-        M3ActorSnapshot, M3HorseSnapshot, M3PeerPayloadV2, M3SecureSession, M5MatchStateV2,
+        decode_m3, encode_m3, fragment_m3_checkpoint, fragment_m5_match_state, M3ActorInput,
+        M3ActorLoadout, M3ActorSnapshot, M3HorseSnapshot, M3PeerPayloadV2, M3SecureSession,
+        M5MatchStateV2,
     },
     AcceptOutcome, M3MatchCheckpointV2, MatchCheckpoint, PeerPayload, SecureSession, SessionState,
 };
@@ -1196,23 +1197,44 @@ impl PeerSession {
 
     /// Build the authority-only signed two-hertz M5 presentation keyframe.
     #[func]
-    fn make_m5_match_state(&mut self, tick: i64) -> PackedByteArray {
+    fn make_m5_match_state(&mut self, tick: i64) -> Array<PackedByteArray> {
+        let mut packets = Array::new();
         if !self.m3_wire_active
             || self.local_player_id.to_string() != self.authority_player_id.to_string()
         {
-            return PackedByteArray::new();
+            return packets;
         }
         let Ok(tick_value) = u64::try_from(tick).map(SimulationTick::new) else {
-            return PackedByteArray::new();
+            return packets;
         };
         let Some(bounty) = self.m5_match_authority.as_ref() else {
-            return PackedByteArray::new();
+            return packets;
         };
         if bounty.current_tick() != tick_value {
-            return PackedByteArray::new();
+            return packets;
         }
         let state = M5MatchStateV2::from_snapshot(&bounty.snapshot());
-        self.make_m3_packet(tick, M3PeerPayloadV2::MatchState { state })
+        let full = self.make_m3_packet(
+            tick,
+            M3PeerPayloadV2::MatchState {
+                state: state.clone(),
+            },
+        );
+        if !full.is_empty() {
+            packets.push(&full);
+            return packets;
+        }
+        let Ok(payloads) = fragment_m5_match_state(&state) else {
+            return packets;
+        };
+        for payload in payloads {
+            let packet = self.make_m3_packet(tick, payload);
+            if packet.is_empty() {
+                return Array::new();
+            }
+            packets.push(&packet);
+        }
+        packets
     }
 
     /// Exact roster-scaled active-territory radius for world presentation.
@@ -2940,6 +2962,20 @@ impl PeerSession {
                     serde_json::to_string(&state).unwrap_or_default(),
                 );
             }
+            M3PeerPayloadV2::MatchStateFragment { .. } => {
+                let Some(state) = self
+                    .m3_secure_session
+                    .as_ref()
+                    .and_then(|session| session.accepted_match_state(envelope.sequence))
+                else {
+                    return VarDictionary::new();
+                };
+                result.set("type", "match_state");
+                result.set(
+                    "state_json",
+                    serde_json::to_string(state).unwrap_or_default(),
+                );
+            }
             M3PeerPayloadV2::Authority { authority, epoch } => {
                 result.set("type", "authority");
                 result.set("authority", authority.to_string());
@@ -3804,6 +3840,7 @@ impl PeerSession {
             AcceptOutcome::InvalidCheckpoint => 14,
             AcceptOutcome::DuplicateShotResult => 15,
             AcceptOutcome::PendingMigration => 16,
+            AcceptOutcome::PendingFragment => 17,
         }
     }
 

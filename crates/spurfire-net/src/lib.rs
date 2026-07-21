@@ -412,6 +412,7 @@ pub enum AcceptOutcome {
     InvalidCheckpoint,
     DuplicateShotResult,
     PendingMigration,
+    PendingFragment,
 }
 
 #[derive(Clone, Debug)]

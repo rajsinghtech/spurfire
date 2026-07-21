@@ -402,8 +402,10 @@ keyframes at 2 Hz, presentation retains 600 snapshots (at least ten seconds), an
 uses the locked 150 ms rewind cap over a 250 ms pose/stance history. Native zeroizing create/join
 handoff and the privacy-suppressed public stats endpoint are implemented. Credential-free tests
 and a three-process authority-kill proof verify exact fragmented checkpoint installation and M5
-score, clock, and objective continuity. 8–16-peer/soak harnesses, credentialed packaged-client
-runs, and human evidence are still outstanding.
+score, clock, and objective continuity. A signed credential-free harness runs full virtual 15-minute
+6/8/12/16-player sessions with MTU enforcement, modeled loss/relay presentation, reconnect churn,
+epoch-2 failover, and bot-duel fairness. Credentialed packaged-client runs and human evidence are
+still outstanding.
 
 **M6 source scope and current state:**
 
@@ -416,11 +418,14 @@ runs, and human evidence are still outstanding.
    recomputing the same function. Split-brain prevented by construction + existing epochs.
 2. **Complete-state handoff.** The signed checkpoint carries per-rider movement/health/ammo,
    input/shot receipts, M5 score and clock, Spur, objectives, and RNG counter and verifies the
-   restored-state hash before epoch continuation. MatchState keyframes remain MTU-safe at eight
-   players and the presentation ring retains at least ten seconds. The 20 Hz actor stream sends
+   restored-state hash before epoch continuation. MatchState keyframes use one MTU-safe packet
+   through eight players and hash-bound independently signed fragments for larger rosters; partial
+   score state is never installed. The presentation ring retains at least ten seconds. The 20 Hz actor stream sends
    signed field-level deltas against 2 Hz full bases; a peer missing its base fails closed until the
    next full packet. The three-process credential-free proof kills authority A, installs B's
    fragmented checkpoint on C, then verifies exact score, clock, and objective continuity.
+   Followers retain at most one second of local inputs and replay unacknowledged ticks from each
+   accepted authority pose before applying the bounded reconciliation correction.
 3. **Lag compensation: authority-side rewind, capped 150ms.** `CombatAuthority` keeps a
    ~250ms position+stance history; `ShotCommand` carries the shooter's view tick; rewind is
    capped at 150ms (beyond that you lead). Stance-aware hitboxes (crouch/roll) rewind too.
@@ -448,7 +453,7 @@ runs, and human evidence are still outstanding.
 | Lag-compensation rewind cap | 150ms (position + stance history ~250ms) |
 | Authority failover | detect 2s silence -> deterministic re-election -> restore + announce < 3s total |
 | Election scoring | weights: direct-conn count 0.3, median RTT 0.25, worst RTT 0.15, jitter 0.1, loss 0.1, upload 0.1 |
-| Match sizes validated | 6, 12, 16 |
+| Match sizes validated locally | 6, 8, 12, 16 |
 
 **Acceptance checklist:**
 - [ ] 8-player match completes end-to-end on a real tailnet (create -> play -> results -> teardown) driven from the game client, not scripts.

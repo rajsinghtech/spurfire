@@ -111,6 +111,7 @@ func _ready() -> void:
 	elif str(course.get_node("Rider/WeaponController").get("shooter_peer_id")) != bound_player:
 		failures.append("network session identity did not reach combat authority")
 	_check_native_apis(horse, rider, failures)
+	_check_bridge_input_replay(failures)
 	await _exercise_reload_after_remount(course, horse, rider, failures)
 	await _exercise_native_input(course, horse, failures)
 	await _exercise_m2(course, horse, rider, failures)
@@ -480,6 +481,35 @@ func _check_network_rider(failures: Array[String]) -> void:
 	if network_rider.position != position_before:
 		failures.append("stance reconciliation mutated presentation position")
 	network_rider.free()
+
+func _check_bridge_input_replay(failures: Array[String]) -> void:
+	var bridge := SpurfireLobbyPeerBridge.new()
+	var player_id := "00000000-0000-4000-8000-000000000002"
+	bridge.local_player_id = player_id
+	bridge.simulation_tick = 13
+	bridge._m3_horse_classes[player_id] = "courser"
+	var input := {
+		"throttle_milli": 1000, "steer_milli": 0,
+		"move_x_milli": 0, "move_z_milli": -1000, "buttons": 0,
+	}
+	for tick in range(11, 14):
+		var tick_input := input.duplicate(true)
+		tick_input["tick"] = tick
+		bridge._remember_local_input(tick, tick_input)
+	var authoritative := {
+		"tick": 10, "position": Vector3.ZERO, "velocity": Vector3.ZERO,
+		"yaw_degrees": 0.0, "stance_id": STANCE_MOUNTED, "dive_id": -1,
+		"horse_class": "courser", "charge_active": false,
+	}
+	var replayed := bridge._replay_local_inputs(authoritative, 10)
+	if int(replayed.get("tick", -1)) != 13:
+		failures.append("bridge input replay did not reach the current prediction tick")
+	if absf((replayed.get("position", Vector3.ZERO) as Vector3).z + 0.65) > 0.001:
+		failures.append("bridge input replay did not reapply unacknowledged mounted movement")
+	bridge._replay_local_inputs(authoritative, 12)
+	if bridge._local_input_history.size() != 1 or not bridge._local_input_history.has(13):
+		failures.append("bridge input replay did not prune acknowledged input history")
+	bridge.free()
 
 func _check_peer_session(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"PeerSession"):

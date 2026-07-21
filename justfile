@@ -67,6 +67,10 @@ secret-path-check:
 p2p-proof:
     scripts/prove-local-p2p.sh
 
+# Run credential-free signed 6/8/12/16-player virtual scale and soak proof
+scale-proof:
+    scripts/prove-local-scale.sh
+
 # Provision a disposable child tailnet and exchange real Spurfire UDP frames through RustScale
 p2p-live:
     scripts/live-rustscale-p2p.sh

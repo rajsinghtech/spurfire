@@ -37,6 +37,12 @@ const fn is_false(value: &bool) -> bool {
 pub const M3_CHECKPOINT_FRAGMENT_BYTES: usize = 384;
 /// Hard cap keeps reassembly at or below 72 KiB before canonical validation.
 pub const MAX_M3_CHECKPOINT_FRAGMENTS: usize = 192;
+/// MatchState uses the same conservative raw fragment size as migration so
+/// every independently signed JSON datagram remains below the path MTU.
+pub const M5_MATCH_STATE_FRAGMENT_BYTES: usize = 384;
+/// Sixteen-player final results currently require five fragments; retain
+/// bounded headroom for schema-compatible score rows.
+pub const MAX_M5_MATCH_STATE_FRAGMENTS: usize = 16;
 /// Full actor snapshot cadence. Intermediate 20 Hz packets are signed deltas
 /// against this base, so loss recovers within one MatchState interval.
 pub const M3_ACTOR_KEYFRAME_TICKS: u64 = 30;
@@ -824,6 +830,16 @@ pub enum M3PeerPayloadV2 {
         #[serde(rename = "m", alias = "state")]
         state: M5MatchStateV2,
     },
+    MatchStateFragment {
+        #[serde(rename = "h", alias = "state_hash")]
+        state_hash: [u8; 32],
+        #[serde(rename = "i", alias = "fragment_index")]
+        fragment_index: u16,
+        #[serde(rename = "n", alias = "fragment_count")]
+        fragment_count: u16,
+        #[serde(rename = "f", alias = "fragment")]
+        fragment: M3CheckpointFragment,
+    },
     Authority {
         #[serde(rename = "a", alias = "authority")]
         authority: PlayerId,
@@ -903,6 +919,18 @@ struct PendingMigration {
     envelopes: BTreeMap<u16, M3EnvelopeV2>,
 }
 
+#[derive(Clone, Debug)]
+struct PendingMatchState {
+    sender: PlayerId,
+    epoch: u64,
+    tick: u64,
+    state_hash: [u8; 32],
+    fragment_count: u16,
+    started_ms: u64,
+    replay_floor: u64,
+    envelopes: BTreeMap<u16, M3EnvelopeV2>,
+}
+
 /// Exact-roster signing, source admission, replay, and atomic M3 migration.
 #[derive(Clone, Debug)]
 pub struct M3SecureSession {
@@ -910,10 +938,12 @@ pub struct M3SecureSession {
     roster_hash: RosterHash,
     state: SessionState,
     pending_migration: Option<PendingMigration>,
+    pending_match_state: Option<PendingMatchState>,
     installed_checkpoint: Option<M3MatchCheckpointV2>,
     sent_actor_keyframes: BTreeMap<PlayerId, (u64, M3ActorSnapshot)>,
     received_actor_keyframes: BTreeMap<PlayerId, (u64, M3ActorSnapshot)>,
     accepted_actor_snapshot: Option<(u64, M3ActorSnapshot)>,
+    accepted_match_state: Option<(u64, M5MatchStateV2)>,
 }
 
 impl M3SecureSession {
@@ -934,10 +964,12 @@ impl M3SecureSession {
             roster_hash,
             state,
             pending_migration: None,
+            pending_match_state: None,
             installed_checkpoint: None,
             sent_actor_keyframes: BTreeMap::new(),
             received_actor_keyframes: BTreeMap::new(),
             accepted_actor_snapshot: None,
+            accepted_match_state: None,
         })
     }
 
@@ -967,6 +999,16 @@ impl M3SecureSession {
         self.accepted_actor_snapshot
             .filter(|(accepted_sequence, _)| *accepted_sequence == sequence)
             .map(|(_, snapshot)| snapshot)
+    }
+
+    /// Returns a fully hash-checked MatchState only for the fragment packet
+    /// whose acceptance completed reassembly.
+    #[must_use]
+    pub fn accepted_match_state(&self, sequence: u64) -> Option<&M5MatchStateV2> {
+        self.accepted_match_state
+            .as_ref()
+            .filter(|(accepted_sequence, _)| *accepted_sequence == sequence)
+            .map(|(_, state)| state)
     }
 
     /// Locks the server-audited match-start election into the peer-owned
@@ -1087,6 +1129,7 @@ impl M3SecureSession {
                     && state.authority_epoch == self.state.authority_epoch
                     && state.current_tick.as_u64() == tick
             }
+            M3PeerPayloadV2::MatchStateFragment { .. } => local == authority,
             M3PeerPayloadV2::ShotResult { result } => {
                 local == authority
                     && result.tick.as_u64() == tick
@@ -1172,9 +1215,11 @@ impl M3SecureSession {
         let migration = self.state.expire_and_migrate(now_ms);
         if migration.is_some() {
             self.pending_migration = None;
+            self.pending_match_state = None;
             self.sent_actor_keyframes.clear();
             self.received_actor_keyframes.clear();
             self.accepted_actor_snapshot = None;
+            self.accepted_match_state = None;
         }
         migration
     }
@@ -1269,6 +1314,9 @@ impl M3SecureSession {
         if matches!(envelope.payload, M3PeerPayloadV2::MigrationFragment { .. }) {
             return self.accept_migration_fragment(envelope, now_ms, checkpoint_is_installable);
         }
+        if matches!(envelope.payload, M3PeerPayloadV2::MatchStateFragment { .. }) {
+            return self.accept_match_state_fragment(envelope, now_ms);
+        }
         let authority_claim = matches!(envelope.payload, M3PeerPayloadV2::Authority { .. });
         if envelope.authority_epoch != self.state.authority_epoch && !authority_claim {
             return AcceptOutcome::InvalidPayloadRole;
@@ -1279,6 +1327,7 @@ impl M3SecureSession {
                 | M3PeerPayloadV2::ActorSnapshotDelta { .. }
                 | M3PeerPayloadV2::ShotResult { .. }
                 | M3PeerPayloadV2::MatchState { .. }
+                | M3PeerPayloadV2::MatchStateFragment { .. }
         ) && envelope.sender != self.state.authority
         {
             return AcceptOutcome::InvalidPayloadRole;
@@ -1317,6 +1366,7 @@ impl M3SecureSession {
             | M3PeerPayloadV2::ActorInput { .. }
             | M3PeerPayloadV2::Leave => false,
             M3PeerPayloadV2::MigrationFragment { .. } => unreachable!("handled above"),
+            M3PeerPayloadV2::MatchStateFragment { .. } => unreachable!("handled above"),
         };
         if subject_is_invalid {
             return AcceptOutcome::InvalidPayloadSubject;
@@ -1387,6 +1437,8 @@ impl M3SecureSession {
                 self.sent_actor_keyframes.clear();
                 self.received_actor_keyframes.clear();
                 self.accepted_actor_snapshot = None;
+                self.pending_match_state = None;
+                self.accepted_match_state = None;
             }
         }
         if let Some(snapshot) = accepted_actor_snapshot {
@@ -1398,6 +1450,137 @@ impl M3SecureSession {
             }
             self.accepted_actor_snapshot = Some((envelope.sequence, snapshot));
         }
+        if let M3PeerPayloadV2::MatchState { state } = &envelope.payload {
+            self.pending_match_state = None;
+            self.accepted_match_state = Some((envelope.sequence, state.clone()));
+        }
+        AcceptOutcome::Accepted
+    }
+
+    fn accept_match_state_fragment(
+        &mut self,
+        envelope: &M3EnvelopeV2,
+        now_ms: u64,
+    ) -> AcceptOutcome {
+        let M3PeerPayloadV2::MatchStateFragment {
+            state_hash,
+            fragment_index,
+            fragment_count,
+            ..
+        } = &envelope.payload
+        else {
+            unreachable!("caller matched MatchState fragment")
+        };
+        if envelope.authority_epoch != self.state.authority_epoch
+            || envelope.sender != self.state.authority
+        {
+            return AcceptOutcome::InvalidPayloadRole;
+        }
+        if self
+            .accepted_match_state
+            .as_ref()
+            .is_some_and(|(_, state)| state.current_tick.as_u64() >= envelope.simulation_tick)
+        {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        if self.pending_match_state.as_ref().is_some_and(|pending| {
+            now_ms.saturating_sub(pending.started_ms) >= HEARTBEAT_TIMEOUT_MS
+        }) {
+            self.pending_match_state = None;
+        }
+        if self.pending_match_state.as_ref().is_some_and(|pending| {
+            pending.sender != envelope.sender
+                || pending.epoch != envelope.authority_epoch
+                || pending.tick != envelope.simulation_tick
+                || pending.state_hash != *state_hash
+                || pending.fragment_count != *fragment_count
+        }) {
+            let pending_tick = self
+                .pending_match_state
+                .as_ref()
+                .map_or(0, |pending| pending.tick);
+            if envelope.simulation_tick <= pending_tick {
+                return AcceptOutcome::InvalidCheckpoint;
+            }
+            self.pending_match_state = None;
+        }
+        let replay_floor = self.state.peers[&envelope.sender].last_sequence;
+        let pending = self
+            .pending_match_state
+            .get_or_insert_with(|| PendingMatchState {
+                sender: envelope.sender,
+                epoch: envelope.authority_epoch,
+                tick: envelope.simulation_tick,
+                state_hash: *state_hash,
+                fragment_count: *fragment_count,
+                started_ms: now_ms,
+                replay_floor,
+                envelopes: BTreeMap::new(),
+            });
+        if envelope.sequence <= pending.replay_floor
+            || pending.envelopes.contains_key(fragment_index)
+            || pending
+                .envelopes
+                .values()
+                .any(|candidate| candidate.sequence == envelope.sequence)
+        {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        pending.envelopes.insert(*fragment_index, envelope.clone());
+        if pending.envelopes.len() != usize::from(*fragment_count) {
+            return AcceptOutcome::PendingFragment;
+        }
+        let pending = self
+            .pending_match_state
+            .take()
+            .expect("complete pending MatchState exists");
+        let payloads = pending
+            .envelopes
+            .values()
+            .map(|candidate| candidate.payload.clone())
+            .collect::<Vec<_>>();
+        let Ok(state) = reassemble_m5_match_state(&payloads) else {
+            return AcceptOutcome::InvalidCheckpoint;
+        };
+        if state.authority_epoch != envelope.authority_epoch
+            || state.current_tick.as_u64() != envelope.simulation_tick
+            || state
+                .players
+                .iter()
+                .any(|row| !self.state.peers.contains_key(&row.player_id))
+            || pending.envelopes.values().any(|candidate| {
+                candidate.sender != envelope.sender
+                    || candidate.authority_epoch != envelope.authority_epoch
+                    || candidate.simulation_tick != envelope.simulation_tick
+            })
+        {
+            return AcceptOutcome::InvalidCheckpoint;
+        }
+        let sequences = pending
+            .envelopes
+            .values()
+            .map(|candidate| candidate.sequence)
+            .collect::<BTreeSet<_>>();
+        let current_last = self.state.peers[&envelope.sender].last_sequence;
+        if sequences.len() != pending.envelopes.len()
+            || sequences
+                .first()
+                .is_none_or(|sequence| *sequence <= pending.replay_floor)
+            || sequences
+                .last()
+                .is_none_or(|sequence| *sequence <= current_last)
+        {
+            return AcceptOutcome::DuplicateOrReplay;
+        }
+        let peer = self
+            .state
+            .peers
+            .get_mut(&envelope.sender)
+            .expect("sender membership checked");
+        peer.last_sequence = *sequences.last().expect("complete fragments are nonempty");
+        peer.last_seen_ms = now_ms;
+        peer.connected = true;
+        self.accepted_match_state = Some((envelope.sequence, state));
         AcceptOutcome::Accepted
     }
 
@@ -1522,6 +1705,8 @@ impl M3SecureSession {
         self.sent_actor_keyframes.clear();
         self.received_actor_keyframes.clear();
         self.accepted_actor_snapshot = None;
+        self.pending_match_state = None;
+        self.accepted_match_state = None;
         AcceptOutcome::Accepted
     }
 }
@@ -1599,6 +1784,18 @@ fn validate_payload(payload: &M3PeerPayloadV2) -> Result<(), CodecError> {
                 && *fragment_index < *fragment_count
                 && !fragment.as_bytes().is_empty()
                 && fragment.as_bytes().len() <= M3_CHECKPOINT_FRAGMENT_BYTES
+        }
+        M3PeerPayloadV2::MatchStateFragment {
+            fragment_index,
+            fragment_count,
+            fragment,
+            ..
+        } => {
+            usize::from(*fragment_count) <= MAX_M5_MATCH_STATE_FRAGMENTS
+                && *fragment_count > 0
+                && *fragment_index < *fragment_count
+                && !fragment.as_bytes().is_empty()
+                && fragment.as_bytes().len() <= M5_MATCH_STATE_FRAGMENT_BYTES
         }
         M3PeerPayloadV2::Heartbeat
         | M3PeerPayloadV2::Probe { .. }
@@ -1734,6 +1931,18 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
             out.push(u8::from(delta.charge_end_changed));
             option_tick(&mut out, delta.charge_end_tick);
         }
+        M3PeerPayloadV2::MatchStateFragment {
+            state_hash,
+            fragment_index,
+            fragment_count,
+            fragment,
+        } => {
+            out.push(13);
+            out.extend_from_slice(state_hash);
+            out.extend_from_slice(&fragment_index.to_be_bytes());
+            out.extend_from_slice(&fragment_count.to_be_bytes());
+            out.extend_from_slice(fragment.as_bytes());
+        }
         M3PeerPayloadV2::Leave => out.push(10),
         M3PeerPayloadV2::MatchState { state } => {
             out.push(11);
@@ -1799,6 +2008,86 @@ pub fn canonical_m3_payload_bytes(payload: &M3PeerPayloadV2) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Splits one canonical M5 keyframe into independently signed MTU-safe payloads.
+pub fn fragment_m5_match_state(state: &M5MatchStateV2) -> Result<Vec<M3PeerPayloadV2>, CodecError> {
+    if !state.is_canonical() {
+        return Err(noncanonical_payload());
+    }
+    let bytes =
+        serde_json::to_vec(state).map_err(|error| CodecError::Malformed(error.to_string()))?;
+    let fragment_count = bytes.len().div_ceil(M5_MATCH_STATE_FRAGMENT_BYTES);
+    if fragment_count == 0 || fragment_count > MAX_M5_MATCH_STATE_FRAGMENTS {
+        return Err(noncanonical_payload());
+    }
+    let fragment_count = u16::try_from(fragment_count).map_err(|_| noncanonical_payload())?;
+    let state_hash: [u8; 32] = Sha256::digest(&bytes).into();
+    Ok(bytes
+        .chunks(M5_MATCH_STATE_FRAGMENT_BYTES)
+        .enumerate()
+        .map(|(index, bytes)| M3PeerPayloadV2::MatchStateFragment {
+            state_hash,
+            fragment_index: u16::try_from(index).expect("fragment count is u16-bounded"),
+            fragment_count,
+            fragment: M3CheckpointFragment(bytes.to_vec()),
+        })
+        .collect())
+}
+
+/// Reassembles a hash-bound MatchState without exposing partial score truth.
+pub fn reassemble_m5_match_state(
+    fragments: &[M3PeerPayloadV2],
+) -> Result<M5MatchStateV2, CodecError> {
+    if fragments.is_empty() || fragments.len() > MAX_M5_MATCH_STATE_FRAGMENTS {
+        return Err(noncanonical_payload());
+    }
+    let mut state_hash = None;
+    let mut fragment_count = None;
+    let mut ordered = BTreeMap::new();
+    for payload in fragments {
+        validate_payload(payload)?;
+        let M3PeerPayloadV2::MatchStateFragment {
+            state_hash: row_hash,
+            fragment_index,
+            fragment_count: row_count,
+            fragment,
+        } = payload
+        else {
+            return Err(noncanonical_payload());
+        };
+        if state_hash
+            .replace(*row_hash)
+            .is_some_and(|value| value != *row_hash)
+            || fragment_count
+                .replace(*row_count)
+                .is_some_and(|value| value != *row_count)
+            || ordered
+                .insert(*fragment_index, fragment.as_bytes())
+                .is_some()
+        {
+            return Err(noncanonical_payload());
+        }
+    }
+    let expected_count = fragment_count.ok_or_else(noncanonical_payload)?;
+    if usize::from(expected_count) != fragments.len()
+        || ordered.keys().copied().ne(0..expected_count)
+    {
+        return Err(noncanonical_payload());
+    }
+    let bytes = ordered
+        .values()
+        .flat_map(|fragment| fragment.iter().copied())
+        .collect::<Vec<_>>();
+    if <[u8; 32]>::from(Sha256::digest(&bytes)) != state_hash.ok_or_else(noncanonical_payload)? {
+        return Err(noncanonical_payload());
+    }
+    let state: M5MatchStateV2 =
+        serde_json::from_slice(&bytes).map_err(|error| CodecError::Malformed(error.to_string()))?;
+    if !state.is_canonical() {
+        return Err(noncanonical_payload());
+    }
+    Ok(state)
 }
 
 /// Splits one validated checkpoint into independently signed MTU-safe payloads.
@@ -2235,6 +2524,10 @@ mod tests {
     }
 
     fn secure_session(local: PlayerId) -> M3SecureSession {
+        secure_session_with_players(local, 3)
+    }
+
+    fn secure_session_with_players(local: PlayerId, player_count: u8) -> M3SecureSession {
         let server = signing_key(9);
         let server_public = SessionPublicKey::from_bytes(server.verifying_key().to_bytes());
         let manifest = RosterManifest {
@@ -2242,7 +2535,7 @@ mod tests {
             network_generation: 6,
             session_generation: 7,
             roster_revision: 8,
-            entries: (1..=3)
+            entries: (1..=player_count)
                 .map(|index| RosterManifestEntry {
                     player_id: player(index),
                     session_public_key: SessionPublicKey::from_bytes(
@@ -2260,7 +2553,7 @@ mod tests {
                 .to_bytes(),
         );
         let mut state = SessionState::new(lobby(), local, player(1), 0);
-        for index in 1..=3 {
+        for index in 1..=player_count {
             state.add_peer(player(index), 0);
         }
         M3SecureSession::new(manifest, server_public, signature, state).unwrap()
@@ -2570,6 +2863,134 @@ mod tests {
         let encoded = encode_m3(&packet).unwrap();
         assert!(encoded.len() <= MAX_DATAGRAM_BYTES, "{}", encoded.len());
         assert_eq!(decode_m3(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn sixteen_player_active_and_final_match_states_fragment_and_reassemble() {
+        let mut sender = secure_session_with_players(player(1), 16);
+        let mut receiver = secure_session_with_players(player(16), 16);
+        for tick in [7_200, 54_000] {
+            let state = match_state(1, tick, 16);
+            let mut oversized = envelope(M3PeerPayloadV2::MatchState {
+                state: state.clone(),
+            });
+            oversized.simulation_tick = tick;
+            assert_eq!(encode_m3(&oversized), Err(CodecError::TooLarge));
+
+            let mut fragments = fragment_m5_match_state(&state)
+                .unwrap()
+                .into_iter()
+                .map(|payload| sender.envelope(tick, payload, &signing_key(1)).unwrap())
+                .collect::<Vec<_>>();
+            assert!(fragments.len() > 1);
+            for fragment in &fragments {
+                assert!(encode_m3(fragment).unwrap().len() <= MAX_DATAGRAM_BYTES);
+            }
+            let payloads = fragments
+                .iter()
+                .map(|fragment| fragment.payload.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(reassemble_m5_match_state(&payloads).unwrap(), state);
+
+            fragments.reverse();
+            for fragment in &fragments[..fragments.len() - 1] {
+                assert_eq!(
+                    receiver.accept_with_source(fragment, source(1), None, tick),
+                    AcceptOutcome::PendingFragment
+                );
+            }
+            let completing = fragments.last().unwrap();
+            assert_eq!(
+                receiver.accept_with_source(completing, source(1), None, tick),
+                AcceptOutcome::Accepted
+            );
+            assert_eq!(
+                receiver.accepted_match_state(completing.sequence),
+                Some(&state)
+            );
+        }
+    }
+
+    #[test]
+    fn match_state_fragments_are_atomic_hash_bound_and_superseded_by_newer_ticks() {
+        let state = match_state(1, 7_200, 16);
+        let mut corrupt_payloads = fragment_m5_match_state(&state).unwrap();
+        let M3PeerPayloadV2::MatchStateFragment { fragment, .. } = &mut corrupt_payloads[0] else {
+            unreachable!("fragmenter only emits MatchState fragments")
+        };
+        fragment.0[0] ^= 1;
+        let mut corrupt_sender = secure_session_with_players(player(1), 16);
+        let corrupt_packets = corrupt_payloads
+            .into_iter()
+            .map(|payload| {
+                corrupt_sender
+                    .envelope(7_200, payload, &signing_key(1))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut corrupt_receiver = secure_session_with_players(player(16), 16);
+        for packet in &corrupt_packets[..corrupt_packets.len() - 1] {
+            assert_eq!(
+                corrupt_receiver.accept_with_source(packet, source(1), None, 7_200),
+                AcceptOutcome::PendingFragment
+            );
+        }
+        assert_eq!(
+            corrupt_receiver.accept_with_source(
+                corrupt_packets.last().unwrap(),
+                source(1),
+                None,
+                7_200,
+            ),
+            AcceptOutcome::InvalidCheckpoint
+        );
+        assert!(corrupt_receiver.accepted_match_state(0).is_none());
+
+        let old_state = match_state(1, 7_200, 16);
+        let new_state = match_state(1, 7_230, 16);
+        let mut sender = secure_session_with_players(player(1), 16);
+        let old_packets = fragment_m5_match_state(&old_state)
+            .unwrap()
+            .into_iter()
+            .map(|payload| sender.envelope(7_200, payload, &signing_key(1)).unwrap())
+            .collect::<Vec<_>>();
+        let new_packets = fragment_m5_match_state(&new_state)
+            .unwrap()
+            .into_iter()
+            .map(|payload| sender.envelope(7_230, payload, &signing_key(1)).unwrap())
+            .collect::<Vec<_>>();
+        let mut receiver = secure_session_with_players(player(16), 16);
+        assert_eq!(
+            receiver.accept_with_source(&old_packets[0], source(1), None, 7_200),
+            AcceptOutcome::PendingFragment
+        );
+        assert_eq!(
+            receiver.accept_with_source(&old_packets[0], source(1), None, 7_201),
+            AcceptOutcome::DuplicateOrReplay
+        );
+        assert_eq!(
+            receiver.accept_with_source(&new_packets[0], source(1), None, 7_230),
+            AcceptOutcome::PendingFragment
+        );
+        assert_eq!(
+            receiver.accept_with_source(&old_packets[1], source(1), None, 7_231),
+            AcceptOutcome::InvalidCheckpoint
+        );
+        for packet in &new_packets[1..new_packets.len() - 1] {
+            assert_eq!(
+                receiver.accept_with_source(packet, source(1), None, 7_232),
+                AcceptOutcome::PendingFragment
+            );
+        }
+        let completing = new_packets.last().unwrap();
+        assert_eq!(
+            receiver.accept_with_source(completing, source(1), None, 7_233),
+            AcceptOutcome::Accepted
+        );
+        assert_eq!(
+            receiver.accepted_match_state(completing.sequence),
+            Some(&new_state)
+        );
     }
 
     #[test]

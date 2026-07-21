@@ -21,6 +21,7 @@ var _session_binding_key := ""
 var _authority_player_id := ""
 var _quiesced := false
 var _latest_inputs: Dictionary = {}
+var _local_input_history: Dictionary = {}
 var _actor_states: Dictionary = {}
 var _applied_shot_results: Dictionary = {}
 var _migration_pending := false
@@ -50,6 +51,7 @@ const M3_INPUT_RELOAD := 1 << 4
 const M3_INPUT_ADS := 1 << 5
 const M3_INPUT_SPUR := 1 << 6
 const M3_INPUT_BUFFER_TICKS := 9
+const M3_INPUT_REPLAY_TICKS := 60
 const M3_BOLT_SPEED_MPS := 12.0
 const M3_RETURN_SPAWN_DISTANCE_M := 60.0
 const M3_RETURN_STOP_DISTANCE_M := 3.0
@@ -110,6 +112,7 @@ func apply_projection(response: Dictionary) -> bool:
 	# must not recreate replay/liveness state.
 	var binding_key := "%s|%s" % [lobby_id, ",".join(sorted_roster)]
 	if binding_key != _session_binding_key:
+		_local_input_history.clear()
 		if not peer_session.configure_roster_session(
 			lobby_id, local_player_id, authority_id, roster_ids, Time.get_ticks_msec()
 		):
@@ -238,7 +241,9 @@ func _send_periodic_probe(tick: int) -> void:
 
 func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 	var local_input := _sample_m3_input(tick)
+	local_input["tick"] = tick
 	if not local_is_authority:
+		_remember_local_input(tick, local_input)
 		var packet: PackedByteArray = peer_session.make_m3_actor_input(
 			tick,
 			int(local_input.throttle_milli), int(local_input.steer_milli),
@@ -248,6 +253,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		if not packet.is_empty():
 			_send_to_all(packet)
 		return
+	_local_input_history.clear()
 	_latest_inputs[local_player_id] = local_input
 
 	_record_actor_state(local_player_id, local_rider, tick)
@@ -335,9 +341,10 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 		_advance_m5_objective_interactions(tick)
 		_record_m5_tick(tick)
 		if tick % 30 == 0:
-			var match_packet: PackedByteArray = peer_session.make_m5_match_state(tick)
-			if not match_packet.is_empty():
-				_send_to_all(match_packet)
+			var match_packets: Array = peer_session.make_m5_match_state(tick)
+			for match_packet: PackedByteArray in match_packets:
+				if not match_packet.is_empty():
+					_send_to_all(match_packet)
 	_flush_m3_metrics(tick, false)
 
 func _install_m5_state_json(state_json: String) -> void:
@@ -1131,6 +1138,28 @@ func _zero_m3_input() -> Dictionary:
 		"move_x_milli": 0, "move_z_milli": 0, "buttons": 0,
 	}
 
+func _remember_local_input(tick: int, input: Dictionary) -> void:
+	_local_input_history[tick] = input.duplicate(true)
+	var oldest_tick := tick - M3_INPUT_REPLAY_TICKS
+	for recorded_tick: int in _local_input_history.keys():
+		if recorded_tick < oldest_tick:
+			_local_input_history.erase(recorded_tick)
+
+func _replay_local_inputs(authoritative_state: Dictionary, snapshot_tick: int) -> Dictionary:
+	var replayed := authoritative_state.duplicate(true)
+	var ticks := _local_input_history.keys()
+	ticks.sort()
+	for replay_tick: int in ticks:
+		if replay_tick > snapshot_tick and replay_tick <= simulation_tick:
+			replayed = _predict_actor_step(
+				local_player_id, replayed,
+				_local_input_history[replay_tick] as Dictionary, replay_tick
+			)
+	for replay_tick: int in ticks:
+		if replay_tick <= snapshot_tick:
+			_local_input_history.erase(replay_tick)
+	return replayed
+
 func _record_m3_horse_state(player_id: String, state: Dictionary, tick: int) -> void:
 	var yaw := deg_to_rad(float(state.horse_yaw_degrees))
 	var forward := Vector3.FORWARD.rotated(Vector3.UP, yaw)
@@ -1514,7 +1543,7 @@ func _apply_m3_snapshot(snapshot_json: String, snapshot_tick: int) -> void:
 		charge_started_tick >= 0 and snapshot_tick >= charge_started_tick
 		and snapshot_tick < charge_end_tick
 	)
-	_actor_states[player_id] = {
+	var authoritative_state := {
 		"tick": snapshot_tick,
 		"position": rider_position, "velocity": rider_velocity,
 		"yaw_degrees": float(row.get("y", row.get("rider_yaw_millidegrees", 0))) / 1000.0,
@@ -1533,13 +1562,24 @@ func _apply_m3_snapshot(snapshot_json: String, snapshot_tick: int) -> void:
 		"charge_end_tick": charge_end_tick,
 	}
 	if player_id == local_player_id:
-		var correction := rider_position - local_rider.global_position
-		local_rider.global_position += correction if correction.length() >= 2.0 else correction * 0.35
-		local_rider.velocity = rider_velocity
+		var replayed := _replay_local_inputs(authoritative_state, snapshot_tick)
+		_actor_states[player_id] = replayed
+		var predicted_position := replayed.position as Vector3
+		var correction := predicted_position - local_rider.global_position
+		var predicted_yaw := deg_to_rad(float(replayed.yaw_degrees))
+		var yaw_correction := wrapf(predicted_yaw - local_rider.rotation.y, -PI, PI)
+		if correction.length() >= 2.0:
+			local_rider.global_position = predicted_position
+			local_rider.rotation.y = predicted_yaw
+		else:
+			local_rider.global_position += correction * 0.35
+			local_rider.rotation.y += yaw_correction * 0.35
+		local_rider.velocity = replayed.velocity as Vector3
 		if local_horse.has_method("set_majestic_charge_active"):
 			local_horse.call("set_majestic_charge_active", charge_active)
 		_apply_local_m4_presentation(_actor_states[player_id] as Dictionary, snapshot_tick)
 	else:
+		_actor_states[player_id] = authoritative_state
 		var rider := _remote_rider_for(player_id)
 		if rider and rider.has_method("push_snapshot"):
 			rider.push_snapshot(
@@ -1599,14 +1639,19 @@ func _record_authority_combat_state(player_id: String, state: Dictionary) -> voi
 	)
 
 func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> void:
-	var input_tick := int(input.get("tick", -1))
-	if input_tick > tick:
-		return
-	var stale := input_tick < 0 or tick - input_tick > 6
 	var state := _actor_states.get(player_id, {
 		"tick": tick - 1, "position": Vector3.ZERO, "velocity": Vector3.ZERO,
 		"yaw_degrees": 0.0, "stance_id": 1, "dive_id": -1,
 	}) as Dictionary
+	_actor_states[player_id] = _predict_actor_step(player_id, state, input, tick)
+
+func _predict_actor_step(
+	player_id: String, state: Dictionary, input: Dictionary, tick: int
+) -> Dictionary:
+	var input_tick := int(input.get("tick", -1))
+	if input_tick > tick:
+		return state.duplicate(true)
+	var stale := input_tick < 0 or tick - input_tick > 6
 	var throttle := 0.0 if stale else clampf(float(input.get("throttle_milli", 0)) / 1000.0, -1.0, 1.0)
 	var steer := 0.0 if stale else clampf(float(input.get("steer_milli", 0)) / 1000.0, -1.0, 1.0)
 	var charge_active := bool(state.get("charge_active", false))
@@ -1622,14 +1667,24 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 		(1.2 if int(m5_row.get("speed_buff_end_tick", -1)) > tick else 1.0)
 		* (1.1 if int(m5_row.get("horse_buff_end_tick", -1)) > tick else 1.0)
 	)
-	var velocity := forward * throttle * (sprint_speed if charge_active else 13.0) * m5_speed_multiplier
-	var position := (state.position as Vector3) + velocity / 60.0
 	var stance := int(state.stance_id)
+	var buttons := 0 if stale else int(input.get("buttons", 0))
+	var velocity := forward * throttle * (sprint_speed if charge_active else 13.0) * m5_speed_multiplier
+	if stance == 6:
+		var on_foot_move := Vector2(
+			float(input.get("move_x_milli", 0)), float(input.get("move_z_milli", 0))
+		) / 1000.0
+		if on_foot_move.length() > 1.0:
+			on_foot_move = on_foot_move.normalized()
+		var on_foot_speed := 1.2 if buttons & M3_INPUT_CROUCH != 0 else (
+			4.5 if buttons & M3_INPUT_SPRINT != 0 else 2.0
+		)
+		velocity = Vector3(on_foot_move.x, 0.0, on_foot_move.y) * on_foot_speed
+	var position := (state.position as Vector3) + velocity / 60.0
 	var airborne_until_tick := int(state.get("mounted_airborne_until_tick", -1))
 	if stance == 2 and airborne_until_tick >= 0 and tick >= airborne_until_tick:
 		stance = 1
 		airborne_until_tick = -1
-	var buttons := 0 if stale else int(input.get("buttons", 0))
 	if buttons & 1 and stance == 1:
 		stance = 2
 		var airtime_ticks := int(
@@ -1638,7 +1693,8 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 		airborne_until_tick = tick + airtime_ticks
 	if buttons & 2:
 		stance = 6 if stance == 1 else (1 if stance == 6 else stance)
-	_actor_states[player_id] = {
+	var predicted := state.duplicate(true)
+	predicted.merge({
 		"tick": tick, "position": position, "velocity": velocity,
 		"yaw_degrees": yaw, "stance_id": stance, "previous_stance_id": int(state.stance_id),
 		"dive_id": int(state.get("dive_id", -1)), "horse_class": horse_class,
@@ -1647,7 +1703,8 @@ func _simulate_remote_actor(player_id: String, input: Dictionary, tick: int) -> 
 		"charge_started_tick": int(state.get("charge_started_tick", -1)),
 		"charge_end_tick": int(state.get("charge_end_tick", -1)),
 		"mounted_airborne_until_tick": airborne_until_tick,
-	}
+	}, true)
+	return predicted
 
 func _on_route_updated(peer_ip: String, route: String) -> void:
 	for peer: Dictionary in _peers.values():

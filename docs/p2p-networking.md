@@ -10,7 +10,7 @@ Spurfire's native gameplay data plane uses application UDP through embedded Rust
 - `spurfire_net::rustscale::RustScalePeer` enrolls an ephemeral node with a one-use auth key, clears the key after `up()`, binds `Server::listen_packet`, and sends/receives through `UdpListener`.
 - `SnapshotBuffer` interpolates authoritative states two ticks behind, follows the shortest yaw arc, caps velocity extrapolation at fifteen ticks (250 ms at 60 Hz), and classifies prediction corrections as smoothable or snap-sized.
 - Godot's native `PeerSession` node owns RustScale on a background Tokio runtime and moves packets to the main thread through signals. OAuth credentials remain control-plane-only; this class accepts only a narrow join auth key.
-- Godot's `NetworkRider` presents up to 600 buffered remote snapshots (at least ten seconds at 60 Hz) and exposes reconciliation results. The lobby bridge sends wire-2 actor state at 20 Hz, sends stance changes immediately, and feeds accepted authority state into remote riders. Full actor bases arrive at 2 Hz; intermediate packets contain signed field-level deltas. A missing or mismatched base fails closed until the next full packet.
+- Godot's `NetworkRider` presents up to 600 buffered remote snapshots (at least ten seconds at 60 Hz) and exposes reconciliation results. The lobby bridge sends wire-2 actor state at 20 Hz, sends stance changes immediately, and feeds accepted authority state into remote riders. Full actor bases arrive at 2 Hz; intermediate packets contain signed field-level deltas. A missing or mismatched base fails closed until the next full packet. Followers retain a bounded one-second input window, replay unacknowledged ticks from accepted authority poses, and then apply smooth-or-snap position/yaw correction.
 
 The C ABI still has no gameplay UDP API. Spurfire does not use it: the Rust GDExtension links the native Rust `tsnet` API directly.
 
@@ -64,5 +64,8 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   complete wire-2 M3–M5 checkpoint, and verifies exact score, clock, and objective continuity.
   Credentialed qualification must still exercise 8–16 peers, forced DERP, route transitions,
   roaming, packet loss, and churn.
-- Apply authority rider inputs to separately simulated remote horse entities and add input replay after reconciliation; the current vertical slice sends fixed-tick inputs and presents authority snapshots.
+- Authority rider inputs drive distinct actor and horse presentation state, and followers replay
+  their bounded unacknowledged input history after each reconciliation snapshot. The credential-free
+  scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a
+  live qualification item.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
