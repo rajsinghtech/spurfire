@@ -11,6 +11,7 @@ Environment:
   GODOT_TIMEOUT_SECONDS Per-command timeout, default 120
   GODOT_SMOKE_SCENE     Project-relative scene, default res://scenes/headless_smoke.tscn
   GODOT_SINGLE_THREADED_SCENE  Set to 1 to force scene-tree work onto the main thread
+  GODOT_DISABLE_CRASH_HANDLER  Set to 1 to expose native faults to the platform dumper
 EOF
 }
 
@@ -92,6 +93,9 @@ godot_bin="$(find_godot)"
 godot_runtime_args=()
 if [[ "${GODOT_SINGLE_THREADED_SCENE:-0}" == "1" ]]; then
   godot_runtime_args+=(--single-threaded-scene)
+fi
+if [[ "${GODOT_DISABLE_CRASH_HANDLER:-0}" == "1" ]]; then
+  godot_runtime_args+=(--disable-crash-handler)
 fi
 
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
