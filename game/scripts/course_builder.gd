@@ -5,6 +5,18 @@ const COLOR_LANE := Color(0.38, 0.39, 0.4)
 const COLOR_ROUGH := Color(0.20, 0.17, 0.15)
 const COLOR_ORANGE := Color(0.95, 0.45, 0.08)
 
+static func frontier_fixture_transforms() -> Dictionary:
+	return {
+		"FlatStraight": Transform3D(Basis.IDENTITY, Vector3(0, 0.02, -10)),
+		"RoughStrip": Transform3D(Basis.IDENTITY, Vector3(-15, 0.04, -5)),
+		"Ramp15": Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-15.0)), Vector3(28, 1.8, 12)),
+		"Ramp25": Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-25.0)), Vector3(38, 3.15, 12)),
+		"Landing30": Transform3D(Basis(Vector3.RIGHT, deg_to_rad(30.0)), Vector3(58, 2.72, 12)),
+		"Landing31": Transform3D(Basis(Vector3.RIGHT, deg_to_rad(31.0)), Vector3(68, 2.81, 12)),
+		"JumpFence_0Rail": Transform3D(Basis.IDENTITY, Vector3(-30, 1, 14)),
+		"BridgeDeck": Transform3D(Basis.IDENTITY, Vector3(13, 1, -25)),
+	}
+
 func _ready() -> void:
 	# Broad ground and 8 x 60 m timing straight.
 	_box("BroadGround", Vector3(160, 0.5, 140), Vector3(0, -0.25, 25), COLOR_GROUND)
