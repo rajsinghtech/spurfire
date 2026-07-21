@@ -39,7 +39,7 @@ fi
 
 PIN_CLIENTS=0
 if [[ "$MODE" == "qualify" || "$MODE" == "soak" ]]; then
-  if [[ "${SPURFIRE_P2P_PIN_CLIENTS:-1}" == "1" ]] \
+  if [[ "${SPURFIRE_P2P_PIN_CLIENTS:-0}" == "1" ]] \
     && command -v taskset >/dev/null \
     && [[ "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)" -ge "${#NODES[@]}" ]]; then
     PIN_CLIENTS=1
