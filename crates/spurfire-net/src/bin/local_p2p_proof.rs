@@ -2068,18 +2068,16 @@ fn run_wire2_migration_child(
 
         if last_send.elapsed() >= SEND_INTERVAL {
             last_send = Instant::now();
-            if node == Node::B
-                && migrated_reported
-                && !checkpoint_acknowledged
-                && last_fragment_send.elapsed() >= FRAGMENT_RETRY_INTERVAL
-            {
-                for payload in fragment_m3_checkpoint(Node::B.id()?, 2, &checkpoint)? {
-                    let envelope =
-                        session.envelope(checkpoint.combat.tick, payload, &signing_key)?;
-                    send_v2_envelope(&socket, &envelope, endpoint_for(&manifest, Node::C)?)?;
+            if node == Node::B && migrated_reported && !checkpoint_acknowledged {
+                if last_fragment_send.elapsed() >= FRAGMENT_RETRY_INTERVAL {
+                    for payload in fragment_m3_checkpoint(Node::B.id()?, 2, &checkpoint)? {
+                        let envelope =
+                            session.envelope(checkpoint.combat.tick, payload, &signing_key)?;
+                        send_v2_envelope(&socket, &envelope, endpoint_for(&manifest, Node::C)?)?;
+                    }
+                    fragments_sent = true;
+                    last_fragment_send = Instant::now();
                 }
-                fragments_sent = true;
-                last_fragment_send = Instant::now();
             } else {
                 let payload = if node == Node::B && checkpoint_acknowledged {
                     M3PeerPayloadV2::MatchState {
