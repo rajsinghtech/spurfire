@@ -317,7 +317,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
             echo "SPURFIRE_DIAG_WINDOWS_ATTEMPT $attempt" | tee -a "$RUNNER_TEMP/godot-smoke.log"
             set +e
-            GODOT_BIN="$PWD/godot4.exe" scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            GODOT_BIN="$PWD/scripts/godot-single-threaded-ci.sh" scripts/test-godot.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
             smoke_status="${PIPESTATUS[0]}"
             set -e
             if [[ "$smoke_status" -ne 0 ]]; then
@@ -329,6 +329,7 @@ jobs:
                 -ex 'set confirm off' \
                 -ex kill \
                 --args "$PWD/godot4.exe" \
+                --single-threaded-scene \
                 --headless --display-driver headless --audio-driver Dummy \
                 --path "$PWD/game" --scene res://scenes/headless_smoke.tscn || true
               exit "$smoke_status"
