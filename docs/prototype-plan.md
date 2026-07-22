@@ -466,7 +466,29 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
   (2026-07-21). The secure waiting-lobby UI still needs packaged-client evidence.
 - [x] Kill the authority mid-match: live signed `p2p-live` resumed in 2,044 ms with exact M3–M5 score/clock/objective continuity (2026-07-21).
 - [x] Authority-vs-peer hit% gap < 5% (`scale-proof` deterministic bot-duel gap: 0.00%).
-- [ ] No movement desync > 200ms peak for any client over a 15-min soak.
+- [x] No movement desync > 200ms peak for any client over a 15-min soak. The 2026-07-21 live
+  eight-Godot run delivered all 18,000 snapshots per follower but failed at 225–334 ms during
+  RustScale's fixed-phase endpoint refresh; a bounded-runtime follow-up reached 202 ms. RustScale
+  PR #101's fix was first isolated onto v0.1.4 as PR #103 revision
+  `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
+  `7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 15-minute consumer runs reproduced
+  239–462 ms refresh-boundary gaps on that merge; RustScale #104 and mainline PR #105 track the
+  correction. Its first one-region candidate reduced an exact six-minute run to 103–208 ms but
+  still failed one follower. An isolated revision passed its short run at 145 ms but failed the full
+  run's second cycle at 206–325 ms; RustScale #106 identified invalid temporary-socket STUN
+  publication. The changed-Magicsock-endpoints-only fix merged to RustScale master revision
+  `4d12d5f3f576577025044f460545f4e816ec32c2`; its tree-identical PR revision passed the shortened
+  and full live gates at 110 ms and 139 ms peaks. The exact rebased master revision then passed the
+  full 900,001 ms run at a 97 ms peak with 54,000 minimum inputs per sender, 39,999 mm minimum
+  motion, 130,433 minimum presentation samples, and 0 ms presentation desync. The exact backport
+  passed the six-minute refresh-boundary regression and full 900,000 ms run across all eight clients
+  and 56 directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact
+  final child was deleted and absent afterward, but an older inert provider record remains, so the
+  separate leaked-state checkbox stays open. An intermittent Windows course/teardown exit 139 also
+  reproduced on the backport and is tracked separately in
+  [Spurfire #14](https://github.com/rajsinghtech/spurfire/issues/14); it is not a RustScale main pin
+  blocker. This checkbox is practice-wire transport/presentation evidence, not horse-physics or
+  human-play qualification.
 - [ ] Forced-DERP + packet-loss soak playable: signed two-peer DERP transport passed at 23 ms median on 2026-07-21, but TTK consistency and sway under loss remain unqualified.
 - [x] 16-peer live signed churn: 240-direction mesh, four leaves/re-enrollments, roster revision 2, replacement input, and 240-direction remesh (2026-07-21).
 - [ ] Ephemeral devices and tailnet cleaned up after match (no leaked state).

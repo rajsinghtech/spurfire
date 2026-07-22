@@ -87,6 +87,10 @@ p2p-demo:
 p2p-game-live:
     scripts/run-p2p-demo.sh --qualify
 
+# Run a 15-minute eight-process changing-transform replication soak
+p2p-game-soak-live:
+    scripts/run-p2p-demo.sh --soak
+
 # Remove build artifacts
 clean:
     cargo clean

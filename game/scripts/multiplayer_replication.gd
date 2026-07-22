@@ -17,12 +17,29 @@ var _demo_ready_logged := false
 var _demo_sent_count := 0
 var _demo_rejected_count := 0
 var _demo_snapshot_count := 0
+var _demo_input_count := 0
+var _demo_input_counts: Dictionary = {}
 var _demo_max_gap_msec := 0
+var _demo_peak_snapshot_gap_msec := 0
+var _demo_long_gap_count := 0
 var _demo_last_snapshot_msec := 0
+var _demo_latest_snapshot_position := Vector3.ZERO
+var _demo_has_snapshot_position := false
+var _demo_probe_index := 0
 var _last_route_query_msec := 0
 var _demo_qualify := false
 var _demo_qualify_deadline_msec := 0
 var _demo_qualification_emitted := false
+var _demo_soak_msec := 0
+var _demo_soak_started_msec := 0
+var _demo_soak_snapshot_baseline := 0
+var _demo_soak_input_baseline := 0
+var _demo_soak_input_baselines: Dictionary = {}
+var _demo_soak_first_position := Vector3.ZERO
+var _demo_soak_motion_span_mm := 0
+var _demo_presentation_samples := 0
+var _demo_peak_presentation_desync_msec := 0
+var _demo_soak_emitted := false
 var _demo_quit_requested := false
 var _demo_nodes: Array[String] = []
 var _peers: Dictionary = {}
@@ -62,6 +79,7 @@ func _process(_delta: float) -> void:
 		for peer: Dictionary in _peers.values():
 			peer_session.query_route(str(peer.ip))
 	if _demo_qualify:
+		_sample_demo_presentation_desync()
 		_try_finish_demo_qualification(now)
 
 func _start_demo() -> void:
@@ -76,6 +94,7 @@ func _start_demo() -> void:
 		if not clean_node.is_empty() and clean_node not in _demo_nodes:
 			_demo_nodes.append(clean_node)
 	_demo_qualify = OS.get_environment("SPURFIRE_P2P_DEMO_QUALIFY") == "1"
+	_demo_soak_msec = maxi(0, int(OS.get_environment("SPURFIRE_P2P_DEMO_SOAK_MS")))
 	var timeout_msec := maxi(30000, int(OS.get_environment("SPURFIRE_P2P_DEMO_TIMEOUT_MS")))
 	_demo_qualify_deadline_msec = Time.get_ticks_msec() + timeout_msec
 	if (
@@ -134,6 +153,7 @@ func _discover_demo_peers() -> void:
 			"port": int(endpoint[1]),
 			"route": "UNKNOWN",
 			"rtt_ms": -1,
+			"rtt_samples": [],
 			"rtt_logged": false,
 			"last_seen_ms": 0,
 		}
@@ -158,7 +178,13 @@ func _try_finish_demo_qualification(now: int) -> void:
 		elif not _seen_snapshot_senders.has(str(DEMO_PLAYERS["a"])):
 			return
 		for peer: Dictionary in _peers.values():
-			if str(peer.route).to_upper() == "UNKNOWN" or int(peer.rtt_ms) < 0 or int(peer.last_seen_ms) <= 0:
+			var rtt_samples := peer.get("rtt_samples", []) as Array
+			if (
+				str(peer.route).to_upper() == "UNKNOWN"
+				or int(peer.rtt_ms) < 0
+				or int(peer.last_seen_ms) <= 0
+				or rtt_samples.size() < 5
+			):
 				return
 		var network_layer := get_parent().get_node_or_null("NetworkLayer")
 		if network_layer == null or not network_layer.has_method("qualification_peer_rows"):
@@ -173,6 +199,10 @@ func _try_finish_demo_qualification(now: int) -> void:
 		for peer_name: String in names:
 			var measured: Dictionary = _peers[peer_name]
 			var hud := hud_rows.get(peer_name, {}) as Dictionary
+			var measured_samples := measured.get("rtt_samples", []) as Array
+			print("SPURFIRE_GODOT_P2P_RTT_READY local=%s peer=%s samples=%d" % [
+				_demo_node, peer_name, measured_samples.size(),
+			])
 			print("SPURFIRE_GODOT_P2P_MEASURED local=%s peer=%s route=%s rtt_ms=%d" % [
 				_demo_node, peer_name, str(measured.route).to_upper(), int(measured.rtt_ms),
 			])
@@ -187,6 +217,85 @@ func _try_finish_demo_qualification(now: int) -> void:
 			return
 		marker.store_string("ready\n")
 		_demo_qualification_emitted = true
+		if _demo_soak_msec > 0:
+			_demo_soak_started_msec = now
+			_demo_soak_snapshot_baseline = _demo_snapshot_count
+			_demo_soak_input_baseline = _demo_input_count
+			_demo_soak_input_baselines = _demo_input_counts.duplicate(true)
+			_demo_peak_snapshot_gap_msec = 0
+			_demo_long_gap_count = 0
+			_demo_last_snapshot_msec = now
+			_demo_soak_motion_span_mm = 0
+			_demo_presentation_samples = 0
+			_demo_peak_presentation_desync_msec = 0
+			if _demo_has_snapshot_position:
+				_demo_soak_first_position = _demo_latest_snapshot_position
+	if _demo_soak_msec > 0:
+		if now - _demo_soak_started_msec < _demo_soak_msec:
+			return
+		if not _demo_soak_emitted:
+			var soak_snapshots := _demo_snapshot_count - _demo_soak_snapshot_baseline
+			var soak_inputs := _demo_input_count - _demo_soak_input_baseline
+			var minimum_snapshots := floori(float(_demo_soak_msec * 16) / 1000.0)
+			var minimum_inputs_per_sender := floori(float(_demo_soak_msec * 10) / 1000.0)
+			var minimum_presentation_samples := floori(float(_demo_soak_msec * 30) / 1000.0)
+			var minimum_sender_inputs := soak_inputs
+			if local_is_authority:
+				for sender_id: String in _seen_input_senders:
+					minimum_sender_inputs = mini(
+						minimum_sender_inputs,
+						int(_demo_input_counts.get(sender_id, 0))
+							- int(_demo_soak_input_baselines.get(sender_id, 0))
+					)
+			var role := "authority" if local_is_authority else "follower"
+			var snapshot_age_msec := 0 if local_is_authority else now - _demo_last_snapshot_msec
+			var failure := ""
+			if local_is_authority and minimum_sender_inputs < minimum_inputs_per_sender:
+				failure = "input_starvation"
+			elif not local_is_authority and soak_snapshots < minimum_snapshots:
+				failure = "snapshot_starvation"
+			elif not local_is_authority and _demo_peak_snapshot_gap_msec > 200:
+				failure = "snapshot_gap"
+			elif not local_is_authority and snapshot_age_msec > 200:
+				failure = "snapshot_stale"
+			elif not local_is_authority and _demo_soak_motion_span_mm < 30000:
+				failure = "motion_span"
+			elif not local_is_authority and _demo_presentation_samples < minimum_presentation_samples:
+				failure = "presentation_samples"
+			elif not local_is_authority and _demo_peak_presentation_desync_msec > 200:
+				failure = "presentation_desync"
+			if not failure.is_empty():
+				push_error(
+					"SPURFIRE_GODOT_P2P_QUALIFY_FAILED local=%s reason=%s snapshots=%d inputs=%d min_sender_inputs=%d peak_gap_ms=%d motion_span_mm=%d presentation_samples=%d presentation_desync_ms=%d"
+					% [
+						_demo_node, failure, soak_snapshots, soak_inputs, minimum_sender_inputs,
+						_demo_peak_snapshot_gap_msec, _demo_soak_motion_span_mm,
+						_demo_presentation_samples, _demo_peak_presentation_desync_msec,
+					]
+				)
+				_demo_quit_requested = true
+				get_tree().quit.call_deferred(1)
+				return
+			print(
+				"SPURFIRE_GODOT_P2P_SOAK local=%s role=%s duration_ms=%d snapshots=%d inputs=%d min_sender_inputs=%d peak_gap_ms=%d motion_span_mm=%d last_age_ms=%d presentation_samples=%d presentation_desync_ms=%d rejects=%d"
+				% [
+					_demo_node, role, now - _demo_soak_started_msec, soak_snapshots,
+					soak_inputs, minimum_sender_inputs, _demo_peak_snapshot_gap_msec, _demo_soak_motion_span_mm,
+					snapshot_age_msec, _demo_presentation_samples,
+					_demo_peak_presentation_desync_msec, _demo_rejected_count,
+				]
+			)
+			var soak_marker := FileAccess.open(_demo_dir.path_join("soaked-%s" % _demo_node), FileAccess.WRITE)
+			if soak_marker == null:
+				push_error("SPURFIRE_GODOT_P2P_QUALIFY_FAILED local=%s reason=soak_barrier_write" % _demo_node)
+				_demo_quit_requested = true
+				get_tree().quit.call_deferred(1)
+				return
+			soak_marker.store_string("ready\n")
+			_demo_soak_emitted = true
+		for node_name in _demo_nodes:
+			if not FileAccess.file_exists(_demo_dir.path_join("soaked-%s" % node_name)):
+				return
 	for node_name in _demo_nodes:
 		if not FileAccess.file_exists(_demo_dir.path_join("qualified-%s" % node_name)):
 			return
@@ -195,6 +304,25 @@ func _try_finish_demo_qualification(now: int) -> void:
 	])
 	_demo_quit_requested = true
 	get_tree().quit.call_deferred(0)
+
+func _sample_demo_presentation_desync() -> void:
+	if _demo_soak_started_msec <= 0 or local_is_authority:
+		return
+	var authority_rider := _remote_riders.get(str(DEMO_PLAYERS["a"])) as Node3D
+	if authority_rider == null or not authority_rider.visible:
+		return
+	var render_tick := float(authority_rider.get("render_tick"))
+	if render_tick <= 0.0:
+		return
+	var angle := fposmod(render_tick, 720.0) * TAU / 720.0
+	var expected := Vector2(cos(angle) * 20.0, sin(angle) * 20.0)
+	var presented := Vector2(authority_rider.global_position.x, authority_rider.global_position.z)
+	var desync_msec := roundi(expected.distance_to(presented) * 1000.0 / 10.472)
+	_demo_presentation_samples += 1
+	_demo_peak_presentation_desync_msec = maxi(
+		_demo_peak_presentation_desync_msec,
+		desync_msec
+	)
 
 func _on_demo_connected(ip: String, port: int) -> void:
 	var file := FileAccess.open(_demo_dir.path_join("endpoint-%s" % _demo_node), FileAccess.WRITE)
@@ -218,6 +346,7 @@ func configure_remote(ip: String, port: int, is_authority: bool) -> bool:
 		"port": port,
 		"route": "UNKNOWN",
 		"rtt_ms": -1,
+		"rtt_samples": [],
 		"rtt_logged": false,
 		"last_seen_ms": 0,
 	}
@@ -231,12 +360,20 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 	if peer_session == null or local_rider == null or (_peers.is_empty() and destination_ip.is_empty()):
 		return
 	var packet := PackedByteArray()
-	if local_is_authority and (simulation_tick % 2 == 0 or stance_changed):
+	if local_is_authority and (simulation_tick % 3 == 0 or stance_changed):
+		var snapshot_position := local_rider.global_position
+		var snapshot_velocity := local_rider.velocity
+		if _demo_soak_msec > 0:
+			# A deterministic 20 m circle makes the transport carry changing actor
+			# state without pretending this practice harness is a horse-physics test.
+			var angle := float(simulation_tick % 720) * TAU / 720.0
+			snapshot_position = Vector3(cos(angle) * 20.0, snapshot_position.y, sin(angle) * 20.0)
+			snapshot_velocity = Vector3(-sin(angle) * 10.472, 0.0, cos(angle) * 10.472)
 		packet = peer_session.make_rider_snapshot(
 			simulation_tick,
 			str(peer_session.get("local_player_id")),
-			local_rider.global_position,
-			local_rider.velocity,
+			snapshot_position,
+			snapshot_velocity,
 			rad_to_deg(local_rider.rotation.y),
 			int(local_rider.get("stance_id"))
 		)
@@ -261,7 +398,17 @@ func advance_shared_tick(tick: int, stance_changed: bool = false) -> void:
 		if _demo_mode:
 			_demo_sent_count += 1
 
-	if simulation_tick % 60 == 0:
+	if _demo_mode and not _peers.is_empty():
+		var probe_interval_ticks := maxi(1, floori(60.0 / float(_peers.size())))
+		var probe_phase := _demo_nodes.find(_demo_node) % probe_interval_ticks
+		if simulation_tick % probe_interval_ticks == probe_phase:
+			var probe_names := _peers.keys()
+			probe_names.sort()
+			var peer: Dictionary = _peers[probe_names[_demo_probe_index % probe_names.size()]]
+			_demo_probe_index += 1
+			var probe: PackedByteArray = peer_session.make_probe(simulation_tick, Time.get_ticks_msec(), false)
+			peer_session.send_packet(probe, str(peer.ip), int(peer.port))
+	elif simulation_tick % 60 == 0:
 		for peer: Dictionary in _peers.values():
 			var probe: PackedByteArray = peer_session.make_probe(simulation_tick, Time.get_ticks_msec(), false)
 			peer_session.send_packet(probe, str(peer.ip), int(peer.port))
@@ -294,7 +441,17 @@ func _on_packet_received(
 			if bool(payload.get("reply", false)):
 				if not peer_name.is_empty():
 					var measured_peer: Dictionary = _peers[peer_name]
-					measured_peer.rtt_ms = maxi(0, now - int(payload.get("nonce", now)))
+					var sample_msec := maxi(0, now - int(payload.get("nonce", now)))
+					var samples := measured_peer.get("rtt_samples", []) as Array
+					samples.append(sample_msec)
+					while samples.size() > 9:
+						samples.pop_front()
+					measured_peer.rtt_samples = samples
+					var ordered_samples := samples.duplicate()
+					ordered_samples.sort()
+					measured_peer.rtt_ms = int(
+						ordered_samples[floori(float(ordered_samples.size()) / 2.0)]
+					)
 					if _demo_mode and not bool(measured_peer.rtt_logged):
 						measured_peer.rtt_logged = true
 						print("SPURFIRE_GODOT_P2P_RTT local=%s peer=%s rtt_ms=%d" % [_demo_node, peer_name, int(measured_peer.rtt_ms)])
@@ -310,20 +467,38 @@ func _on_packet_received(
 		"rider_input":
 			if _demo_mode and local_is_authority:
 				var input_sender := str(payload.get("sender", ""))
+				_demo_input_count += 1
+				_demo_input_counts[input_sender] = int(_demo_input_counts.get(input_sender, 0)) + 1
 				if not _seen_input_senders.has(input_sender):
 					_seen_input_senders[input_sender] = true
 					print("SPURFIRE_GODOT_P2P_INPUT local=%s sender=%s" % [_demo_node, input_sender])
 
 func _apply_remote_snapshot(payload: Dictionary, now: int) -> void:
 	var sender := str(payload.get("rider_player_id", payload.get("sender", "")))
+	var snapshot_position: Vector3 = payload.get("position", Vector3.ZERO)
 	var rider := _remote_rider_for(sender)
 	if rider == null:
 		return
 	rider.visible = true
 	if _demo_mode:
 		if _demo_last_snapshot_msec > 0:
-			_demo_max_gap_msec = maxi(_demo_max_gap_msec, now - _demo_last_snapshot_msec)
+			var snapshot_gap := now - _demo_last_snapshot_msec
+			_demo_max_gap_msec = maxi(_demo_max_gap_msec, snapshot_gap)
+			_demo_peak_snapshot_gap_msec = maxi(_demo_peak_snapshot_gap_msec, snapshot_gap)
+			if _demo_soak_started_msec > 0 and snapshot_gap > 100 and _demo_long_gap_count < 20:
+				_demo_long_gap_count += 1
+				print(
+					"SPURFIRE_GODOT_P2P_LONG_GAP local=%s gap_ms=%d snapshots=%d tick=%d event=%d"
+					% [_demo_node, snapshot_gap, _demo_snapshot_count, simulation_tick, _demo_long_gap_count]
+				)
 		_demo_last_snapshot_msec = now
+		_demo_latest_snapshot_position = snapshot_position
+		_demo_has_snapshot_position = true
+		if _demo_soak_started_msec > 0:
+			_demo_soak_motion_span_mm = maxi(
+				_demo_soak_motion_span_mm,
+				roundi(_demo_soak_first_position.distance_to(snapshot_position) * 1000.0)
+			)
 		_demo_snapshot_count += 1
 		if not _seen_snapshot_senders.has(sender):
 			_seen_snapshot_senders[sender] = true
@@ -333,7 +508,7 @@ func _apply_remote_snapshot(payload: Dictionary, now: int) -> void:
 			_demo_max_gap_msec = 0
 	rider.push_snapshot(
 		int(payload.get("tick", 0)),
-		payload.get("position", Vector3.ZERO),
+		snapshot_position,
 		payload.get("velocity", Vector3.ZERO),
 		float(payload.get("yaw_degrees", 0.0)),
 		int(payload.get("stance_id", 1))

@@ -83,7 +83,14 @@ GitHub Actions then provides these credential-free gates:
 3. **Release QA tooling:** the deterministic M2–M5 playtest aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
 4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
-The current macOS candidate is only ad-hoc signed and is not notarized. The current Windows candidate has no Authenticode signature. Both are explicit release blockers; checksums and provenance do not waive them. Tag-triggered package jobs validate but do not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains a separate protected-environment dispatch that refuses to overwrite any draft or published release.
+Ordinary macOS candidates are only ad-hoc signed and are not notarized; ordinary Windows candidates
+have no Authenticode signature. Both remain explicitly nonpublishing. A manual `trusted-release`
+dispatch can replace them only inside the protected `alpha-release` environment, after Developer ID
+signing/notarization and timestamped Authenticode verification; missing configuration fails closed.
+Checksums and provenance do not waive publisher identity. Tag-triggered package jobs validate but do
+not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest
+and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains
+a separate protected-environment dispatch that refuses to overwrite any draft or published release.
 
 See [alpha-release-qualification.md](alpha-release-qualification.md) for candidate artifacts, telemetry aggregation, two-client entry points, and the terminal evidence contract.
 
@@ -211,8 +218,9 @@ just p2p-game-live
 This enrolls eight independent Godot processes, requires all 56 directed relationships to deliver
 measured route/RTT telemetry, all seven followers to deliver rider input to the authority, and all
 seven followers to receive an authoritative rider snapshot. It compares each displayed HUD route
-and RTT with that client's measurement and uses a file barrier so early clients remain online until
-the entire matrix is complete. A direct-path median of 80 ms or more fails. Success prints one
+and rolling nine-sample median RTT with that client's measurement, requires at least five samples
+per directed pair before accepting it, and uses a file barrier so early
+clients remain online until the entire matrix is complete. A direct-path median of 80 ms or more fails. Success prints one
 aggregate marker:
 
 ```text
@@ -223,6 +231,62 @@ The qualification mode is still the explicitly insecure wire-1 practice harness:
 Godot/RustScale processes and gameplay-HUD agreement, not the secure private-lobby create, results,
 or teardown flow. Its cleanup trap deletes the child tailnet on every exit and retains the mode-0700
 recovery directory if provider deletion cannot be established.
+
+For an eight-process 15-minute changing-transform replication soak, run:
+
+```bash
+just p2p-game-soak-live
+```
+
+The authority sends a deterministic circular qualification transform so the live path cannot pass
+with static snapshots. Every follower must receive at least 16 snapshots/second, observe at least
+30 m of motion, and report no snapshot gap over 200 ms; the authority must continuously receive
+input traffic from all seven followers. Each follower also samples its interpolated rider against
+the known qualification trajectory at least 30 times per second and fails above 200 ms of equivalent
+planar presentation error. `SPURFIRE_P2P_SOAK_MS` may shorten development runs, but
+only the default 900,000 ms run is 15-minute evidence. This remains practice-wire transport and
+presentation evidence, not horse-physics, secure lobby lifecycle, or human-play qualification.
+The single-host soak staggers client launch by 150 ms to dephase scene/probe bursts; the RustScale
+dependency independently randomizes periodic endpoint maintenance. `SPURFIRE_P2P_LAUNCH_STAGGER_SEC`
+may override the launch setting, and `SPURFIRE_P2P_PIN_CLIENTS=1` opts into one client/runtime per
+CPU on Linux. Neither setting relaxes the 200 ms threshold or the evidence checker's exact counts.
+
+The 2026-07-21 default run failed with 225–334 ms gaps during fixed-phase five-minute RustScale
+endpoint refreshes. A two-worker-per-client follow-up reduced the boundary to 131–202 ms but still
+failed one follower at 202 ms. See
+[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The reviewed fix from
+RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
+`ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
+`7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 900,000 ms consumer runs reproduced
+239–462 ms refresh-boundary gaps on that merge. The Alpha validation branch now pins merged
+RustScale master revision `4d12d5f3f576577025044f460545f4e816ec32c2` from PR #105. Its first
+one-region candidate reduced an exact six-minute run to 103–208 ms but still failed one follower;
+an isolated revision passed a short run at 145 ms but failed the full run's second cycle at
+206–325 ms. RustScale #106 identified invalid temporary-socket STUN publication; the current
+revision suppresses unchanged updates and publishes only Magicsock-owned endpoints. The
+tree-identical PR revision passed the shortened and full live gates at 110 ms and 139 ms peaks;
+the exact rebased default-branch revision then passed the full 900,001 ms run at a 97 ms peak,
+54,000 minimum inputs per sender, 39,999 mm minimum motion, 130,433 minimum presentation samples,
+and 0 ms presentation desync. Its disposable child tailnet was deleted successfully. A
+Windows exit 139 initially attributed to the broader dependency state later reproduced on the
+backport and is tracked
+as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
+a 360,000 ms refresh-boundary run with all eight Godot clients and all 56 directed routes. The
+authority received at least 21,599 inputs from each follower; peak snapshot gap was 131 ms and peak
+presentation desync was 1 ms. Exact cleanup deleted the child tailnet. Do not treat that shortened
+regression proof or the successful static matrix as completion of the 15-minute movement gate. The
+subsequent exact-backport default run completed the gate:
+
+```text
+SPURFIRE_GODOT_P2P_SOAK_OK peers=8 duration_ms=900000 min_sender_inputs=53999 peak_gap_ms=131 max_last_age_ms=28 min_motion_span_mm=39999 min_presentation_samples=130435 peak_presentation_desync_ms=1
+```
+
+All 56 directed routes were Direct. Exact cleanup deleted the disposable final child
+`tailce2727.ts.net`, and the builder retained no credential or run directory. The final child was
+absent from the organization listing, but an older inert `spurfire-godot-*` organization record
+(`TrsgR9zy7s11CNTRL`) remains while operational deletion returns `404 tailnet not found`; therefore
+the broad leaked-state gate remains open. This completes the practice-wire transport/presentation
+soak only; secure packaged lifecycle, horse physics, and human-play evidence remain separate gates.
 
 ## 8. Automated UDP and authority-loss test
 

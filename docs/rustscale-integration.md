@@ -5,6 +5,26 @@
 The verdict applies to that commit: RustScale is moving quickly, so every cited API and line should
 be rechecked when the dependency revision changes.
 
+**Current consumer validation (2026-07-21):** The Alpha validation branch pins RustScale master
+revision `4d12d5f3f576577025044f460545f4e816ec32c2`, merged through PR #105. Earlier v0.1.5 revision
+`7139bf384045a7e398320ae853e751c61c8218b9` retained PR #101's randomized,
+STUN-only refresh schedule but still launched a whole-DERP-map probe burst; two exact 15-minute
+consumer runs reproduced 239–462 ms gameplay gaps and are tracked in RustScale #104. PR #105 first
+limited periodic publication to one home-region probe; a six-minute exact consumer run improved the
+cluster to 103–208 ms but still failed one follower. An isolated-runtime revision passed its short
+run at 145 ms, then failed the full run's second cycle at 206–325 ms. RustScale #106 showed that the
+generic netcheck address belongs to a temporary socket, so the current candidate publishes only
+changed Magicsock-owned endpoints. The tree-identical PR revision passed both live gates at 110 ms
+and 139 ms peaks; the exact rebased master revision then passed the full 900,001 ms run at a 97 ms
+peak with 54,000 minimum inputs per sender and 0 ms presentation desync. The temporary
+v0.1.4-compatible PR #103 backport passed RustScale's
+netcheck/tsnet gates, Spurfire's hosted all-platform consumer matrix, and the full 15-minute live
+eight-Godot soak before the consumer returned to main. A Windows exit-139 failure originally filed
+against RustScale later reproduced at the exact backport and completed every standalone
+`PeerSession` operation without starting a RustScale connection. That intermittent course/teardown
+failure is tracked in Spurfire issue #14 and no longer blocks main consumption on a false dependency
+boundary. This does not supersede the older API survey below.
+
 ## Executive verdict
 
 Rust callers can join a tailnet with a short-lived auth key **today**, use an in-process userspace

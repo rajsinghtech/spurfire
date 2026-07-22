@@ -74,7 +74,7 @@ func _ready() -> void:
 			loaded[key] = packed.instantiate()
 
 	if not failures.is_empty():
-		_finish(failures)
+		await _finish(failures)
 		return
 
 	var controller := FakeWeaponController.new()
@@ -182,7 +182,7 @@ func _ready() -> void:
 
 	_check_native_api_if_available(failures)
 	await get_tree().process_frame
-	_finish(failures)
+	await _finish(failures)
 
 func _check_native_api_if_available(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"MountedWeaponController"):
@@ -205,10 +205,16 @@ func _check_native_api_if_available(failures: Array[String]) -> void:
 	native.queue_free()
 
 func _finish(failures: Array[String]) -> void:
+	var exit_code := 0
 	if failures.is_empty():
 		print("SPURFIRE_COMBAT_UI_SMOKE_OK")
-		get_tree().quit(0)
 	else:
+		exit_code = 1
 		for failure in failures:
 			push_error("COMBAT_SMOKE: " + failure)
-		get_tree().quit(1)
+	var tree := get_tree()
+	for child in get_children():
+		child.queue_free()
+	await tree.process_frame
+	await tree.process_frame
+	tree.quit(exit_code)

@@ -4,7 +4,7 @@
 mod macos {
     use clap::{Parser, Subcommand};
     use ed25519_dalek::{Signer, SigningKey};
-    use security_framework::passwords::{get_generic_password, set_generic_password};
+    use security_framework::{os::macos::keychain::SecKeychain, passwords::get_generic_password};
     use serde::Serialize;
     use spurfire_server::{owner_key::OWNER_KEY_ID, ProtectedAlphaClaims, ProtectedAlphaReceipt};
     use std::io::{Read, Write};
@@ -49,15 +49,17 @@ mod macos {
     fn run() -> Result<(), &'static str> {
         match Args::parse().command {
             Command::Init => {
-                if get_generic_password(SERVICE, OWNER_KEY_ID).is_ok() {
-                    return Err("KEYCHAIN_BLOCKED: owner key already exists");
-                }
                 let mut seed = Zeroizing::new([0_u8; 32]);
                 getrandom::getrandom(seed.as_mut())
                     .map_err(|_| "KEYCHAIN_BLOCKED: secure randomness unavailable")?;
                 // Security.framework receives bytes directly in-process. There is
                 // no `security -w`, argv, stdout, or plaintext temporary file.
-                set_generic_password(SERVICE, OWNER_KEY_ID, seed.as_slice())
+                // Add-only storage prevents a read error or concurrent initializer
+                // from rotating an existing owner identity.
+                SecKeychain::default()
+                    .and_then(|keychain| {
+                        keychain.add_generic_password(SERVICE, OWNER_KEY_ID, seed.as_slice())
+                    })
                     .map_err(|_| "KEYCHAIN_BLOCKED: Security.framework write failed")?;
                 emit_public(&SigningKey::from_bytes(&seed))
             }
@@ -73,10 +75,11 @@ mod macos {
             get_generic_password(SERVICE, OWNER_KEY_ID)
                 .map_err(|_| "KEYCHAIN_BLOCKED: Security.framework read failed")?,
         );
-        let bytes: [u8; 32] = seed
-            .as_slice()
-            .try_into()
-            .map_err(|_| "KEYCHAIN_BLOCKED: Keychain owner seed is invalid")?;
+        let bytes = Zeroizing::new(
+            seed.as_slice()
+                .try_into()
+                .map_err(|_| "KEYCHAIN_BLOCKED: Keychain owner seed is invalid")?,
+        );
         let key = SigningKey::from_bytes(&bytes);
         let result = action(&key);
         seed.zeroize();

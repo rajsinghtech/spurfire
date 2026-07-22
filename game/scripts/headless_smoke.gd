@@ -42,17 +42,17 @@ func _ready() -> void:
 	_check_m3_gameplay_controller(failures)
 	if not ClassDB.class_exists(&"HorseController"):
 		failures.append("native class HorseController is unavailable")
-		_finish(failures)
+		await _finish(failures)
 		return
 	if not ClassDB.class_exists(&"SaddleDiveController"):
 		failures.append("native class SaddleDiveController is unavailable")
-		_finish(failures)
+		await _finish(failures)
 		return
 
 	var packed := load("res://scenes/graybox_course.tscn") as PackedScene
 	if packed == null:
 		failures.append("graybox_course.tscn could not be loaded")
-		_finish(failures)
+		await _finish(failures)
 		return
 	var course := packed.instantiate()
 	add_child(course)
@@ -94,7 +94,7 @@ func _ready() -> void:
 	var rider := course.get_node_or_null("Rider") as CharacterBody3D
 	if horse == null or rider == null:
 		failures.append("integrated horse/rider bodies are missing")
-		_finish(failures)
+		await _finish(failures)
 		return
 	var course_peer := course.get_node("PeerSession")
 	var bound_player := "00000000-0000-4000-8000-000000000042"
@@ -118,7 +118,7 @@ func _ready() -> void:
 	await _exercise_landing_boundaries(course, horse, rider, failures)
 	await _exercise_bridge_caps(course, horse, rider, failures)
 	_check_persisted_telemetry(course, failures)
-	_finish(failures)
+	await _finish(failures)
 
 func _check_input_map(failures: Array[String]) -> void:
 	for action in REQUIRED_ACTIONS:
@@ -1586,10 +1586,16 @@ func _wait_physics_frames(count: int) -> void:
 func _finish(failures: Array[String]) -> void:
 	for action in [&"move_forward", &"move_back", &"steer_left", &"steer_right", &"gait_up", &"combat_fire", &"combat_reload", &"combat_interact", &"reset_horse"]:
 		Input.action_release(action)
+	var exit_code := 0
 	if failures.is_empty():
 		print("SPURFIRE_GODOT_SMOKE_OK")
-		get_tree().quit(0)
 	else:
+		exit_code = 1
 		for failure in failures:
 			push_error("SMOKE: " + failure)
-		get_tree().quit(1)
+	var tree := get_tree()
+	for child in get_children():
+		child.queue_free()
+	await tree.process_frame
+	await tree.process_frame
+	tree.quit(exit_code)

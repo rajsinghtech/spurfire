@@ -21,7 +21,10 @@ Saddle Dive is Spurfire's M2 release candidate: a deterministic flying dismount 
 - Reload HUD state now follows native active ticks and visibly reports airborne/recovery/holstered rejection. The integrated smoke proves the observed `0 | 107` case after a real dive/remount completes as `30 | 77` at tick +126.
 - A camera-relative preview reports the exact kernel-clamped direction and amber clamp state while dive-ready. The launch cone remains ±75°; this is feedback, not a geometry change.
 - Candidate qualification covers Rust source gates on Ubuntu, macOS, and Windows; bounded Godot 4.7.1 gameplay plus one-lobby smoke on Linux; deterministic secret-free telemetry aggregation; and nonpublishing checksummed/attested Linux x86_64, Windows x86_64, and macOS universal client exports.
-- Candidate artifacts are not releases. Current macOS output is ad-hoc signed and not notarized; current Windows output has no Authenticode signature. Both remain explicit distribution blockers.
+- Candidate artifacts are not releases. Ordinary macOS output is ad-hoc signed/not notarized and
+  ordinary Windows output is unsigned. Only the protected trusted-release dispatch can replace them
+  with verified Developer ID/notarized and timestamped Authenticode artifacts; credentials and live
+  signing evidence remain activation requirements.
 
 ## Playtest status
 

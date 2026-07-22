@@ -22,7 +22,6 @@ var _dive_requested_angle := 0.0
 var _dive_clamped_angle := 0.0
 var _spur_tier := 0
 var _spur_audio: AudioStreamPlayer
-var _spur_playback: AudioStreamGeneratorPlayback
 
 func _ready() -> void:
 	if controller != null:
@@ -112,23 +111,37 @@ func set_spur_state(meter: int, charge_active: bool, charge_end_tick: int, tick:
 
 func _setup_spur_audio() -> void:
 	_spur_audio = AudioStreamPlayer.new()
-	var generator := AudioStreamGenerator.new()
-	generator.mix_rate = 22050.0
-	generator.buffer_length = 0.15
-	_spur_audio.stream = generator
 	_spur_audio.volume_db = -12.0
 	add_child(_spur_audio)
-	_spur_audio.play()
-	_spur_playback = _spur_audio.get_stream_playback() as AudioStreamGeneratorPlayback
+
+func _exit_tree() -> void:
+	if _spur_audio:
+		_spur_audio.stop()
+		_spur_audio.stream = null
+	_spur_audio = null
 
 func _play_spur_tier(tier: int) -> void:
-	if _spur_playback == null:
+	if _spur_audio == null:
 		return
 	var frequency: float = [0.0, 440.0, 620.0, 880.0][clampi(tier, 0, 3)]
-	for frame in range(1764):
-		var envelope := 1.0 - float(frame) / 1764.0
+	var sample_count := 1764
+	var samples := PackedByteArray()
+	samples.resize(sample_count * 4)
+	for frame in range(sample_count):
+		var envelope := 1.0 - float(frame) / float(sample_count)
 		var sample := sin(TAU * frequency * float(frame) / 22050.0) * envelope * 0.18
-		_spur_playback.push_frame(Vector2(sample, sample))
+		var pcm := clampi(roundi(sample * 32767.0), -32768, 32767)
+		samples.encode_s16(frame * 4, pcm)
+		samples.encode_s16(frame * 4 + 2, pcm)
+	var tone := AudioStreamWAV.new()
+	tone.format = AudioStreamWAV.FORMAT_16_BITS
+	tone.mix_rate = 22050
+	tone.stereo = true
+	tone.data = samples
+	_spur_audio.stream = tone
+	if DisplayServer.get_name() == "headless":
+		return
+	_spur_audio.play()
 
 func _process(delta: float) -> void:
 	if feedback_remaining > 0.0:

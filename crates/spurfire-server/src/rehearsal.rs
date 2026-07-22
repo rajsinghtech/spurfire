@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spurfire_protocol::{LobbyId, ProvisioningMode, UnixMillis, MAX_PLAYERS};
@@ -293,7 +293,7 @@ fn verify_protected_alpha_inner(
         .ok_or(RehearsalReceiptError::UnknownSigner)?;
     let signature = Signature::from_slice(&receipt.signature)
         .map_err(|_| RehearsalReceiptError::InvalidSignature)?;
-    key.verify(&claims_bytes, &signature)
+    key.verify_strict(&claims_bytes, &signature)
         .map_err(|_| RehearsalReceiptError::InvalidSignature)?;
     let claims = &receipt.claims;
     let lifetime = claims
@@ -449,7 +449,7 @@ fn verify_inner(
         .ok_or(RehearsalReceiptError::UnknownSigner)?;
     let signature = Signature::from_slice(&receipt.signature)
         .map_err(|_| RehearsalReceiptError::InvalidSignature)?;
-    key.verify(&claims_bytes, &signature)
+    key.verify_strict(&claims_bytes, &signature)
         .map_err(|_| RehearsalReceiptError::InvalidSignature)?;
 
     let claims = &receipt.claims;
@@ -537,8 +537,22 @@ fn hex(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::{Signer, SigningKey, Verifier};
     use spurfire_protocol::LobbyId;
+
+    fn weak_identity_signature(message: &[u8]) -> (VerifyingKey, Vec<u8>) {
+        let mut identity = [0_u8; 32];
+        identity[0] = 1;
+        let key = VerifyingKey::from_bytes(&identity).unwrap();
+        assert!(key.is_weak());
+        let mut signature = [0_u8; 64];
+        signature[0] = 1;
+        let parsed = Signature::from_slice(&signature).unwrap();
+        // This is accepted by the legacy verifier for every message, which
+        // proves the strict receipt path is security-relevant.
+        assert!(key.verify(message, &parsed).is_ok());
+        (key, signature.to_vec())
+    }
 
     fn fixture(
         now: u64,
@@ -592,6 +606,21 @@ mod tests {
         let mut bytes = serde_json::to_vec(&receipt).unwrap();
         let qualification = verify_local_rehearsal_receipt(&mut bytes, &keys, &context).unwrap();
         assert_eq!(qualification.network_generation, 1);
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn local_rehearsal_rejects_weak_owner_key() {
+        let (mut receipt, _, context) = fixture(1_000_000);
+        let claims = serde_json::to_vec(&receipt.claims).unwrap();
+        let (key, signature) = weak_identity_signature(&claims);
+        receipt.signature = signature;
+        let keys = BTreeMap::from([("owner-1".into(), key)]);
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        assert!(matches!(
+            verify_local_rehearsal_receipt(&mut bytes, &keys, &context),
+            Err(RehearsalReceiptError::InvalidSignature)
+        ));
         assert!(bytes.iter().all(|byte| *byte == 0));
     }
 
@@ -692,6 +721,21 @@ mod tests {
             assert!(verify_protected_alpha_receipt(&mut bytes, &keys, &changed).is_err());
             assert!(bytes.iter().all(|byte| *byte == 0));
         }
+    }
+
+    #[test]
+    fn protected_alpha_rejects_weak_owner_key() {
+        let (mut receipt, _, context) = alpha_fixture(2_000_000);
+        let claims = serde_json::to_vec(&receipt.claims).unwrap();
+        let (key, signature) = weak_identity_signature(&claims);
+        receipt.signature = signature;
+        let keys = BTreeMap::from([("alpha-owner".into(), key)]);
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        assert!(matches!(
+            verify_protected_alpha_receipt(&mut bytes, &keys, &context),
+            Err(RehearsalReceiptError::InvalidSignature)
+        ));
+        assert!(bytes.iter().all(|byte| *byte == 0));
     }
 
     #[test]

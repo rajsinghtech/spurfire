@@ -1,6 +1,25 @@
 # Peer gameplay networking
 
-Spurfire's native gameplay data plane uses application UDP through embedded RustScale. Both direct RustScale dependencies are pinned to released v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; do not update the pin without rerunning the dependency gates and live lifecycle probe.
+Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The Alpha
+validation branch pins both direct dependencies to RustScale master revision
+`4d12d5f3f576577025044f460545f4e816ec32c2`, merged through
+[#105](https://github.com/rajsinghtech/rustscale/pull/105). Earlier v0.1.5 revision
+`7139bf384045a7e398320ae853e751c61c8218b9` reproduced the refresh-time stall tracked in
+[#104](https://github.com/rajsinghtech/rustscale/issues/104). The first one-region PR #105 candidate
+reduced a six-minute exact consumer run to 103–208 ms but still failed one follower. An isolated
+revision passed a short run at 145 ms, then failed its full second cycle at 206–325 ms. RustScale
+[#106](https://github.com/rajsinghtech/rustscale/issues/106) showed that diagnostic STUN addresses
+belong to temporary sockets; the merged revision publishes only changed Magicsock-owned endpoints.
+The tree-identical PR revision passed both live gates at 110 ms and 139 ms peaks. The exact rebased
+master revision then passed the full 900,001 ms run at a 97 ms peak with 54,000 minimum inputs per
+sender, 39,999 mm minimum motion, and 0 ms presentation desync. The temporary
+v0.1.4-compatible backport [#103](https://github.com/rajsinghtech/rustscale/pull/103) was useful for
+isolating and live-qualifying that fix, but is no longer the consumer pin. A Windows exit-139 failure
+initially attributed to post-v0.1.4 RustScale later reproduced on the exact backport, moved between the
+integrated course and process teardown, and completed all standalone `PeerSession` work without
+starting a RustScale connection. It is tracked as a Spurfire/Godot lifecycle defect in
+[Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14), not as a reason to remain
+on the backport.
 
 ## Components
 
@@ -56,11 +75,53 @@ a local teardown warning only after traffic succeeds.
 `just p2p-game-live` separately launches eight real headless Godot processes on a disposable child
 tailnet. It fails unless all 56 directed paths report telemetry, all seven follower-input paths and
 seven authority-snapshot paths deliver, and each gameplay-HUD route/RTT row exactly matches the
-independent measurement emitted by that client. This is an insecure practice-wire integration
+independent route and rolling nine-sample RTT median emitted by that client. This is an insecure practice-wire integration
 qualification and must not be represented as the secure game-client lobby lifecycle acceptance test.
 On 2026-07-21, the eight-process Linux ARM64 qualification passed with all 56 routes Direct, a 20 ms
 median, 56 exact HUD matches, all seven authority input senders, and all seven snapshot receivers.
 An independent organization listing then confirmed exact absence of the disposable child tailnet.
+`just p2p-game-soak-live` holds the same eight-process matrix for 15 minutes while sending a
+changing authoritative qualification transform. It fails if any follower sees a snapshot gap over
+200 ms, receives fewer than 16 snapshots per second, or observes less than 30 m of motion, or if
+the authority does not continuously receive all seven input streams. Followers also compare the
+interpolated rider with the known qualification trajectory at least 30 times per second and fail
+above 200 ms of equivalent planar presentation error. Shortened runs are development
+checks only; this remains practice-wire replication evidence rather than secure lifecycle proof.
+
+The 2026-07-21 15-minute qualification did **not** pass the 200 ms gate. All seven followers
+received the exact expected 18,000 snapshots and stayed within 11 ms of the interpolated
+qualification trajectory, but isolated snapshot gaps reached 225–334 ms. Long-gap telemetry then
+correlated the spikes with RustScale's fixed-phase five-minute endpoint/netcheck refresh. Bounding
+each embedded Tokio runtime to two workers reduced a six-minute refresh-boundary run to 131–202 ms,
+but one follower still failed closed at 202 ms. Each attempt's cleanup trap reported deletion of its
+disposable child. A later organization listing still contained the older record
+`TrsgR9zy7s11CNTRL` (`spurfire-godot-1784661024`), while the operational tailnet delete endpoint
+returned `404 tailnet not found` for that exact ID. Treat that as an inert provider record requiring
+separate remediation, not as the live tailnet from the final run. The refresh defect is tracked in
+[RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100); this was an open M6
+blocker until the reviewed fix passed the default run below.
+
+Merged RustScale PR #101 randomizes the periodic refresh per peer and limits that maintenance pass
+to the STUN endpoint work needed by magicsock. Its original exact candidate revision
+`eea0e4cd40d60a7c143ad7671439d66d2912df08` passed shortened and default eight-Godot soaks. The
+isolated v0.1.4 backport revision `ad92ab56474ac37adff5c48da1ae8eaaa50efb43` then passed
+RustScale's `rustscale-netcheck` and `rustscale-tsnet` gates, Spurfire's complete hosted CI, and one
+complete Client Preflight matrix including Windows startup/export/packaged launch, Linux
+x64/ARM64, macOS universal, and candidate assembly. A later exact-backport Windows run failed once
+with exit 139 and passed on retry; the same intermittent failure appeared at more than one
+RustScale revision and is tracked in Spurfire issue #14. The backport's shortened 360,000 ms live
+run peaked at 131 ms snapshot gap and 1 ms presentation desync.
+
+The subsequent default 900,000 ms run on that exact backport also passed. All eight Godot clients
+and 56 directed Direct routes remained live through three independently randomized maintenance
+cycles; the authority received at least 53,999 inputs from each follower, peak snapshot gap was
+131 ms, maximum last-snapshot age was 28 ms, minimum motion span was 39,999 mm, and peak
+presentation desync was 1 ms across at least 130,435 presentation samples per follower. The cleanup
+trap deleted the exact final child (`tailce2727.ts.net`); builder credentials and run files were
+absent afterward, and that child was absent from the organization listing. The unrelated older inert
+record described above remains, so the broad leaked-state gate stays open. This closes the M6
+practice-wire transport/presentation soak, not secure packaged-client lifecycle, horse physics, or
+human-play qualification.
 
 ## Security boundaries
 
@@ -94,3 +155,10 @@ are specified in `docs/session-identity-architecture.md` (decision D12).
   scale gate covers the deterministic proxy at 6/8/12/16 peers; packaged-client handling remains a
   live qualification item.
 - RustScale currently may report `portmapper cleanup remains uncertain` repeatedly on macOS close even though process exit releases local resources. Track this upstream.
+- RustScale's fixed-phase five-minute endpoint refresh in v0.1.4 can synchronize embedded peers and
+  breach the 200 ms gameplay gap gate. The fix in PR
+  [#101](https://github.com/rajsinghtech/rustscale/pull/101), first isolated as v0.1.4 backport PR
+  [#103](https://github.com/rajsinghtech/rustscale/pull/103) and now consumed from exact merged main,
+  passed both the shortened six-minute refresh-boundary regression and the full 15-minute gate at a
+  131 ms peak. The independent Windows lifecycle flake remains tracked in Spurfire issue #14;
+  secure packaged-client and human gates also remain.

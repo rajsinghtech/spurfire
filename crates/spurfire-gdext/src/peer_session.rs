@@ -319,6 +319,11 @@ fn run_worker(
         sender: events,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        // One embedded peer needs concurrent control/data-plane progress, not
+        // one Tokio worker per host CPU. The default multiplied an eight-core
+        // qualification host into 64 runtime workers across eight clients and
+        // amplified RustScale's periodic endpoint refresh into gameplay stalls.
+        .worker_threads(2)
         .enable_all()
         .build()
     {
