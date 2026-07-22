@@ -79,12 +79,12 @@ grep -Fqx '## Playtest status' "$notes" || {
   echo "error: $notes must contain an explicit Playtest status section" >&2
   exit 1
 }
-grep -Fqi 'playtest pending' "$notes" || {
-  echo "error: $notes must say that observational playtesting is pending" >&2
+grep -Fqi 'human playtesting starts in Alpha' "$notes" || {
+  echo "error: $notes must say that human playtesting starts in Alpha" >&2
   exit 1
 }
-grep -Eq '^\| M2 \| [^|]+ \| \*\*source complete / credentialed playtest pending\*\* \|' docs/prototype-plan.md || {
-  echo "error: docs/prototype-plan.md must keep M2 source complete / credentialed playtest pending" >&2
+grep -Eq '^\| M2 \| [^|]+ \| \*\*source complete / Alpha playtest target\*\* \|' docs/prototype-plan.md || {
+  echo "error: docs/prototype-plan.md must keep M2 source complete / Alpha playtest target" >&2
   exit 1
 }
 

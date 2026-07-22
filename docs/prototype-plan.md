@@ -26,7 +26,7 @@ singleplayer bots, slide/mantle/tac-sprint movement extensions.
 |---|---|---|---|
 | M0 | Graybox horse locomotion | **done** | 3 archetypes rideable on 1.5km terrain at 60fps |
 | M1 | Mounted shooting + sway | **done (as-built: SF rifles + ADS)** | sway model drives hit% into target bands |
-| M2 | Saddle Dive + invited-friends path | **source complete / credentialed playtest pending** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
+| M2 | Saddle Dive + invited-friends path | **source complete / Alpha playtest target** | two riders preserve movement/combat through epoch-2 failover; testers dive 2–4x/match |
 | M3 | Spook/bolt, on-foot kit, Majestic Return | **source complete / playtest pending** | median lose-horse-to-remount < 40s |
 | M4 | Spur meter + Majestic Charge | **source complete / playtest pending** | median player earns >=1 charge/match |
 | M5 | Bounty Run scoring loop | **source complete / playtest pending** | 15-min match, winner 400–800 pts, "play again" >= 70% |
@@ -36,6 +36,10 @@ Build order is strict: each milestone's tuning depends on the previous one's fee
 friends M2 movement/combat/failover source path is implemented now; it is not deferred to M6.
 M6 retains scale, scoring/objective continuity, soak, joining churn, live qualification, and
 release evidence after the M5 fun verdict.
+
+“Playtest pending” below describes work performed inside the Alpha, not a prerequisite for creating
+or sharing the Alpha candidate. Automated qualification opens the Alpha; human evidence closes its
+gameplay questions.
 
 Every gameplay milestone follows the established pattern: deterministic Rust kernel in
 `spurfire-protocol`/`spurfire-gdext`, thin Godot adapter, headless smoke test.

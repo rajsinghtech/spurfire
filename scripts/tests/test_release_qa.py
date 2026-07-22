@@ -29,15 +29,19 @@ REHEARSAL_CANDIDATE = load_script("make-rehearsal-candidate-metadata.py")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
-def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
+def write_candidate_inputs(
+    root: Path, *, trusted: bool = False, include_windows: bool | None = None
+) -> Path:
     source = root / "source"
     source.mkdir()
     archives = {
         "Spurfire-linux-arm64.tar.gz": "linux-arm64",
         "Spurfire-linux-x86_64.tar.gz": "linux-x86_64",
         "Spurfire-macos-universal.zip": "macos-universal",
-        "Spurfire-windows-x86_64.zip": "windows-x86_64",
     }
+    include_windows = trusted if include_windows is None else include_windows
+    if include_windows:
+        archives["Spurfire-windows-x86_64.zip"] = "windows-x86_64"
     for name in archives:
         (source / name).write_bytes(name.encode())
 
@@ -80,7 +84,9 @@ def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
                 "team_id": "A" * 10 if trusted else "",
             },
         },
-        "windows-trust.json": {
+    }
+    if include_windows:
+        records["windows-trust.json"] = {
             "schema_version": 1,
             "platform": "windows-x86_64",
             "source_sha": SHA,
@@ -94,8 +100,7 @@ def write_candidate_inputs(root: Path, *, trusted: bool = False) -> Path:
                 "timestamp_verified": trusted,
                 "signer_certificate_sha256": "a" * 64 if trusted else "",
             },
-        },
-    }
+        }
     for name, record in records.items():
         (source / name).write_text(json.dumps(record), encoding="utf-8")
     return source
@@ -591,13 +596,13 @@ class PlatformCoverageTests(unittest.TestCase):
         )
         registered = self.registered_platforms()
         self.assertTrue(registered)
-        self.assertEqual(registered, set(CANDIDATE.EXPECTED.values()))
+        self.assertEqual(registered, set(CANDIDATE.RELEASE_EXPECTED.values()))
         self.assertEqual(registered, set(EVIDENCE.REQUIRED_PLATFORMS))
         for platform in sorted(registered):
             with self.subTest(platform=platform):
                 archive = next(
                     name
-                    for name, value in CANDIDATE.EXPECTED.items()
+                    for name, value in CANDIDATE.RELEASE_EXPECTED.items()
                     if value == platform
                 )
                 self.assertIn(archive, preflight)
@@ -846,8 +851,9 @@ class CommandTests(unittest.TestCase):
         # ABI, loader, input, and exported-method regressions must not ship in
         # desktop artifacts that only launched a bootstrap scene for 30 frames.
         preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
-        # Linux x86_64, Linux ARM64, Windows, macOS arm64, and the macOS
-        # x86_64 slice under Rosetta all run the full smoke suite.
+        # Linux x86_64, Linux ARM64, macOS arm64, and the macOS x86_64 slice
+        # under Rosetta run in Alpha. The retained future-release Windows job
+        # is explicitly dispatch-only and runs the same suite when selected.
         self.assertGreaterEqual(preflight.count("scripts/test-godot.sh"), 5)
         self.assertGreaterEqual(preflight.count("scripts/check-alpha-smoke-log.sh"), 5)
         self.assertEqual(preflight.count("--allow-macos-dummy-shader-leak"), 2)
@@ -858,7 +864,20 @@ class CommandTests(unittest.TestCase):
         self.assertIn("arch -x86_64", preflight)
         self.assertIn("godot-smoke-x86_64.log", preflight)
 
-    def test_candidate_metadata_is_nonpublishing(self):
+    def test_ordinary_alpha_excludes_windows_and_signing(self):
+        preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
+        windows = preflight.split("  windows:", 1)[1].split("  macos:", 1)[0]
+        candidate = preflight.split("  candidate:", 1)[1].split("  trusted-windows:", 1)[0]
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'",
+            windows,
+        )
+        self.assertIn("needs: [metadata, linux, linux-arm64, macos]", candidate)
+        self.assertNotIn("Spurfire-windows-x86_64.zip", candidate)
+        self.assertNotIn("windows-latest", ci)
+
+    def test_candidate_metadata_is_ready_for_invited_alpha_testing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = write_candidate_inputs(root)
@@ -867,10 +886,14 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((output / "candidate-manifest.json").read_text())
             self.assertEqual(manifest["schema_version"], 2)
-            self.assertEqual(manifest["candidate_mode"], "preflight")
+            self.assertEqual(manifest["candidate_mode"], "alpha-playtest")
+            self.assertTrue(manifest["alpha_testing_eligible"])
+            self.assertEqual(manifest["human_evidence_status"], "collect_during_alpha")
             self.assertFalse(manifest["release_eligible"])
-            self.assertEqual(manifest["publication"], "forbidden")
-            self.assertEqual(len(manifest["artifacts"]), 4)
+            self.assertEqual(manifest["publication"], "invited_alpha_only")
+            self.assertEqual(manifest["blockers"], [])
+            self.assertEqual(len(manifest["artifacts"]), 3)
+            self.assertNotIn("windows", manifest["distribution_trust"])
             self.assertTrue((output / "SHA256SUMS").is_file())
             self.assertTrue((output / "candidate.spdx.json").is_file())
 
@@ -935,7 +958,7 @@ class CommandTests(unittest.TestCase):
     def test_trusted_mode_rejects_unsigned_records(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = write_candidate_inputs(root)
+            source = write_candidate_inputs(root, include_windows=True)
             output = root / "output"
             result = run_candidate_metadata(source, output, *self.trusted_args())
             self.assertEqual(result.returncode, 0, result.stderr)

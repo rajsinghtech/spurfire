@@ -1,6 +1,6 @@
 # Release evidence manifests
 
-This directory intentionally contains **no completed `0.2.0.json` manifest**. A completed manifest is a terminal release input, not a planning claim.
+This directory intentionally contains **no completed `0.2.0.json` manifest**. These manifests belong to a future stable public release and are not required to begin the invited Alpha playtest.
 
 Before any stable tag or publication, qualify source commit **S**, copy `template.json` to `<version>.json`, set `source_sha` and every run/artifact record to S, replace every placeholder with independently checked evidence, set a gate to `true` only after its owning reviewer approves it, and remove every blocker. Then run:
 
@@ -22,4 +22,4 @@ SPURFIRE_ALPHA_ACTIVATION_APPROVED source_sha=<S> evidence_digest=sha256:<digest
 SPURFIRE_ALPHA_RELEASE_APPROVED source_sha=<S> evidence_digest=sha256:<digest>
 ```
 
-Candidate workflow artifacts do not satisfy this contract. They are short-lived, nonpublishing, and explicitly record the current macOS and Windows trust blockers.
+Alpha candidate artifacts do not satisfy this future publication contract. They are short-lived, checksummed Linux/macOS builds intentionally scoped to invited human testing.

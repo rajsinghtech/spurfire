@@ -11,10 +11,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-EXPECTED = {
+ALPHA_EXPECTED = {
     "Spurfire-linux-arm64.tar.gz": "linux-arm64",
     "Spurfire-linux-x86_64.tar.gz": "linux-x86_64",
     "Spurfire-macos-universal.zip": "macos-universal",
+}
+RELEASE_EXPECTED = {
+    **ALPHA_EXPECTED,
     "Spurfire-windows-x86_64.zip": "windows-x86_64",
 }
 TRUST_FILES = {
@@ -102,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event", required=True)
     parser.add_argument(
         "--candidate-mode",
-        choices=("preflight", "trusted-release"),
-        default="preflight",
+        choices=("alpha-playtest", "trusted-release"),
+        default="alpha-playtest",
     )
     parser.add_argument("--provenance-verified", action="store_true")
     parser.add_argument("--approved-apple-team-id")
@@ -126,14 +129,19 @@ def main(argv: list[str] | None = None) -> int:
                 "trusted-release mode requires an approved Windows certificate SHA-256"
             )
 
+    expected = (
+        RELEASE_EXPECTED
+        if args.candidate_mode == "trusted-release"
+        else ALPHA_EXPECTED
+    )
     files = sorted(
         path
         for path in args.input_dir.iterdir()
-        if path.is_file() and path.name in EXPECTED
+        if path.is_file() and path.name in expected
     )
-    if [path.name for path in files] != sorted(EXPECTED):
+    if [path.name for path in files] != sorted(expected):
         print(
-            f"error: candidate input must contain exactly the {len(EXPECTED)} expected client archives",
+            f"error: candidate input must contain exactly the {len(expected)} expected client archives",
             file=sys.stderr,
         )
         return 1
@@ -141,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     artifacts = [
         {
             "file": path.name,
-            "platform": EXPECTED[path.name],
+            "platform": expected[path.name],
             "sha256": digest(path),
             "size_bytes": path.stat().st_size,
         }
@@ -164,13 +172,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     (args.output_dir / "SHA256SUMS").write_text(checksums, encoding="utf-8")
 
-    mac_trusted = macos_trusted(
+    trusted_mode = args.candidate_mode == "trusted-release"
+    mac_trusted = trusted_mode and macos_trusted(
         trust["macos-universal"], args.approved_apple_team_id
     )
-    win_trusted = windows_trusted(
+    win_trusted = trusted_mode and windows_trusted(
         trust["windows-x86_64"], args.approved_windows_certificate_sha256
     )
-    trusted_mode = args.candidate_mode == "trusted-release"
     release_eligible = trusted_mode and args.provenance_verified and mac_trusted and win_trusted
     if trusted_mode:
         blockers = []
@@ -181,20 +189,44 @@ def main(argv: list[str] | None = None) -> int:
         if not win_trusted:
             blockers.append("verified Windows Authenticode signing and timestamp are absent")
     else:
-        blockers = [
-            "ordinary preflight candidates are never release eligible",
-            "Apple Developer ID signing is absent from the ordinary preflight",
-            "Apple notarization is absent from the ordinary preflight",
-            "Windows Authenticode signing is absent from the ordinary preflight",
-            "managed private-live and human evidence require separate qualification",
+        blockers = []
+        release_blockers = [
+            "Alpha playtest candidates are not public releases",
+            "platform signing and Windows support are outside Alpha scope",
+            "human gameplay evidence is collected during Alpha",
         ]
-        if not args.provenance_verified:
-            blockers.append("source-bound GitHub build-provenance attestations were not verified")
+    if trusted_mode:
+        release_blockers = blockers
+
+    distribution_trust = {
+        "macos": {
+            "signature": trust["macos-universal"].get("signature"),
+            "checksum_present": True,
+        },
+        "linux": {
+            "signature": trust["linux-x86_64"].get("signature"),
+            "checksum_present": True,
+        },
+        "linux-arm64": {
+            "signature": trust["linux-arm64"].get("signature"),
+            "checksum_present": True,
+        },
+    }
+    if trusted_mode:
+        distribution_trust["macos"].update(
+            {"developer_id_signed": mac_trusted, "notarized": mac_trusted}
+        )
+        distribution_trust["windows"] = {
+            "signature": trust["windows-x86_64"].get("signature"),
+            "authenticode_signed": win_trusted,
+        }
 
     manifest = {
         "schema_version": 2,
         "candidate_mode": args.candidate_mode,
         "candidate_only": not release_eligible,
+        "alpha_testing_eligible": not trusted_mode,
+        "human_evidence_status": "collect_during_alpha" if not trusted_mode else "not_applicable",
         "release_eligible": release_eligible,
         "source_sha": args.source_sha,
         "workflow": {
@@ -204,27 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         "artifacts": artifacts,
         "provenance_verified": args.provenance_verified,
-        "distribution_trust": {
-            "macos": {
-                "signature": trust["macos-universal"].get("signature"),
-                "developer_id_signed": mac_trusted,
-                "notarized": mac_trusted,
-            },
-            "windows": {
-                "signature": trust["windows-x86_64"].get("signature"),
-                "authenticode_signed": win_trusted,
-            },
-            "linux": {
-                "signature": trust["linux-x86_64"].get("signature"),
-                "checksum_present": True,
-            },
-            "linux-arm64": {
-                "signature": trust["linux-arm64"].get("signature"),
-                "checksum_present": True,
-            },
-        },
+        "distribution_trust": distribution_trust,
         "blockers": blockers,
-        "publication": "protected_manual_only" if release_eligible else "forbidden",
+        "release_blockers": release_blockers,
+        "publication": (
+            "protected_manual_only"
+            if release_eligible
+            else "forbidden" if trusted_mode else "invited_alpha_only"
+        ),
     }
     (args.output_dir / "candidate-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"

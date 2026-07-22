@@ -44,9 +44,9 @@ A main-channel chart defaults to its corresponding immutable `sha-<full-commit-s
 
 ### Client preflight and publication
 
-`.github/workflows/client-release.yml` is deliberately a **nonpublishing Client Preflight**. Pull requests and manual dispatches build Linux x86_64, Windows x86_64, and macOS universal archives; a later tag run does the same. These are expiring GitHub Actions artifacts, not a release. The jobs use checksum-verified Godot 4.7.1 editors/templates, need no repository secrets, and do not require Apple notarization.
+`.github/workflows/client-release.yml` is deliberately a **nonpublishing Alpha Client Preflight**. Pull requests and `main` builds produce Linux x86_64, Linux ARM64, and macOS universal archives for invited human testing. These are expiring GitHub Actions artifacts, not a public release. The jobs use checksum-verified Godot 4.7.1 editors/templates, need no repository secrets, and do not require platform signing or notarization. Windows is outside the Alpha platform set and runs only through the dormant future `trusted-release` dispatch.
 
-A stable client can be published only by a later explicit dispatch of `.github/workflows/client-publish.yml` for an existing tag and successful tag preflight run. That workflow verifies the tag commit, metadata, exact artifact set, and successful Ubuntu/macOS/Windows source gates plus Linux Godot smoke before creating the release. It refuses to replace a published release or its assets. Release preparation itself never tags or invokes either publishing path.
+A future stable client publisher remains separate from Alpha and is not an Alpha-readiness gate. Alpha artifacts are shared only with invited testers; ordinary candidate preparation never tags, publishes, signs, or deploys them.
 
 ## Run the image safely
 

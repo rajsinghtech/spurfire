@@ -20,15 +20,14 @@ Saddle Dive is Spurfire's M2 release candidate: a deterministic flying dismount 
 - Local physics interpolation and render-time camera/rider sampling smooth 60 Hz transforms on high-refresh displays without changing gameplay state. Teleport/reset guards clear interpolation history, and stance-aware camera anchors preserve the no-kick/no-dip/no-roll comfort contract at the shipped 70→78 FOV.
 - Reload HUD state now follows native active ticks and visibly reports airborne/recovery/holstered rejection. The integrated smoke proves the observed `0 | 107` case after a real dive/remount completes as `30 | 77` at tick +126.
 - A camera-relative preview reports the exact kernel-clamped direction and amber clamp state while dive-ready. The launch cone remains ±75°; this is feedback, not a geometry change.
-- Candidate qualification covers Rust source gates on Ubuntu, macOS, and Windows; bounded Godot 4.7.1 gameplay plus one-lobby smoke on Linux; deterministic secret-free telemetry aggregation; and nonpublishing checksummed/attested Linux x86_64, Windows x86_64, and macOS universal client exports.
-- Candidate artifacts are not releases. Ordinary macOS output is ad-hoc signed/not notarized and
-  ordinary Windows output is unsigned. Only the protected trusted-release dispatch can replace them
-  with verified Developer ID/notarized and timestamped Authenticode artifacts; credentials and live
-  signing evidence remain activation requirements.
+- Alpha qualification covers Rust source gates on Ubuntu and macOS; bounded Godot 4.7.1 gameplay plus one-lobby smoke; deterministic secret-free telemetry aggregation; and checksummed/attested Linux x86_64, Linux ARM64, and macOS universal client exports.
+- Alpha artifacts are invited-test builds, not public releases. Linux archives are unsigned and the
+  macOS archive is ad-hoc signed. Windows, Developer ID/notarization, Authenticode, and public-release
+  signing are outside the Alpha platform and readiness scope.
 
 ## Playtest status
 
-**Implementation complete / playtest pending.** Automated deterministic and forced headless scenarios do not satisfy population or feel gates. M2 is not “done” until natural play demonstrates all of the following:
+**Alpha candidate ready / human playtesting starts in Alpha.** Automated deterministic and forced headless scenarios protect the build but do not satisfy population or feel goals. The following are outcomes to measure and tune during Alpha, not entry gates that delay the first tester build:
 
 - 2–4 dives per player in a 15-minute match;
 - airborne hit rate 25–40% above the gallop baseline;
@@ -44,4 +43,4 @@ Top feel risks remain dive spam versus non-use (recovery is the first tuning dia
 
 M3 on-foot combat and Tactical Roll, M4 Spur, M5 Bounty Run scoring, and the remaining M6 authority-simulation/migration/keyframe/rewind work are not part of 0.2.0. The public control service remains a prototype: it has no user accounts or ranked-result trust model, and its encrypted file vault/reconciler still lacks the approved production setec/workload-identity, audit, backup, rotation, fencing, and private-operator posture. Hosted deployment remains zero-mutation dry-run.
 
-Do not tag or publish 0.2.0 until the managed one-lobby client, security activation, exact cleanup, coherent peer-hosted M2, telemetry, natural-play, artifact trust, and release-governance gates all pass at one reviewed source SHA. Tag-triggered package jobs validate but do not publish stable OCI aliases. The protected manual client publisher requires an independently reviewed release-evidence digest, refuses unsigned/unnotarized candidates, and will not overwrite an existing draft or published release.
+Do not publish Alpha as a stable public release. Start invited Linux/macOS testing from the checksummed Alpha candidate, collect the natural-play and telemetry findings above, and iterate. Hosted provider mutation still requires its explicit security authorization; public tags, platform signing, Windows support, and release governance belong to a later stable-release project.

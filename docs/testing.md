@@ -78,19 +78,15 @@ scripts/check-release-metadata.sh 0.2.0
 
 GitHub Actions then provides these credential-free gates:
 
-1. **CI:** `cargo check --locked --all-targets` and `just check` on Ubuntu, macOS, and Windows.
+1. **CI:** `cargo check --locked --all-targets` and `just check` on Ubuntu and macOS for the Alpha platform set.
 2. **Linux Godot:** a checksum-verified Godot 4.7.1 editor runs the bounded real scene/smoke suite. `scripts/check-alpha-smoke-log.sh` additionally requires the integrated one-lobby contract marker. That fixture/source marker does not prove HTTP, provider, coherent multiplayer, cleanup, two-download, or human qualification.
 3. **Release QA tooling:** the deterministic M2–M5 playtest aggregator, secret-canary, lifecycle-evidence, trust-blocker, and no-overwrite tests run on Linux.
-4. **Client Preflight:** pull requests, main pushes, manual dispatches, and later release tags export Linux x86_64, Windows x86_64, and macOS universal archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, platform trust records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
+4. **Client Preflight:** pull requests, main pushes, and ordinary manual dispatches export Linux x86_64, Linux ARM64, and macOS universal Alpha archives. The combined short-lived workflow artifact includes checksums, SPDX metadata, launch-smoke records, and verified GitHub provenance on non-PR runs. Preflight never creates a release, tag, package, or deployment.
 
-Ordinary macOS candidates are only ad-hoc signed and are not notarized; ordinary Windows candidates
-have no Authenticode signature. Both remain explicitly nonpublishing. A manual `trusted-release`
-dispatch can replace them only inside the protected `alpha-release` environment, after Developer ID
-signing/notarization and timestamped Authenticode verification; missing configuration fails closed.
-Checksums and provenance do not waive publisher identity. Tag-triggered package jobs validate but do
-not publish stable OCI aliases. Do not create `v0.2.0` until the exact-SHA release evidence manifest
-and every implementation, safety, lifecycle, artifact, and human gate are green. Publishing remains
-a separate protected-environment dispatch that refuses to overwrite any draft or published release.
+Alpha Linux archives are unsigned and the macOS candidate is ad-hoc signed. That is the intentional
+invited-test distribution contract, not an Alpha blocker. Windows and protected desktop signing are
+retained only under the explicit future `trusted-release` dispatch. Stable tags and public publishing
+remain a separate later project and do not delay human Alpha testing.
 
 See [alpha-release-qualification.md](alpha-release-qualification.md) for candidate artifacts, telemetry aggregation, two-client entry points, and the terminal evidence contract.
 
@@ -112,7 +108,7 @@ Verify:
 8. Escape releases the mouse and opens the capture gate; click once to recapture. Escape never quits. Use the gate's `QUIT` button so network matches follow normal leave/cleanup.
 9. Build Spur through riding/combat, verify the 50/80/100 readiness tones, and press Q at full meter. Mounted Q must show a six-second Majestic Charge countdown; horseless Q must begin Majestic Return immediately and consume the meter without starting Charge.
 
-M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. Record real 15-minute sessions until the observational gates can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. Until evidence meets those bands, status stays **implementation complete / playtest pending**.
+M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. After the automated candidate enters Alpha, record real 15-minute sessions until these observational targets can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. These are Alpha learning goals, not prerequisites for handing the build to the first testers.
 
 M4 follows the same evidence rule. The aggregator reports points by each locked source, movement-style share, median and p75 Charges per observed actor, median time to first Charge, Charges per 15 player-minutes, Charge/full-meter time shares, contextual-spend split, and charged versus uncharged duel win rates. Source completion does not check off M4 until invited-player sessions show median >=1 and p75 <=3 Charges per match, a +15–25% Charge duel delta, useful instant Return, and readiness players can identify without looking.
 
@@ -327,8 +323,8 @@ cleanup, it fails closed and retains the mode-0700 recovery directory instead of
 only child credential. This development probe is **not Alpha lifecycle evidence**: its delete
 acknowledgement is not two exact stable-ID absence observations plus verified vault erasure, and it
 uses a permissive temporary policy. A macOS warning containing `portmapper cleanup remains
-uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks Alpha
-lifecycle qualification even when transport markers appear.
+uncertain` is a known RustScale local-shutdown issue, but any cleanup uncertainty still blocks the
+protected hosted lifecycle qualification even when transport markers appear.
 
 The RustScale probe proves real signed transport, complete-state process-loss recovery, and the
 provider deletion acknowledgement, while `just p2p-proof` is the credential-free deterministic

@@ -105,4 +105,4 @@ M0 contains no weapons, Saddle Dive, networking, external art, or non-graybox an
 
 ## CI and troubleshooting
 
-The Linux game job pins Godot 4.7.1, verifies the downloaded archive with the release SHA-512 manifest, builds the debug extension, and runs the bounded M0–M2 smoke suite. Separate nonpublishing preflight jobs export native clients on Linux, Windows, and macOS. A failure to load the extension usually means the library is absent, has the wrong architecture, or has unresolved system libraries. Run `scripts/build-gdext.sh debug`, then launch Godot from a terminal to retain loader diagnostics.
+The Linux game job pins Godot 4.7.1, verifies the downloaded archive with the release SHA-512 manifest, builds the debug extension, and runs the bounded M0–M2 smoke suite. Separate nonpublishing Alpha jobs export native clients on Linux x86_64, Linux ARM64, and macOS universal. Windows is intentionally outside the Alpha platform set. A failure to load the extension usually means the library is absent, has the wrong architecture, or has unresolved system libraries. Run `scripts/build-gdext.sh debug`, then launch Godot from a terminal to retain loader diagnostics.
