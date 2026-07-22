@@ -138,11 +138,11 @@ fn run() -> Result<(), &'static str> {
             state_sha256
         },
         lease_uid: lease.uid.clone(),
-        lease_resource_version: if cleanup_recovery {
-            receipt.claims.lease_resource_version.clone()
-        } else {
-            lease.resource_version.clone()
-        },
+        // Installing the signed binding advances the live Kubernetes
+        // resourceVersion. Verify the receipt against the pre-install version
+        // preserved in that binding; `lease.resource_version` remains the
+        // optimistic-CAS version for subsequent broker mutations.
+        lease_resource_version: lease.binding.receipt_resource_version.clone(),
         launch_code_sha256: decode(&receipt.claims.launch_code_sha256)?,
     };
     let keys = BTreeMap::from([(
@@ -158,6 +158,7 @@ fn run() -> Result<(), &'static str> {
     let immutable_lease_matches = lease.binding.installation_id == receipt.claims.installation_id
         && lease.binding.state_store_id_sha256 == binding.instance_id_sha256
         && lease.binding.receipt_digest == qualification.receipt_digest()
+        && lease.binding.receipt_resource_version == receipt.claims.lease_resource_version
         && lease.binding.lobby_id == qualification.lobby_id()
         && lease.binding.generation == qualification.generation()
         && lease.binding.admission_play_deadline == qualification.final_io_deadline()

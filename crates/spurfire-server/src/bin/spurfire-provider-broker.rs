@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         canonical_state_path_sha256: decode(&receipt.claims.canonical_state_path_sha256)?,
         initial_state_sha256: decode(&receipt.claims.initial_state_sha256)?,
         lease_uid: receipt.claims.lease_uid.clone(),
-        lease_resource_version: receipt.claims.lease_resource_version.clone(),
+        lease_resource_version: snapshot.binding.receipt_resource_version.clone(),
         launch_code_sha256: decode(&receipt.claims.launch_code_sha256)?,
     };
     let qualification = verify_protected_alpha_recovery_receipt(
@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || snapshot.binding.installation_id != receipt.claims.installation_id
         || snapshot.binding.state_store_id_sha256 != context.store_instance_id_sha256
         || snapshot.binding.receipt_digest != qualification.receipt_digest()
+        || snapshot.binding.receipt_resource_version != receipt.claims.lease_resource_version
         || snapshot.binding.lobby_id != receipt.claims.lobby_id
         || snapshot.binding.generation != receipt.claims.network_generation
         || snapshot.binding.supervisor_epoch < receipt.claims.initial_epoch

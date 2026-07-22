@@ -4,6 +4,8 @@ By default this chart deploys one ordinary `spurfire-server` control-plane proce
 
 The mutually exclusive `protectedAlpha` profile renders a one-container runtime (PID1 launcher plus measured worker process) and a separate private provider-broker pod/ClusterIP. It requires separate pinned runtime/broker digests, source/provenance/artifact/policy bindings, retained state, the named anti-rollback Lease, exact lobby/origin/listener, exact Kubernetes API-server CIDRs, pinned mTLS, and SOPS-provisioned mode-`0400` file mounts. It creates no public broker route. See [`docs/protected-alpha.md`](../../docs/protected-alpha.md).
 
+Before receipt issuance, `protectedAlpha.prepare=true` performs the credential-free first phase. It creates the retained state/broker claims and unbound named Lease, then runs a no-network bootstrap Job that initializes the exact state path and emits only its instance, canonical-path, and initial-state SHA-256 bindings. Preparation is mutually exclusive with `protectedAlpha.enabled`; the owner signs those bindings and the Lease's pre-install UID/resourceVersion before admission is enabled.
+
 ## Install safely
 
 The defaults are credential-free dry-run mode, an `emptyDir`, a ClusterIP Service, no public route, and an independent provider-mutation kill switch set to `0`:

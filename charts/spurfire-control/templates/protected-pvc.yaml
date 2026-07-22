@@ -1,4 +1,4 @@
-{{- if .Values.protectedAlpha.enabled }}
+{{- if or .Values.protectedAlpha.enabled .Values.protectedAlpha.prepare }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

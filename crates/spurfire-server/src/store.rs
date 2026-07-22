@@ -1006,7 +1006,11 @@ impl JsonFileStore {
             getrandom::getrandom(&mut data.store_instance_id).map_err(|_| StoreError::Io)?;
         }
         let normalized = normalize_loaded_store(&mut data);
-        if existed && (normalized || data.canonical_state_path_sha256 == canonical_path_digest) {
+        // A fresh protected store must have a durable initial image before a
+        // receipt can bind its exact bytes. Previously the absent-file path
+        // returned only an in-memory image, so the launcher immediately failed
+        // when it measured the state file after opening it.
+        if !existed || normalized || data.canonical_state_path_sha256 == canonical_path_digest {
             persist_data(&path, &data).await?;
         }
         Ok(Self {
@@ -1830,6 +1834,23 @@ mod tests {
                 .state,
             LobbyState::Expired
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_durable_store_persists_receipt_measurement_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server-state.json");
+        assert!(!path.exists());
+
+        let store = JsonFileStore::open(&path).await.unwrap();
+        let binding = store.store_binding().await;
+
+        assert!(path.is_file());
+        assert_ne!(binding.instance_id_sha256, [0; 32]);
+        assert_ne!(binding.canonical_state_path_sha256, [0; 32]);
+        assert!(store.is_empty().await);
+        assert!(!store.real_lobby_lease_held().await);
+        assert!(store.protected_alpha_recovery().await.is_none());
     }
 
     #[tokio::test]
