@@ -4,6 +4,7 @@ const LOBBY_ID := "00000000-0000-4000-8000-000000000099"
 const PLAYER_A := "00000000-0000-4000-8000-000000000001"
 const PLAYER_B := "00000000-0000-4000-8000-000000000002"
 const PLAYER_C := "00000000-0000-4000-8000-000000000003"
+const LOBBY_SHELL_SCENE := preload("res://lobby/lobby_shell.tscn")
 
 func _ready() -> void:
 	var failures: Array[String] = []
@@ -19,14 +20,78 @@ func _ready() -> void:
 	_check_secret_storage_contract(failures)
 	_check_control_glue(failures)
 	_check_cleanup_truth(failures)
+	await _check_offline_alpha_loop(failures)
 	if failures.is_empty():
 		print("SPURFIRE_LOBBY_CLIENT_CONTRACT_OK")
 		print("SPURFIRE_ALPHA_LOBBY_SMOKE_OK")
+		print("SPURFIRE_OFFLINE_ALPHA_SMOKE_OK")
 		get_tree().quit(0)
 	else:
 		for failure in failures:
 			push_error(failure)
 		get_tree().quit(1)
+
+func _check_offline_alpha_loop(failures: Array[String]) -> void:
+	var shell := LOBBY_SHELL_SCENE.instantiate()
+	add_child(shell)
+	await get_tree().process_frame
+	shell.call("_start_practice")
+	for _index in range(12):
+		await get_tree().physics_frame
+	var course := shell.get("_course") as Node
+	if course == null:
+		failures.append("offline Alpha launcher did not instantiate the playable course")
+		shell.queue_free()
+		await get_tree().process_frame
+		return
+	var bridge := course.get_node_or_null("LobbyPeerBridge") as SpurfireLobbyPeerBridge
+	if bridge == null or not bridge.is_offline_practice() or bridge.practice_bot_count() != 3:
+		failures.append("offline Alpha launcher did not bind its three-bot practice authority")
+	else:
+		var match_state := bridge.get_m5_state()
+		if (
+			int(match_state.get("current_tick", 0)) <= 0
+			or (match_state.get("players", []) as Array).size() != 4
+		):
+			failures.append("offline Alpha Bounty Run did not advance all four M5 actors")
+		var peer_rows := bridge.get_peer_status()
+		if peer_rows.size() != 4 or str((peer_rows[1] as Dictionary).route) != "LOCAL BOT":
+			failures.append("offline Alpha roster did not expose local practice opponents")
+		var actor_states := bridge.actor_states()
+		if actor_states.size() != 4:
+			failures.append("offline Alpha authority did not retain four M3 actor states")
+		var remote_riders := bridge.get("_remote_riders") as Dictionary
+		var remote_horses := bridge.get("_remote_horses") as Dictionary
+		if remote_riders.size() != 3 or remote_horses.size() != 3:
+			failures.append("offline Alpha opponents were simulated but not presented")
+		var first_tick := int(bridge.get("simulation_tick")) + 1
+		for tick in range(first_tick, 331):
+			bridge.advance_shared_tick(tick)
+		for bot_id in [
+			"00000000-0000-4000-8000-0000000000b1",
+			"00000000-0000-4000-8000-0000000000b2",
+			"00000000-0000-4000-8000-0000000000b3",
+		]:
+			var combat := bridge.peer_session.combat_checkpoint_state(bot_id) as Dictionary
+			if int(combat.get("last_shot_tick", -1)) < 300:
+				var shot_status := bridge.practice_shot_status().get(bot_id, {}) as Dictionary
+				failures.append(
+					"offline Alpha practice opponent did not fire through authority: %s"
+					% JSON.stringify(shot_status)
+				)
+		for tick in range(331, 3601):
+			bridge.advance_shared_tick(tick)
+		var local_actor_value = JSON.parse_string(str(
+			bridge.peer_session.m3_actor_state_json(bridge.local_player_id)
+		))
+		if (
+			not local_actor_value is Dictionary
+			or int((local_actor_value as Dictionary).get("horse_health", 1)) != 0
+			or str((local_actor_value as Dictionary).get("actor_mode", "mounted")) == "mounted"
+		):
+			failures.append("offline Alpha opponents did not drive the horse-loss/on-foot loop")
+	shell.queue_free()
+	await get_tree().process_frame
 
 func _check_native_boundary(failures: Array[String]) -> void:
 	if not ClassDB.class_exists(&"PeerSession") or not ClassDB.class_exists(&"NativeSecretInput"):

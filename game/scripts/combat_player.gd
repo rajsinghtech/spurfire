@@ -65,6 +65,8 @@ func apply_network_shot_result(payload: Dictionary) -> void:
 		controller.call("apply_authority_result_json", str(payload.get("result_json", "")))
 
 func _select_weapon(id: int) -> void:
+	if networked_match:
+		return
 	if rifle and rifle.has_method("set_weapon"):
 		rifle.call("set_weapon", id)
 

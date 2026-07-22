@@ -239,8 +239,13 @@ func _record_result_choice(play_again: bool) -> void:
 	_play_again_button.disabled = true
 	_done_button.disabled = true
 	_results_hint.text = (
-		"Ride-again choice recorded • closing this posse safely…"
-		if play_again else "Choice recorded • closing this posse safely…"
+		("Ride-again choice recorded" if play_again else "Choice recorded")
+		+ (
+			" • quit when you're ready"
+			if replication.has_method("is_offline_practice")
+			and bool(replication.call("is_offline_practice"))
+			else " • closing this posse safely…"
+		)
 	)
 
 func _refresh_scoreboard(state: Dictionary) -> void:
@@ -265,7 +270,10 @@ func _refresh_scoreboard(state: Dictionary) -> void:
 		var score := scores[index] as Dictionary
 		var player_id := str(score.get("player_id", ""))
 		var peer := peer_rows.get(player_id, {}) as Dictionary
-		var display := "YOU" if bool(peer.get("you", false)) else player_id.left(8).to_upper()
+		var display := (
+			"YOU" if bool(peer.get("you", false))
+			else str(peer.get("name", player_id.left(8))).to_upper()
+		)
 		var badges := ""
 		if bool(peer.get("authority", false)):
 			badges += " HOST"
@@ -303,6 +311,8 @@ func _objective_name(kind: String) -> String:
 
 func _route_label(route: String) -> String:
 	var upper := route.to_upper()
+	if upper.contains("BOT"):
+		return "PRACTICE"
 	if upper.contains("PEER") and upper.contains("RELAY"):
 		return "PEER RELAY"
 	if upper.contains("DERP"):

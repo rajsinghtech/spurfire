@@ -135,9 +135,12 @@ jobs:
           unpack="$RUNNER_TEMP/linux-final"
           mkdir -p "$unpack"
           tar -xzf dist/Spurfire-linux-x86_64.tar.gz -C "$unpack"
-          timeout 120 "$unpack/Spurfire.x86_64" --headless --audio-driver Dummy --quit-after 30 \
+          env SPURFIRE_ALPHA_PRACTICE=1 timeout 120 \
+            "$unpack/Spurfire.x86_64" --headless --audio-driver Dummy --quit-after 30 \
             2>&1 | tee "$RUNNER_TEMP/linux-final.log"
           grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/linux-final.log"
+          grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/linux-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/linux-final.log"; then
             echo 'error: final Linux client emitted an error' >&2
@@ -230,9 +233,12 @@ jobs:
           unpack="$RUNNER_TEMP/linux-arm64-final"
           mkdir -p "$unpack"
           tar -xzf dist/Spurfire-linux-arm64.tar.gz -C "$unpack"
-          timeout 120 "$unpack/Spurfire.arm64" --headless --audio-driver Dummy --quit-after 30 \
+          env SPURFIRE_ALPHA_PRACTICE=1 timeout 120 \
+            "$unpack/Spurfire.arm64" --headless --audio-driver Dummy --quit-after 30 \
             2>&1 | tee "$RUNNER_TEMP/linux-arm64-final.log"
           grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/linux-arm64-final.log"
+          grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/linux-arm64-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/linux-arm64-final.log"; then
             echo 'error: final Linux ARM64 client emitted an error' >&2
@@ -453,8 +459,11 @@ jobs:
           test -n "$app"
           executable="$app/Contents/MacOS/Spurfire"
           test -x "$executable"
-          "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final.log"
+          env SPURFIRE_ALPHA_PRACTICE=1 \
+            "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final.log"
           grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/macos-final.log"
+          grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/macos-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final.log"; then
             echo 'error: final macOS client emitted an error' >&2
@@ -463,8 +472,11 @@ jobs:
           # Also launch the shipped x86_64 slice under Rosetta (installed by
           # the smoke step above) so the packaged universal binary is proven
           # to load on Intel Macs, not just cross-compile.
-          arch -x86_64 "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final-x86_64.log"
+          env SPURFIRE_ALPHA_PRACTICE=1 arch -x86_64 \
+            "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final-x86_64.log"
           grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/macos-final-x86_64.log"
+          grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/macos-final-x86_64.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final-x86_64.log"; then
             echo 'error: final macOS x86_64 slice emitted an error' >&2

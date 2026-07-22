@@ -21,6 +21,7 @@ Saddle Dive is Spurfire's M2 release candidate: a deterministic flying dismount 
 - Reload HUD state now follows native active ticks and visibly reports airborne/recovery/holstered rejection. The integrated smoke proves the observed `0 | 107` case after a real dive/remount completes as `30 | 77` at tick +126.
 - A camera-relative preview reports the exact kernel-clamped direction and amber clamp state while dive-ready. The launch cone remains ±75°; this is feedback, not a geometry change.
 - Alpha qualification covers Rust source gates on Ubuntu and macOS; bounded Godot 4.7.1 gameplay plus one-lobby smoke; deterministic secret-free telemetry aggregation; and checksummed/attested Linux x86_64, Linux ARM64, and macOS universal client exports.
+- M3 authority shot commands are staged until the matching M5 clock tick has advanced, so local-host and remote commands resolve against one coherent tick instead of being rejected one tick early.
 - Alpha artifacts are invited-test builds, not public releases. Linux archives are unsigned and the
   macOS archive is ad-hoc signed. Windows, Developer ID/notarization, Authenticode, and public-release
   signing are outside the Alpha platform and readiness scope.
@@ -39,8 +40,15 @@ The ±75° launch cone intentionally remains locked. For M2, **AIRBORNE REVERSAL
 
 Top feel risks remain dive spam versus non-use (recovery is the first tuning dial), graybox pose quality, and camera sickness. The presentation adds no dive FOV kick, landing dip, roll, shake, or forced yaw recenter. Automated integration now covers interpolated 60/120/144 Hz sampling, the exact post-remount `0 | 107` reload, and exact ±75° preview vectors/clamp feedback. The original hands-on observations are not erased by those fixes: blind 60/144 Hz comfort, five-tester discoverability, and natural-match qualification remain required.
 
-## Not included
+## Alpha gameplay boundary
 
-M3 on-foot combat and Tactical Roll, M4 Spur, M5 Bounty Run scoring, and the remaining M6 authority-simulation/migration/keyframe/rewind work are not part of 0.2.0. The public control service remains a prototype: it has no user accounts or ranked-result trust model, and its encrypted file vault/reconciler still lacks the approved production setec/workload-identity, audit, backup, rotation, fencing, and private-operator posture. Hosted deployment remains zero-mutation dry-run.
+The invited Alpha now exposes the source-complete M3 on-foot/horse-return, M4 Spur, and M5 Bounty
+Run paths through a one-person offline match with three deterministic practice opponents. This is a
+mechanics and usability harness, not finished bot AI or evidence that coherent human multiplayer has
+passed playtest. The remaining M6 authority-simulation/migration/keyframe/rewind qualification is not
+part of 0.2.0. The public control service remains a prototype: it has no user accounts or ranked-result
+trust model, and its encrypted file vault/reconciler still lacks the approved production
+setec/workload-identity, audit, backup, rotation, fencing, and private-operator posture. Hosted
+deployment remains zero-mutation dry-run.
 
 Do not publish Alpha as a stable public release. Start invited Linux/macOS testing from the checksummed Alpha candidate, collect the natural-play and telemetry findings above, and iterate. Hosted provider mutation still requires its explicit security authorization; public tags, platform signing, Windows support, and release governance belong to a later stable-release project.

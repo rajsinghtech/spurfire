@@ -50,12 +50,17 @@ SPURFIRE_GODOT_SMOKE_OK
 SPURFIRE_POLISH_SMOKE_OK
 SPURFIRE_COMBAT_UI_SMOKE_OK
 SPURFIRE_ALPHA_LOBBY_SMOKE_OK
+SPURFIRE_OFFLINE_ALPHA_SMOKE_OK
 ```
 
 The Alpha lobby marker is a credential-free contract smoke for strict origin/join-code handling,
 capability route glue, exact-roster binding, endpoint/report calls, and truthful leave/cleanup UI.
 It is not a live provider lifecycle, two-download, coherent remote-authority gameplay, or human-feel
 qualification.
+
+The offline Alpha marker additionally launches the same title-screen Bounty Run shipped to testers,
+advances the local authority with three practice actors, and requires the M5 roster plus all three
+remote rider/horse presentations. It proves reachability and integration, not fun or bot quality.
 
 ### Godot 4.7 UID sidecars
 
@@ -102,11 +107,12 @@ Verify:
 2. S brakes before reversing.
 3. A/D sidestep at rest and steer while moving.
 4. Mouse 1 fires; Mouse 2 aims; R reloads.
-5. 1/2/3 switch horse archetypes; 4/5/6 switch rifles.
-6. The lower-left network panel says `NET OFFLINE` when no lobby join credential has been supplied. This is expected for local play.
+5. The offline Alpha Bounty Run locks Courser + Dustwalker; loadout hotkeys cannot diverge from the authority-owned loadout.
+6. The lower-left panel lists four riders and labels the three local opponents `PRACTICE`.
 7. At grounded speed ≥8 m/s, press E to Saddle Dive; below 8 m/s, E performs an ordinary dismount. Verify the horse runs out and remains retrievable, airborne reload is blocked, recovery gates movement/fire, and remount does not teleport the horse.
 8. Escape releases the mouse and opens the capture gate; click once to recapture. Escape never quits. Use the gate's `QUIT` button so network matches follow normal leave/cleanup.
-9. Build Spur through riding/combat, verify the 50/80/100 readiness tones, and press Q at full meter. Mounted Q must show a six-second Majestic Charge countdown; horseless Q must begin Majestic Return immediately and consume the meter without starting Charge.
+9. Let opponents spook the horse, move/sprint/crouch or roll on foot, then recall and remount. Build Spur through riding/combat, verify the 50/80/100 readiness tones, and press Q at full meter. Mounted Q must show a six-second Majestic Charge countdown; horseless Q must begin Majestic Return immediately and consume the meter without starting Charge.
+10. Finish a 15-minute Bounty Run and inspect the scoreboard, objective pressure, winner, and play-again prompt.
 
 M2's forced smoke scenarios verify deterministic mechanics, not natural-play success. After the automated candidate enters Alpha, record real 15-minute sessions until these observational targets can be evaluated: 2–4 dives per player, airborne hit rate +25–40% relative to gallop, 25–40% deaths within three seconds after landing, all four notifications naturally within three matches, and reversal presentation without animation popping. These are Alpha learning goals, not prerequisites for handing the build to the first testers.
 

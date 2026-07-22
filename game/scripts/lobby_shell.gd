@@ -72,7 +72,7 @@ func _ready() -> void:
 	_match_fade.visible = false
 	add_child(_match_fade)
 	if not api.configure_lobby_player(_player_id):
-		title_status.text = "Private lobbies unavailable • Practice Range is ready"
+		title_status.text = "Private lobbies unavailable • Offline Bounty Run is ready"
 	else:
 		title_status.text = "Checking private-lobby availability…"
 		api.probe_lobby_readiness()
@@ -80,8 +80,10 @@ func _ready() -> void:
 	# The credentialed RustScale demo is an explicit local-only mode. Enter the
 	# arena without requiring UI automation so headless multi-client qualification
 	# exercises the same scene and HUD as the interactive practice launcher.
-	if OS.get_environment("SPURFIRE_P2P_DEMO") == "1":
+	if OS.get_environment("SPURFIRE_ALPHA_PRACTICE") == "1":
 		_start_practice.call_deferred()
+	elif OS.get_environment("SPURFIRE_P2P_DEMO") == "1":
+		_start_p2p_demo.call_deferred()
 
 func _process(delta: float) -> void:
 	if _screen not in [Screen.WAITING, Screen.TEARDOWN, Screen.MATCH] or _lobby_id.is_empty():
@@ -147,7 +149,7 @@ func _on_readiness(create_authorized: bool, join_authorized: bool) -> void:
 	if create_authorized or join_authorized:
 		title_status.text = "One private lobby is available"
 	else:
-		title_status.text = "Invite lobbies are not open yet • Practice Range is ready"
+		title_status.text = "Invite lobbies are not open yet • Offline Bounty Run is ready"
 
 func _on_create_pressed() -> void:
 	if SpurfireLobbyContract.clean_display_name(name_edit.text).is_empty():
@@ -398,6 +400,50 @@ func _start_match() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _start_practice() -> void:
+	if _course != null:
+		return
+	_course = COURSE_SCENE.instantiate()
+	add_child(_course)
+	_bind_capture_gate()
+	var practice_peer := _course.get_node_or_null("PeerSession")
+	var rider := _course.get_node_or_null("Rider") as CharacterBody3D
+	var horse := _course.get_node_or_null("Horse") as CharacterBody3D
+	var remote := _course.get_node_or_null("RemoteRider") as Node3D
+	var old_replication := _course.get_node_or_null("NetworkReplication")
+	var m2 := _course.get_node_or_null("M2Gameplay")
+	var combat_router := _course.get_node_or_null("Rider/CombatInput")
+	var network_layer := _course.get_node_or_null("NetworkLayer")
+	if practice_peer == null or rider == null or horse == null or remote == null or m2 == null:
+		title_status.text = "Offline Bounty Run could not start."
+		_course.queue_free()
+		_course = null
+		return
+	_bridge = SpurfireLobbyPeerBridge.new()
+	_bridge.name = "LobbyPeerBridge"
+	_course.add_child(_bridge)
+	_bridge.m5_match_choice.connect(_on_m5_match_choice)
+	if not _bridge.configure_offline_practice({
+		"peer_session": practice_peer, "local_rider": rider, "local_horse": horse,
+		"remote_rider": remote, "combat_router": combat_router,
+	}, _player_id):
+		title_status.text = "Offline Bounty Run could not start."
+		_course.queue_free()
+		_course = null
+		_bridge = null
+		return
+	m2.set("replication", _bridge)
+	if network_layer:
+		network_layer.set("peer_session", practice_peer)
+		network_layer.set("replication", _bridge)
+	if old_replication:
+		old_replication.queue_free()
+	_show(Screen.MATCH)
+	_fade_into_match()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+func _start_p2p_demo() -> void:
+	if _course != null:
+		return
 	_course = COURSE_SCENE.instantiate()
 	add_child(_course)
 	_bind_capture_gate()
