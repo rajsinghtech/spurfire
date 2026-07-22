@@ -4,7 +4,7 @@
 mod macos {
     use clap::{Parser, Subcommand};
     use ed25519_dalek::{Signer, SigningKey};
-    use security_framework::passwords::{get_generic_password, set_generic_password};
+    use security_framework::{os::macos::keychain::SecKeychain, passwords::get_generic_password};
     use serde::Serialize;
     use spurfire_server::{owner_key::OWNER_KEY_ID, ProtectedAlphaClaims, ProtectedAlphaReceipt};
     use std::io::{Read, Write};
@@ -57,7 +57,12 @@ mod macos {
                     .map_err(|_| "KEYCHAIN_BLOCKED: secure randomness unavailable")?;
                 // Security.framework receives bytes directly in-process. There is
                 // no `security -w`, argv, stdout, or plaintext temporary file.
-                set_generic_password(SERVICE, OWNER_KEY_ID, seed.as_slice())
+                // Add-only storage prevents a read error or concurrent initializer
+                // from rotating an existing owner identity.
+                SecKeychain::default()
+                    .and_then(|keychain| {
+                        keychain.add_generic_password(SERVICE, OWNER_KEY_ID, seed.as_slice())
+                    })
                     .map_err(|_| "KEYCHAIN_BLOCKED: Security.framework write failed")?;
                 emit_public(&SigningKey::from_bytes(&seed))
             }
