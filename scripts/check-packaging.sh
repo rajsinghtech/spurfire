@@ -128,6 +128,12 @@ if grep -q '^kind: Secret$\|TS_CLIENT_ID\|TS_CLIENT_SECRET\|organization-oauth' 
   echo "error: credential-free protected preparation referenced secret material" >&2
   exit 1
 fi
+if awk 'BEGIN { RS="---" } /app.kubernetes.io\/component: control-plane/ && /app.kubernetes.io\/component: alpha-bootstrap/ { exit 1 }' "$tmp/protected-prepare.yaml"; then
+  :
+else
+  echo "error: protected bootstrap resource contains conflicting component labels" >&2
+  exit 1
+fi
 
 grep -q 'command: \["/usr/local/bin/spurfire-alpha-launcher"\]' "$tmp/protected-live.yaml"
 grep -q 'command: \["/usr/local/bin/spurfire-provider-broker"\]' "$tmp/protected-live.yaml"

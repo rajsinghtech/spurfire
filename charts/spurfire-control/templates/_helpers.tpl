@@ -48,6 +48,16 @@ app.kubernetes.io/component: provider-broker
 app.kubernetes.io/part-of: spurfire
 {{- end -}}
 
+{{/* Bootstrap labels use one unambiguous component value. */}}
+{{- define "spurfire-control.bootstrapLabels" -}}
+helm.sh/chart: {{ include "spurfire-control.chart" . }}
+{{ include "spurfire-control.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: alpha-bootstrap
+app.kubernetes.io/part-of: spurfire
+{{- end -}}
+
 {{/* Service account name. */}}
 {{- define "spurfire-control.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}

@@ -4,8 +4,7 @@ kind: Job
 metadata:
   name: {{ include "spurfire-control.fullname" . }}-alpha-bootstrap
   labels:
-    {{- include "spurfire-control.labels" . | nindent 4 }}
-    app.kubernetes.io/component: alpha-bootstrap
+    {{- include "spurfire-control.bootstrapLabels" . | nindent 4 }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-delete-policy: before-hook-creation
