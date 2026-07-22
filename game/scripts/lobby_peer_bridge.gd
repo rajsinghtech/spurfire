@@ -118,14 +118,14 @@ func configure_offline_practice(nodes: Dictionary, player_id: String) -> bool:
 	}):
 		return false
 	var base_y := local_horse.global_position.y
-	var starts := [
+	var starts: Array[Vector3] = [
 		Vector3(-28.0, base_y, -34.0),
 		Vector3(32.0, base_y, -18.0),
 		Vector3(8.0, base_y, 38.0),
 	]
 	for index in range(_practice_bot_ids.size()):
 		var bot_id := _practice_bot_ids[index]
-		var position := starts[index]
+		var position: Vector3 = starts[index]
 		_actor_states[bot_id] = {
 			"tick": 0, "position": position, "velocity": Vector3.ZERO,
 			"yaw_degrees": float(index * 120), "stance_id": 1,
