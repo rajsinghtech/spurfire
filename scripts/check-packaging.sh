@@ -137,6 +137,10 @@ fi
 
 grep -q 'command: \["/usr/local/bin/spurfire-alpha-launcher"\]' "$tmp/protected-live.yaml"
 grep -q 'command: \["/usr/local/bin/spurfire-provider-broker"\]' "$tmp/protected-live.yaml"
+grep -q 'name: custody-permissions' "$tmp/protected-live.yaml"
+grep -q 'name: vault-key-copy' "$tmp/protected-live.yaml"
+grep -q 'name: custody-fence' "$tmp/protected-live.yaml"
+grep -q 'name: broker-vault-key-source' "$tmp/protected-live.yaml"
 grep -Eq 'name: "?spurfire-protected-alpha"?$' "$tmp/protected-live.yaml"
 grep -q 'cidr: "10.2.0.1/32"' "$tmp/protected-live.yaml"
 if awk 'BEGIN { RS="---" } /app.kubernetes.io\/component: control-plane/ && /app.kubernetes.io\/component: provider-broker/ { exit 1 }' "$tmp/protected-live.yaml"; then
