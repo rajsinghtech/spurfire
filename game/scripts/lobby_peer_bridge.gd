@@ -46,6 +46,7 @@ var _practice_mode := false
 var _practice_bot_ids: Array[String] = []
 var _practice_shot_status: Dictionary = {}
 var _local_spook_dismount_requested := false
+var _pending_authority_shots: Array[Dictionary] = []
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -414,6 +415,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 	if bool(match_tick.get("advanced", false)):
 		_install_m5_state_json(str(match_tick.get("state_json", "")))
 		_apply_m5_respawns(match_tick.get("respawned_players", PackedStringArray()), tick)
+		_drain_authority_shots(tick)
 		_advance_m5_objective_interactions(tick)
 		_record_m5_tick(tick)
 		if tick % 30 == 0:
@@ -1323,13 +1325,33 @@ func _advance_practice_bot_combat(tick: int) -> void:
 		if command_json.is_empty():
 			_practice_shot_status[bot_id] = {"tick": tick, "stage": "compose_failed"}
 			continue
-		var resolution := _resolve_and_broadcast_command({
-			"tick": tick, "command_json": command_json,
-		})
 		_practice_shot_status[bot_id] = {
-			"tick": tick, "stage": "resolved" if not resolution.is_empty() else "resolve_failed",
-			"result_json": str(resolution.get("result_json", "")),
+			"tick": tick, "stage": "queued", "result_json": "",
 		}
+		_queue_authority_shot({
+			"tick": tick, "command_json": command_json, "practice_bot_id": bot_id,
+		})
+
+func _queue_authority_shot(payload: Dictionary) -> void:
+	if _pending_authority_shots.size() >= 64:
+		_pending_authority_shots.pop_front()
+	_pending_authority_shots.append(payload.duplicate(true))
+
+func _drain_authority_shots(tick: int) -> void:
+	var future: Array[Dictionary] = []
+	for payload in _pending_authority_shots:
+		if int(payload.get("tick", 0)) > tick:
+			future.append(payload)
+			continue
+		var resolution := _resolve_and_broadcast_command(payload)
+		var bot_id := str(payload.get("practice_bot_id", ""))
+		if not bot_id.is_empty():
+			_practice_shot_status[bot_id] = {
+				"tick": int(payload.get("tick", tick)),
+				"stage": "resolved" if not resolution.is_empty() else "resolve_failed",
+				"result_json": str(resolution.get("result_json", "")),
+			}
+	_pending_authority_shots = future
 
 func _remember_local_input(tick: int, input: Dictionary) -> void:
 	_local_input_history[tick] = input.duplicate(true)
@@ -1523,7 +1545,10 @@ func _on_packet_received(
 			)
 		"shot_command":
 			if local_is_authority:
-				_resolve_and_broadcast_command(payload)
+				if peer_session.is_m3_wire_active():
+					_queue_authority_shot(payload)
+				else:
+					_resolve_and_broadcast_command(payload)
 		"shot_result":
 			_apply_shot_result_once(payload)
 		"match_state":
@@ -1546,7 +1571,10 @@ func _on_packet_received(
 func _on_local_shot_command(tick: int, command_json: String) -> void:
 	var payload := {"tick": tick, "command_json": command_json}
 	if local_is_authority:
-		_resolve_and_broadcast_command(payload)
+		if peer_session.is_m3_wire_active():
+			_queue_authority_shot(payload)
+		else:
+			_resolve_and_broadcast_command(payload)
 	else:
 		var packet: PackedByteArray = peer_session.make_shot_command(tick, command_json)
 		if not packet.is_empty():
