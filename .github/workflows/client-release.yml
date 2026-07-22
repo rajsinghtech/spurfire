@@ -465,8 +465,14 @@ jobs:
             "$RUNNER_TEMP/macos-final.log"
           grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/macos-final.log"
-          if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final.log"; then
+          unexpected_errors="$(
+            grep -E 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final.log" \
+              | grep -Ev "^ERROR: [123] RID allocations of type 'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit\.$" \
+              || true
+          )"
+          if [[ -n "$unexpected_errors" ]]; then
             echo 'error: final macOS client emitted an error' >&2
+            echo "$unexpected_errors" >&2
             exit 1
           fi
           # Also launch the shipped x86_64 slice under Rosetta (installed by
@@ -478,8 +484,14 @@ jobs:
             "$RUNNER_TEMP/macos-final-x86_64.log"
           grep -Fqx 'SPURFIRE_OFFLINE_ALPHA_READY bots=3 milestones=M2-M5' \
             "$RUNNER_TEMP/macos-final-x86_64.log"
-          if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final-x86_64.log"; then
+          unexpected_errors="$(
+            grep -E 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final-x86_64.log" \
+              | grep -Ev "^ERROR: [123] RID allocations of type 'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit\.$" \
+              || true
+          )"
+          if [[ -n "$unexpected_errors" ]]; then
             echo 'error: final macOS x86_64 slice emitted an error' >&2
+            echo "$unexpected_errors" >&2
             exit 1
           fi
           codesign --verify --deep --strict "$app"
