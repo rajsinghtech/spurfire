@@ -8,12 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       candidate_mode:
-        description: Candidate trust mode (trusted mode is protected and fails closed until signing is configured)
+        description: Alpha playtest build, or the dormant future stable-release path
         required: true
-        default: preflight
+        default: alpha-playtest
         type: choice
         options:
-          - preflight
+          - alpha-playtest
           - trusted-release
 
 permissions:
@@ -257,6 +257,7 @@ jobs:
 
   windows:
     name: Windows x86_64 client
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_mode == 'trusted-release'
     needs: metadata
     runs-on: windows-latest
     timeout-minutes: 45
@@ -335,7 +336,7 @@ jobs:
             signature = 'unsigned'
             authenticode_signed = $false
           } | ConvertTo-Json -Compress | Set-Content -NoNewline dist/windows-trust.json
-          Write-Output '::warning::Windows candidate is unsigned; protected trusted-release mode will fail closed.'
+          Write-Output 'Windows is outside the Alpha platform set; this archive exists only for a future trusted-release dispatch.'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -478,7 +479,7 @@ jobs:
               developer_id_signed: false,
               notarized: false
             }' > macos-trust.json
-          echo '::warning::macOS candidate is ad-hoc signed and not notarized; protected trusted-release mode will fail closed.'
+          echo '::notice::macOS Alpha candidate is ad-hoc signed for invited human testing.'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -492,7 +493,7 @@ jobs:
 
   candidate:
     name: Assemble checksummed nonpublishing candidate
-    needs: [metadata, linux, linux-arm64, windows, macos]
+    needs: [metadata, linux, linux-arm64, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -513,9 +514,18 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: client-*
+          name: client-linux
           path: candidate
-          merge-multiple: true
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-linux-arm64
+          path: candidate
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: client-macos
+          path: candidate
 
       - name: Verify platform checksums and create candidate metadata
         shell: bash
@@ -525,7 +535,6 @@ jobs:
           sha256sum --check Spurfire-linux-x86_64.tar.gz.sha256
           sha256sum --check Spurfire-linux-arm64.tar.gz.sha256
           sha256sum --check Spurfire-macos-universal.zip.sha256
-          sha256sum --check Spurfire-windows-x86_64.zip.sha256
           cd ..
           python3 scripts/make-alpha-candidate-metadata.py \
             --input-dir candidate \
@@ -562,7 +571,7 @@ jobs:
           else
             test "$attest_sha" = "$source_sha"
           fi
-          for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-linux-arm64.tar.gz candidate/Spurfire-macos-universal.zip candidate/Spurfire-windows-x86_64.zip; do
+          for archive in candidate/Spurfire-linux-x86_64.tar.gz candidate/Spurfire-linux-arm64.tar.gz candidate/Spurfire-macos-universal.zip; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --source-digest "$attest_sha"
           done
           rm -rf candidate-metadata
@@ -584,14 +593,15 @@ jobs:
           cp candidate-metadata/candidate.spdx.json candidate/
           jq -e --arg source_sha '${{ needs.metadata.outputs.source_sha }}' '
             .schema_version == 2 and
-            .candidate_mode == "preflight" and
+            .candidate_mode == "alpha-playtest" and
             .source_sha == $source_sha and
             .candidate_only == true and
+            .alpha_testing_eligible == true and
             .release_eligible == false and
-            .distribution_trust.macos.developer_id_signed == false and
-            .distribution_trust.macos.notarized == false and
-            .distribution_trust.windows.authenticode_signed == false and
-            .publication == "forbidden"
+            .human_evidence_status == "collect_during_alpha" and
+            .distribution_trust.macos.signature == "ad_hoc" and
+            (.distribution_trust | has("windows") | not) and
+            .publication == "invited_alpha_only"
           ' candidate/candidate-manifest.json >/dev/null
           jq -e --arg source_sha '${{ needs.metadata.outputs.source_sha }}' '
             (.documentNamespace | contains("/candidate/" + $source_sha + "/")) and
