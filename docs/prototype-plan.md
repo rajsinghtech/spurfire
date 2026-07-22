@@ -476,8 +476,10 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
   correction. Its first one-region candidate reduced an exact six-minute run to 103–208 ms but
   still failed one follower. An isolated revision passed its short run at 145 ms but failed the full
   run's second cycle at 206–325 ms; RustScale #106 identified invalid temporary-socket STUN
-  publication. The current changed-Magicsock-endpoints-only candidate is
-  `06e9b50a6db49980fe84e943a472ccdc0734acbc`. The exact backport passed the
+  publication. The changed-Magicsock-endpoints-only fix merged to RustScale master revision
+  `4d12d5f3f576577025044f460545f4e816ec32c2`; its tree-identical PR revision passed the shortened
+  and full live gates at 110 ms and 139 ms peaks, while the exact rebased master revision awaits
+  final requalification. The exact backport passed the
   six-minute refresh-boundary regression and full 900,000 ms run across all eight clients and 56
   directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact final
   child was deleted and absent afterward, but an older inert provider record remains, so the

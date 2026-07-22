@@ -1,16 +1,17 @@
 # Peer gameplay networking
 
 Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The Alpha
-validation branch temporarily pins both direct dependencies to RustScale mainline candidate
-`06e9b50a6db49980fe84e943a472ccdc0734acbc` from
-[#105](https://github.com/rajsinghtech/rustscale/pull/105). Merged v0.1.5 revision
+validation branch pins both direct dependencies to RustScale master revision
+`4d12d5f3f576577025044f460545f4e816ec32c2`, merged through
+[#105](https://github.com/rajsinghtech/rustscale/pull/105). Earlier v0.1.5 revision
 `7139bf384045a7e398320ae853e751c61c8218b9` reproduced the refresh-time stall tracked in
 [#104](https://github.com/rajsinghtech/rustscale/issues/104). The first one-region PR #105 candidate
 reduced a six-minute exact consumer run to 103–208 ms but still failed one follower. An isolated
 revision passed a short run at 145 ms, then failed its full second cycle at 206–325 ms. RustScale
 [#106](https://github.com/rajsinghtech/rustscale/issues/106) showed that diagnostic STUN addresses
-belong to temporary sockets; the current revision publishes only changed Magicsock-owned endpoints.
-Promote only after it passes the live gates and merges to RustScale's default branch. The temporary
+belong to temporary sockets; the merged revision publishes only changed Magicsock-owned endpoints.
+The tree-identical PR revision passed both live gates at 110 ms and 139 ms peaks; promote only after
+the exact rebased master revision passes final consumer requalification. The temporary
 v0.1.4-compatible backport [#103](https://github.com/rajsinghtech/rustscale/pull/103) was useful for
 isolating and live-qualifying that fix, but is no longer the consumer pin. A Windows exit-139 failure
 initially attributed to post-v0.1.4 RustScale later reproduced on the exact backport, moved between the

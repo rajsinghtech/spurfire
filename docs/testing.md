@@ -258,13 +258,14 @@ failed one follower at 202 ms. See
 RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
 `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
 `7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 900,000 ms consumer runs reproduced
-239–462 ms refresh-boundary gaps on that merge. The Alpha validation branch now pins RustScale
-mainline PR #105 revision `06e9b50a6db49980fe84e943a472ccdc0734acbc` while #104 is open. Its first
+239–462 ms refresh-boundary gaps on that merge. The Alpha validation branch now pins merged
+RustScale master revision `4d12d5f3f576577025044f460545f4e816ec32c2` from PR #105. Its first
 one-region candidate reduced an exact six-minute run to 103–208 ms but still failed one follower;
 an isolated revision passed a short run at 145 ms but failed the full run's second cycle at
 206–325 ms. RustScale #106 identified invalid temporary-socket STUN publication; the current
-revision suppresses unchanged updates and publishes only Magicsock-owned endpoints. Final promotion
-requires the shortened boundary check, full live gate, and a merged default-branch revision. A
+revision suppresses unchanged updates and publishes only Magicsock-owned endpoints. The
+tree-identical PR revision passed the shortened and full live gates at 110 ms and 139 ms peaks;
+final promotion requires requalification of the exact rebased default-branch revision. A
 Windows exit 139 initially attributed to the broader dependency state later reproduced on the
 backport and is tracked
 as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
