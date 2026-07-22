@@ -87,6 +87,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/stamp-game-build.py '${{ inputs.source_sha }}'
           mkdir -p game/bin/macos
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
             arch=x86_64
@@ -116,7 +117,9 @@ jobs:
           unzip -q dist/Spurfire-macos-universal.zip -d "$unpack"
           app="$(find "$unpack" -maxdepth 2 -name '*.app' -type d -print -quit)"
           test -n "$app"
-          "$app/Contents/MacOS/Spurfire" --headless --audio-driver Dummy --quit-after 30
+          "$app/Contents/MacOS/Spurfire" --headless --audio-driver Dummy --quit-after 30 \
+            2>&1 | tee "$RUNNER_TEMP/rehearsal-final.log"
+          grep -Fqx "SPURFIRE_BUILD_COMMIT=$SOURCE_SHA" "$RUNNER_TEMP/rehearsal-final.log"
           archive_sha256="$(shasum -a 256 dist/Spurfire-macos-universal.zip | cut -d ' ' -f 1)"
           jq -n --arg source_sha "$SOURCE_SHA" --arg origin "$REHEARSAL_CONTROL_ORIGIN" \
             --arg archive_sha256 "$archive_sha256" '{

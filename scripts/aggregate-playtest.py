@@ -720,15 +720,20 @@ def _expand_inputs(values: list[str]) -> list[Path]:
     for value in values:
         path = Path(value)
         if path.is_dir():
-            paths.extend(sorted(path.glob("*.jsonl")))
+            for pattern in ("m2-*.jsonl", "m3-*.jsonl"):
+                paths.extend(sorted(path.glob(pattern)))
         else:
             paths.append(path)
-    return paths
+    return sorted(set(paths), key=lambda item: str(item))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("inputs", nargs="+", help="JSONL files or directories")
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        help="M2/M3 JSONL files, or log directories (presentation logs are excluded)",
+    )
     parser.add_argument("--output", type=Path, help="write JSON here instead of stdout")
     parser.add_argument("--strict", action="store_true", help="reject incomplete session/dive rows")
     args = parser.parse_args(argv)

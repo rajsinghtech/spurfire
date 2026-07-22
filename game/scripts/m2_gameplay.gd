@@ -55,6 +55,8 @@ func _ready() -> void:
 	if rider:
 		_last_stance_id = int(rider.get("stance_id"))
 		rider.stance_changed.connect(_on_stance_changed)
+		if rider.has_signal(&"dive_started"):
+			rider.dive_started.connect(_on_dive_started)
 		if rider.has_signal(&"dive_telemetry_finalized"):
 			rider.dive_telemetry_finalized.connect(_on_dive_telemetry_finalized)
 	_open_telemetry_session()
@@ -201,16 +203,16 @@ func _open_telemetry_session() -> void:
 		push_warning("M2 telemetry log unavailable: %s" % FileAccess.get_open_error())
 		return
 	_store_telemetry_record({
-		"record_type": "session_start",
-		"schema_version": TELEMETRY_SCHEMA_VERSION,
-		"session_id": _session_id,
-		"started_unix": started_unix,
-		"build_commit": str(ProjectSettings.get_setting(
-			"application/config/build_commit",
-			"development"
-		)),
+		"event_type": "session_started",
+		"timestamp_ms": int(Time.get_unix_time_from_system() * 1000.0),
 		"build_version": str(ProjectSettings.get_setting("application/config/version", "unknown")),
 		"simulation_hz": int(Engine.physics_ticks_per_second),
+	})
+
+func _on_dive_started(dive_id: int, _launch_velocity: Vector3, _clamped_angle_degrees: float) -> void:
+	_store_telemetry_record({
+		"event_type": "dive_started",
+		"dive_id": dive_id,
 	})
 
 func _on_dive_telemetry_finalized(row: Dictionary) -> void:
@@ -223,8 +225,10 @@ func _on_dive_telemetry_finalized(row: Dictionary) -> void:
 		return
 	_persisted_dive_keys[key] = true
 	var record := {
-		"record_type": "dive_finalized",
-		"session_id": _session_id,
+		"event_type": (
+			"dive_censored" if not str(row.get("censor_reason", "")).is_empty()
+			else "dive_finalized"
+		),
 	}
 	for field in DIVE_TELEMETRY_KEYS:
 		if row.has(field):
@@ -245,6 +249,17 @@ func _json_safe_value(value: Variant) -> Variant:
 func _store_telemetry_record(record: Dictionary) -> void:
 	if _telemetry_file == null:
 		return
+	record["schema_version"] = TELEMETRY_SCHEMA_VERSION
+	record["session_id"] = _session_id
+	record["build_commit"] = str(ProjectSettings.get_setting(
+		"application/config/build_commit",
+		"development"
+	))
+	if (
+		rider and is_instance_valid(rider) and not record.has("actor")
+		and str(record.get("event_type", "")) != "session_started"
+	):
+		record["actor"] = str(rider.get("actor_id"))
 	_telemetry_file.store_line(JSON.stringify(record))
 	_telemetry_file.flush()
 
@@ -255,10 +270,8 @@ func _close_telemetry_session(reason: String) -> void:
 	if rider and is_instance_valid(rider) and rider.has_method("end_match"):
 		rider.call("end_match", simulation_tick)
 	_store_telemetry_record({
-		"record_type": "session_end",
-		"schema_version": TELEMETRY_SCHEMA_VERSION,
-		"session_id": _session_id,
-		"ended_unix": int(Time.get_unix_time_from_system()),
+		"event_type": "session_ended",
+		"timestamp_ms": int(Time.get_unix_time_from_system() * 1000.0),
 		"reason": reason,
 	})
 	if _telemetry_file:

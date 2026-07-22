@@ -67,7 +67,8 @@ jobs:
             scripts/aggregate-playtest.py \
             scripts/check-alpha-evidence.py \
             scripts/check-alpha-lifecycle-evidence.py \
-            scripts/make-alpha-candidate-metadata.py
+            scripts/make-alpha-candidate-metadata.py \
+            scripts/stamp-game-build.py
           python3 -m unittest discover -s scripts/tests -v
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
@@ -117,6 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/stamp-game-build.py '${{ needs.metadata.outputs.source_sha }}'
           scripts/build-gdext.sh debug
           scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
           scripts/check-alpha-smoke-log.sh "$RUNNER_TEMP/godot-smoke.log"
@@ -135,6 +137,8 @@ jobs:
           tar -xzf dist/Spurfire-linux-x86_64.tar.gz -C "$unpack"
           timeout 120 "$unpack/Spurfire.x86_64" --headless --audio-driver Dummy --quit-after 30 \
             2>&1 | tee "$RUNNER_TEMP/linux-final.log"
+          grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/linux-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/linux-final.log"; then
             echo 'error: final Linux client emitted an error' >&2
             exit 1
@@ -208,6 +212,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/stamp-game-build.py '${{ needs.metadata.outputs.source_sha }}'
           scripts/build-gdext.sh debug
           scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
           scripts/check-alpha-smoke-log.sh "$RUNNER_TEMP/godot-smoke.log"
@@ -227,6 +232,8 @@ jobs:
           tar -xzf dist/Spurfire-linux-arm64.tar.gz -C "$unpack"
           timeout 120 "$unpack/Spurfire.arm64" --headless --audio-driver Dummy --quit-after 30 \
             2>&1 | tee "$RUNNER_TEMP/linux-arm64-final.log"
+          grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/linux-arm64-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/linux-arm64-final.log"; then
             echo 'error: final Linux ARM64 client emitted an error' >&2
             exit 1
@@ -300,6 +307,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/stamp-game-build.py '${{ needs.metadata.outputs.source_sha }}'
           scripts/build-gdext.sh debug
           # Run the full behavioral native smoke suite on the Windows build,
           # matching the Linux gates; a bootstrap-scene launch alone cannot
@@ -393,6 +401,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/stamp-game-build.py '${{ needs.metadata.outputs.source_sha }}'
           mkdir -p game/bin/macos
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
             arch=x86_64
@@ -445,6 +454,8 @@ jobs:
           executable="$app/Contents/MacOS/Spurfire"
           test -x "$executable"
           "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final.log"
+          grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/macos-final.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final.log"; then
             echo 'error: final macOS client emitted an error' >&2
             exit 1
@@ -453,6 +464,8 @@ jobs:
           # the smoke step above) so the packaged universal binary is proven
           # to load on Intel Macs, not just cross-compile.
           arch -x86_64 "$executable" --headless --audio-driver Dummy --quit-after 30 2>&1 | tee "$RUNNER_TEMP/macos-final-x86_64.log"
+          grep -Fqx 'SPURFIRE_BUILD_COMMIT=${{ needs.metadata.outputs.source_sha }}' \
+            "$RUNNER_TEMP/macos-final-x86_64.log"
           if grep -Eq 'ERROR:|SCRIPT ERROR|Parse Error' "$RUNNER_TEMP/macos-final-x86_64.log"; then
             echo 'error: final macOS x86_64 slice emitted an error' >&2
             exit 1
@@ -591,6 +604,11 @@ jobs:
           cp candidate-metadata/SHA256SUMS candidate/
           cp candidate-metadata/candidate-manifest.json candidate/
           cp candidate-metadata/candidate.spdx.json candidate/
+          cp docs/alpha-playtest.md candidate/PLAYTEST.md
+          cp scripts/aggregate-playtest.py candidate/aggregate-playtest.py
+          chmod +x candidate/aggregate-playtest.py
+          test -s candidate/PLAYTEST.md
+          test -x candidate/aggregate-playtest.py
           jq -e --arg source_sha '${{ needs.metadata.outputs.source_sha }}' '
             .schema_version == 2 and
             .candidate_mode == "alpha-playtest" and

@@ -1515,8 +1515,11 @@ func _check_persisted_telemetry(course: Node, failures: Array[String]) -> void:
 	if file == null:
 		failures.append("persisted M2 telemetry session could not be reopened")
 		return
+	var started_keys: Dictionary = {}
 	var finalized_keys: Dictionary = {}
 	var finalized_count := 0
+	var saw_session_start := false
+	var saw_session_end := false
 	while not file.eof_reached():
 		var line := file.get_line()
 		if line.is_empty():
@@ -1526,14 +1529,31 @@ func _check_persisted_telemetry(course: Node, failures: Array[String]) -> void:
 			failures.append("persisted M2 telemetry contains a non-JSONL row")
 			continue
 		var row := parsed as Dictionary
-		if str(row.get("record_type", "")) != "dive_finalized":
+		for required in ["schema_version", "session_id", "build_commit", "event_type"]:
+			if not row.has(required) or str(row.get(required, "")).is_empty():
+				failures.append("persisted M2 telemetry omitted canonical field %s" % required)
+		var event_type := str(row.get("event_type", ""))
+		if event_type == "session_started":
+			saw_session_start = true
+			if not row.has("timestamp_ms"):
+				failures.append("persisted M2 session start omitted timestamp_ms")
 			continue
+		if event_type == "session_ended":
+			saw_session_end = true
+			if not row.has("timestamp_ms"):
+				failures.append("persisted M2 session end omitted timestamp_ms")
+			continue
+		var key := "%s:%s" % [str(row.get("actor", "")), str(row.get("dive_id", -1))]
+		if event_type == "dive_started":
+			if started_keys.has(key):
+				failures.append("persisted M2 telemetry duplicated dive start %s" % key)
+			started_keys[key] = true
+			continue
+		if event_type not in ["dive_finalized", "dive_censored"]:
+			continue
+		if str(row.get("actor", "")).is_empty():
+			failures.append("persisted terminal dive omitted actor")
 		finalized_count += 1
-		var key := "%s:%s:%s" % [
-			str(row.get("authority_epoch", 0)),
-			str(row.get("actor", "")),
-			str(row.get("dive_id", -1)),
-		]
 		if finalized_keys.has(key):
 			failures.append("persisted M2 telemetry duplicated finalized dive %s" % key)
 		finalized_keys[key] = true
@@ -1544,12 +1564,17 @@ func _check_persisted_telemetry(course: Node, failures: Array[String]) -> void:
 		]:
 			if not row.has(required):
 				failures.append("persisted dive row omitted aggregation field %s" % required)
+	for key in finalized_keys:
+		if not started_keys.has(key):
+			failures.append("persisted M2 terminal dive omitted matching start %s" % key)
 	var text := FileAccess.get_file_as_string(path).to_lower()
 	for forbidden in ["credential", "capability", "oauth", "join_code", "endpoint", "lobby_seed"]:
 		if forbidden in text:
 			failures.append("persisted M2 telemetry leaked prohibited field %s" % forbidden)
 	if finalized_count == 0:
 		failures.append("persisted M2 telemetry contains no finalized/censored dive")
+	if not saw_session_start or not saw_session_end:
+		failures.append("persisted M2 telemetry omitted canonical session boundaries")
 
 func _wait_controller_tick(controller: Node, target_tick: int, maximum_frames: int) -> void:
 	for _frame in maximum_frames:

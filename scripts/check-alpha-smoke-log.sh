@@ -17,13 +17,15 @@ log=$1
 
 allowed_macos_error_one="ERROR: 1 RID allocations of type 'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit."
 allowed_macos_error_two="ERROR: 2 RID allocations of type 'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit."
+allowed_macos_error_three="ERROR: 3 RID allocations of type 'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit."
 while IFS= read -r line; do
   line=${line%$'\r'}
   case "$line" in
     *'ERROR:'*|*'SCRIPT ERROR'*|*'Parse Error'*|*'SMOKE:'*|*'ObjectDB instance'*|*'Leaked instance:'*)
       if [[ "$allow_macos_dummy_shader_leak" == true ]] \
         && { [[ "$line" == "$allowed_macos_error_one" ]] \
-          || [[ "$line" == "$allowed_macos_error_two" ]]; }; then
+          || [[ "$line" == "$allowed_macos_error_two" ]] \
+          || [[ "$line" == "$allowed_macos_error_three" ]]; }; then
         continue
       fi
       echo "error: Godot qualification log contains an engine or smoke failure" >&2

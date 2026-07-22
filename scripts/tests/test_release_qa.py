@@ -393,6 +393,39 @@ class AggregateTests(unittest.TestCase):
         with self.assertRaises(AGGREGATE.InputError):
             AGGREGATE._scan_secret_free({"message": "Bearer not-allowed"})
 
+    def test_log_directory_selects_gameplay_records_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logs = Path(temporary)
+            m2 = logs / "m2-1-session.jsonl"
+            m3 = logs / "m3-1-session.jsonl"
+            presentation = logs / "presentation-latest.jsonl"
+            unrelated = logs / "notes.jsonl"
+            for path in (m2, m3, presentation, unrelated):
+                path.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(AGGREGATE._expand_inputs([str(logs)]), [m2, m3])
+
+    def test_canonical_m2_session_is_strictly_aggregatable(self):
+        actor = "00000000-0000-4000-8000-000000000001"
+        rows = [
+            {**base_record("session_started"), "timestamp_ms": 1_000},
+            {**base_record("dive_started"), "actor": actor, "dive_id": 1},
+            {
+                **base_record("dive_finalized"),
+                "actor": actor,
+                "dive_id": 1,
+                "shots_fired": 1,
+                "shots_hit": 0,
+                "censor_reason": "",
+            },
+            {**base_record("session_ended"), "actor": actor, "timestamp_ms": 61_000},
+        ]
+        for index, row in enumerate(rows, 1):
+            row["_source"] = f"m2-fixture:{index}"
+        summary = AGGREGATE.aggregate(rows, strict=True)
+        self.assertEqual(summary["session_count"], 1)
+        self.assertEqual(summary["integrity"]["accepted_dive_count"], 1)
+        self.assertEqual(summary["dive_metrics"]["terminal_dives"], 1)
+
 
 class LifecycleTests(unittest.TestCase):
     def simulated(self) -> dict:
@@ -711,6 +744,18 @@ class CommandTests(unittest.TestCase):
                 "ERROR: 1 RID allocations", "ERROR: 3 RID allocations"
             )
             log.write_text(valid + dummy_shader_error_three, encoding="utf-8")
+            subprocess.run(
+                [
+                    ROOT / "scripts/check-alpha-smoke-log.sh",
+                    "--allow-macos-dummy-shader-leak",
+                    log,
+                ],
+                check=True,
+            )
+            dummy_shader_error_four = dummy_shader_error.replace(
+                "ERROR: 1 RID allocations", "ERROR: 4 RID allocations"
+            )
+            log.write_text(valid + dummy_shader_error_four, encoding="utf-8")
             failed = subprocess.run(
                 [
                     ROOT / "scripts/check-alpha-smoke-log.sh",
@@ -863,6 +908,13 @@ class CommandTests(unittest.TestCase):
         self.assertIn("softwareupdate --install-rosetta", preflight)
         self.assertIn("arch -x86_64", preflight)
         self.assertIn("godot-smoke-x86_64.log", preflight)
+
+    def test_alpha_clients_are_source_stamped_and_bundle_playtest_tools(self):
+        preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
+        self.assertGreaterEqual(preflight.count("scripts/stamp-game-build.py"), 5)
+        self.assertGreaterEqual(preflight.count("SPURFIRE_BUILD_COMMIT="), 4)
+        self.assertIn("docs/alpha-playtest.md candidate/PLAYTEST.md", preflight)
+        self.assertIn("scripts/aggregate-playtest.py candidate/aggregate-playtest.py", preflight)
 
     def test_ordinary_alpha_excludes_windows_and_signing(self):
         preflight = (ROOT / ".github/workflows/client-release.yml").read_text(encoding="utf-8")
