@@ -190,6 +190,11 @@ fn run() -> Result<(), &'static str> {
     );
     receipt_bytes.zeroize();
 
+    // JsonFileStore owns a lifetime-held exclusive writer lock. The launcher
+    // has finished measuring the state image, so release that lock before the
+    // worker opens the same store and becomes its sole writer.
+    drop(store);
+
     let listener = TcpListener::bind("0.0.0.0:8080").map_err(|_| "listener bind failed")?;
     listener
         .set_nonblocking(true)
