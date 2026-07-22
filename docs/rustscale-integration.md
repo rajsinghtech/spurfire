@@ -15,8 +15,9 @@ cluster to 103–208 ms but still failed one follower. An isolated-runtime revis
 run at 145 ms, then failed the full run's second cycle at 206–325 ms. RustScale #106 showed that the
 generic netcheck address belongs to a temporary socket, so the current candidate publishes only
 changed Magicsock-owned endpoints. The tree-identical PR revision passed both live gates at 110 ms
-and 139 ms peaks; the exact rebased master revision still requires final consumer requalification.
-The temporary v0.1.4-compatible PR #103 backport passed RustScale's
+and 139 ms peaks; the exact rebased master revision then passed the full 900,001 ms run at a 97 ms
+peak with 54,000 minimum inputs per sender and 0 ms presentation desync. The temporary
+v0.1.4-compatible PR #103 backport passed RustScale's
 netcheck/tsnet gates, Spurfire's hosted all-platform consumer matrix, and the full 15-minute live
 eight-Godot soak before the consumer returned to main. A Windows exit-139 failure originally filed
 against RustScale later reproduced at the exact backport and completed every standalone

@@ -478,11 +478,12 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
   run's second cycle at 206–325 ms; RustScale #106 identified invalid temporary-socket STUN
   publication. The changed-Magicsock-endpoints-only fix merged to RustScale master revision
   `4d12d5f3f576577025044f460545f4e816ec32c2`; its tree-identical PR revision passed the shortened
-  and full live gates at 110 ms and 139 ms peaks, while the exact rebased master revision awaits
-  final requalification. The exact backport passed the
-  six-minute refresh-boundary regression and full 900,000 ms run across all eight clients and 56
-  directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact final
-  child was deleted and absent afterward, but an older inert provider record remains, so the
+  and full live gates at 110 ms and 139 ms peaks. The exact rebased master revision then passed the
+  full 900,001 ms run at a 97 ms peak with 54,000 minimum inputs per sender, 39,999 mm minimum
+  motion, 130,433 minimum presentation samples, and 0 ms presentation desync. The exact backport
+  passed the six-minute refresh-boundary regression and full 900,000 ms run across all eight clients
+  and 56 directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact
+  final child was deleted and absent afterward, but an older inert provider record remains, so the
   separate leaked-state checkbox stays open. An intermittent Windows course/teardown exit 139 also
   reproduced on the backport and is tracked separately in
   [Spurfire #14](https://github.com/rajsinghtech/spurfire/issues/14); it is not a RustScale main pin

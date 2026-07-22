@@ -690,6 +690,31 @@ class CommandTests(unittest.TestCase):
                 ],
                 check=True,
             )
+            dummy_shader_error_two = dummy_shader_error.replace(
+                "ERROR: 1 RID allocations", "ERROR: 2 RID allocations"
+            )
+            log.write_text(valid + dummy_shader_error_two, encoding="utf-8")
+            subprocess.run(
+                [
+                    ROOT / "scripts/check-alpha-smoke-log.sh",
+                    "--allow-macos-dummy-shader-leak",
+                    log,
+                ],
+                check=True,
+            )
+            dummy_shader_error_three = dummy_shader_error.replace(
+                "ERROR: 1 RID allocations", "ERROR: 3 RID allocations"
+            )
+            log.write_text(valid + dummy_shader_error_three, encoding="utf-8")
+            failed = subprocess.run(
+                [
+                    ROOT / "scripts/check-alpha-smoke-log.sh",
+                    "--allow-macos-dummy-shader-leak",
+                    log,
+                ],
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
             log.write_text(
                 valid + dummy_shader_error + "ERROR: unrelated renderer failure\n",
                 encoding="utf-8",

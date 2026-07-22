@@ -10,8 +10,9 @@ reduced a six-minute exact consumer run to 103–208 ms but still failed one fol
 revision passed a short run at 145 ms, then failed its full second cycle at 206–325 ms. RustScale
 [#106](https://github.com/rajsinghtech/rustscale/issues/106) showed that diagnostic STUN addresses
 belong to temporary sockets; the merged revision publishes only changed Magicsock-owned endpoints.
-The tree-identical PR revision passed both live gates at 110 ms and 139 ms peaks; promote only after
-the exact rebased master revision passes final consumer requalification. The temporary
+The tree-identical PR revision passed both live gates at 110 ms and 139 ms peaks. The exact rebased
+master revision then passed the full 900,001 ms run at a 97 ms peak with 54,000 minimum inputs per
+sender, 39,999 mm minimum motion, and 0 ms presentation desync. The temporary
 v0.1.4-compatible backport [#103](https://github.com/rajsinghtech/rustscale/pull/103) was useful for
 isolating and live-qualifying that fix, but is no longer the consumer pin. A Windows exit-139 failure
 initially attributed to post-v0.1.4 RustScale later reproduced on the exact backport, moved between the

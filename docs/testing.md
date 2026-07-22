@@ -265,7 +265,9 @@ an isolated revision passed a short run at 145 ms but failed the full run's seco
 206–325 ms. RustScale #106 identified invalid temporary-socket STUN publication; the current
 revision suppresses unchanged updates and publishes only Magicsock-owned endpoints. The
 tree-identical PR revision passed the shortened and full live gates at 110 ms and 139 ms peaks;
-final promotion requires requalification of the exact rebased default-branch revision. A
+the exact rebased default-branch revision then passed the full 900,001 ms run at a 97 ms peak,
+54,000 minimum inputs per sender, 39,999 mm minimum motion, 130,433 minimum presentation samples,
+and 0 ms presentation desync. Its disposable child tailnet was deleted successfully. A
 Windows exit 139 initially attributed to the broader dependency state later reproduced on the
 backport and is tracked
 as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
