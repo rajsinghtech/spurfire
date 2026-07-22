@@ -169,10 +169,12 @@ spec:
         {{- end }}
       volumes:
         - name: state
-          {{- if .Values.persistence.enabled }}
+          {{- if and .Values.persistence.enabled (not .Values.protectedAlpha.prepare) }}
           persistentVolumeClaim:
             claimName: {{ include "spurfire-control.stateClaimName" . | quote }}
           {{- else }}
+          # During credential-free preparation the public dry-run remains on
+          # an emptyDir so the one-shot bootstrap Job is the sole PVC writer.
           emptyDir: {}
           {{- end }}
         - name: tmp

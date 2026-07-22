@@ -45,6 +45,10 @@ childVault:
 # the ordinary dry-run container and has no environment activation switch.
 protectedAlpha:
   enabled: false
+  # Credential-free first phase: create the retained stores and unbound Lease,
+  # then run the digest-only bootstrap Job. It is mutually exclusive with the
+  # receipt-qualified runtime.
+  prepare: false
   installationId: ""
   authorizedLobbyId: ""
   publicOrigin: ""

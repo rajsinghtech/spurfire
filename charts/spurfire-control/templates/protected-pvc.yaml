@@ -1,11 +1,10 @@
-{{- if .Values.protectedAlpha.enabled }}
+{{- if or .Values.protectedAlpha.enabled .Values.protectedAlpha.prepare }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "spurfire-control.fullname" . }}-broker
   labels:
-    {{- include "spurfire-control.labels" . | nindent 4 }}
-    app.kubernetes.io/component: provider-broker
+    {{- include "spurfire-control.brokerLabels" . | nindent 4 }}
   annotations:
     helm.sh/resource-policy: keep
 spec:

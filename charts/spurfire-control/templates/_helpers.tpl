@@ -38,6 +38,16 @@ app.kubernetes.io/component: control-plane
 app.kubernetes.io/part-of: spurfire
 {{- end -}}
 
+{{/* Broker labels use one unambiguous component value. */}}
+{{- define "spurfire-control.brokerLabels" -}}
+helm.sh/chart: {{ include "spurfire-control.chart" . }}
+{{ include "spurfire-control.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: provider-broker
+app.kubernetes.io/part-of: spurfire
+{{- end -}}
+
 {{/* Service account name. */}}
 {{- define "spurfire-control.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
@@ -70,6 +80,7 @@ app.kubernetes.io/part-of: spurfire
 {{- fail "ordinary config.realAdmissionEnabled must remain false; protected Alpha uses signed receipt authority" -}}
 {{- end -}}
 {{- if .Values.protectedAlpha.enabled -}}
+{{- if .Values.protectedAlpha.prepare -}}{{- fail "protectedAlpha.enabled and protectedAlpha.prepare are mutually exclusive" -}}{{- end -}}
 {{- if .Values.config.dryRun -}}{{- fail "protectedAlpha.enabled and config.dryRun are mutually exclusive" -}}{{- end -}}
 {{- if ne .Values.config.provisioningMode "tailnet_per_lobby" -}}{{- fail "protectedAlpha requires tailnet_per_lobby" -}}{{- end -}}
 {{- if not .Values.persistence.enabled -}}{{- fail "protectedAlpha requires retained persistence" -}}{{- end -}}
@@ -82,6 +93,11 @@ app.kubernetes.io/part-of: spurfire
 {{- if empty .Values.protectedAlpha.kubernetesApiServerCidrs -}}{{- fail "protectedAlpha requires exact kubernetesApiServerCidrs for portable Lease API egress" -}}{{- end -}}
 {{- if lt (int .Values.terminationGracePeriodSeconds) 900 -}}{{- fail "protectedAlpha requires at least 900 seconds for bounded signal cleanup" -}}{{- end -}}
 {{- if or (not (empty .Values.tailscale.existingSecret)) (not (empty .Values.childVault.existingSecret)) -}}{{- fail "protectedAlpha credentials must use broker-only mounts, not ordinary server values" -}}{{- end -}}
+{{- end -}}
+{{- if .Values.protectedAlpha.prepare -}}
+{{- if empty .Values.protectedAlpha.installationId -}}{{- fail "protectedAlpha.prepare requires an installation ID" -}}{{- end -}}
+{{- if empty .Values.protectedAlpha.runtimeImageDigest -}}{{- fail "protectedAlpha.prepare requires an immutable runtime image digest" -}}{{- end -}}
+{{- if not .Values.persistence.enabled -}}{{- fail "protectedAlpha.prepare requires retained persistence" -}}{{- end -}}
 {{- end -}}
 {{- if .Values.config.allowLegacyClientAssertions -}}
 {{- fail "legacy asserted-player authorization is forbidden in the chart" -}}

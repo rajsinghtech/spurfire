@@ -496,6 +496,7 @@
       "additionalProperties": false,
       "required": [
         "enabled",
+        "prepare",
         "installationId",
         "authorizedLobbyId",
         "publicOrigin",
@@ -522,6 +523,9 @@
       ],
       "properties": {
         "enabled": {
+          "type": "boolean"
+        },
+        "prepare": {
           "type": "boolean"
         },
         "installationId": {

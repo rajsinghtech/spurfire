@@ -36,6 +36,11 @@ impl ProtectedPhase {
 #[serde(deny_unknown_fields)]
 pub struct LeaseBinding {
     pub installation_id: String,
+    /// Resource version of the unbound, pre-install Lease named by the signed
+    /// receipt. Installing this binding necessarily advances Kubernetes'
+    /// current resourceVersion, so the immutable receipt version must travel
+    /// inside the binding rather than be confused with the next CAS version.
+    pub receipt_resource_version: String,
     pub state_store_id_sha256: [u8; 32],
     pub receipt_digest: [u8; 32],
     pub lobby_id: LobbyId,
@@ -56,6 +61,7 @@ impl LeaseBinding {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             || self.state_store_id_sha256 == [0; 32]
+            || self.receipt_resource_version.is_empty()
             || self.receipt_digest == [0; 32]
             || self.state_sha256 == [0; 32]
             || self.generation == 0
@@ -335,8 +341,9 @@ mod tests {
         ] {
             assert!(!phase.permits_admission());
         }
-        let invalid = LeaseBinding {
+        let mut binding = LeaseBinding {
             installation_id: "installation-alpha-1".into(),
+            receipt_resource_version: "6".into(),
             state_store_id_sha256: [1; 32],
             receipt_digest: [2; 32],
             lobby_id: LobbyId::parse("00000000-0000-4000-8000-0000000000aa").unwrap(),
@@ -345,9 +352,11 @@ mod tests {
             state_sha256: [3; 32],
             phase: ProtectedPhase::Admission,
             admission_play_deadline: UnixMillis::new(10),
-            cleanup_deadline: UnixMillis::new(10),
+            cleanup_deadline: UnixMillis::new(20),
         };
-        assert!(invalid.validate().is_err());
+        assert!(binding.validate().is_ok());
+        binding.receipt_resource_version.clear();
+        assert!(binding.validate().is_err());
     }
 
     #[test]

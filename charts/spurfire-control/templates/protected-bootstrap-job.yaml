@@ -1,0 +1,52 @@
+{{- if .Values.protectedAlpha.prepare }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "spurfire-control.fullname" . }}-alpha-bootstrap
+  labels:
+    {{- include "spurfire-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alpha-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "10"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "spurfire-control.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: alpha-bootstrap
+        app.kubernetes.io/part-of: spurfire
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.runtimeImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/spurfire-alpha-bootstrap"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/spurfire }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "spurfire-control.stateClaimName" . | quote }}
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+{{- end }}

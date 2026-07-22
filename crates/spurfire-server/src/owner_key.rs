@@ -5,10 +5,13 @@
 
 /// Stable owner key identifier included in signed receipts.
 pub const OWNER_KEY_ID: &str = "raj-protected-alpha-owner-v1";
-/// Ed25519 verifying key. This intentionally non-secret bootstrap placeholder
-/// makes protected activation fail closed until Raj installs and compiles the
-/// public key emitted by the Keychain workflow.
-pub const OWNER_PUBLIC_KEY: [u8; 32] = [0; 32];
+/// Ed25519 verifying key emitted by the macOS Keychain owner workflow. The
+/// corresponding seed remains non-exportable from the Spurfire workflow and is
+/// never represented in this repository, an image, or the cluster.
+pub const OWNER_PUBLIC_KEY: [u8; 32] = [
+    0x84, 0xe6, 0x1f, 0xaa, 0xf2, 0x9a, 0xf6, 0xbc, 0xea, 0x9c, 0x00, 0x8a, 0x25, 0xee, 0x22, 0x5c,
+    0xe6, 0x60, 0xc1, 0x1f, 0xfc, 0xb9, 0x2e, 0x56, 0x6e, 0xa0, 0x13, 0x47, 0x78, 0x00, 0x3c, 0xcf,
+];
 
 pub fn verifying_key() -> Result<ed25519_dalek::VerifyingKey, ed25519_dalek::SignatureError> {
     let key = ed25519_dalek::VerifyingKey::from_bytes(&OWNER_PUBLIC_KEY)?;

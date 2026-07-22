@@ -21,6 +21,7 @@ RUN --mount=type=cache,id=spurfire-registry,target=/usr/local/cargo/registry,sha
     && mkdir -p /out \
     && cp /build/target/release/spurfire-server /out/spurfire-server \
     && cp /build/target/release/spurfire-alpha-launcher /out/spurfire-alpha-launcher \
+    && cp /build/target/release/spurfire-alpha-bootstrap /out/spurfire-alpha-bootstrap \
     && cp /build/target/release/spurfire-alpha-worker /out/spurfire-alpha-worker \
     && cp /build/target/release/spurfire-provider-broker /out/spurfire-provider-broker \
     && chmod 0755 /out/spurfire-*
@@ -51,6 +52,7 @@ RUN apk add --no-cache ca-certificates \
 
 COPY --from=builder --chown=0:0 /out/spurfire-server /usr/local/bin/spurfire-server
 COPY --from=builder --chown=0:0 /out/spurfire-alpha-launcher /usr/local/bin/spurfire-alpha-launcher
+COPY --from=builder --chown=0:0 /out/spurfire-alpha-bootstrap /usr/local/bin/spurfire-alpha-bootstrap
 COPY --from=builder --chown=0:0 /out/spurfire-alpha-worker /usr/local/bin/spurfire-alpha-worker
 COPY --from=builder --chown=0:0 /out/spurfire-provider-broker /usr/local/bin/spurfire-provider-broker
 COPY --chown=0:0 LICENSE /usr/share/licenses/spurfire/LICENSE
