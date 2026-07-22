@@ -257,7 +257,10 @@ failed one follower at 202 ms. See
 [RustScale issue #100](https://github.com/rajsinghtech/rustscale/issues/100). The reviewed fix from
 RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
 `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
-`7139bf384045a7e398320ae853e751c61c8218b9`, which is now the exact Spurfire pin. A Windows exit 139
+`7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 900,000 ms consumer runs reproduced
+239–462 ms refresh-boundary gaps on that merge. The Alpha validation branch now pins RustScale
+mainline PR #105 revision `30a3996749c90ab868139da04dbf614dd15dbca0` while #104 is open; final
+promotion requires the full live gate and a merged default-branch revision. A Windows exit 139
 initially attributed to the broader dependency state later reproduced on the backport and is tracked
 as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
 a 360,000 ms refresh-boundary run with all eight Godot clients and all 56 directed routes. The

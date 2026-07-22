@@ -1,9 +1,10 @@
 # Spurfire P2P session-identity architecture
 
 Branch `agent/alpha-completion`. The session-identity implementation was validated against released
-RustScale v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; the current Alpha consumer
-pins merged RustScale main revision `7139bf384045a7e398320ae853e751c61c8218b9` (v0.1.5), including
-PR #101's reviewed refresh fix. Temporary backport PR #103 supplied the isolated live soak evidence,
+RustScale v0.1.4 revision `272ee212c7c339c3d028ea474554154bc28ae381`; the current Alpha validation
+branch pins RustScale mainline candidate `30a3996749c90ab868139da04dbf614dd15dbca0` from PR #105 after
+merged v0.1.5 revision `7139bf384045a7e398320ae853e751c61c8218b9` reproduced the refresh stall
+tracked in RustScale #104. Temporary backport PR #103 supplied earlier isolated live soak evidence,
 but an intermittent Windows exit 139 reproduced on that backport and is now tracked independently
 as Spurfire issue #14 rather than a RustScale main-consumption blocker. Status:
 **implemented** (wire-1.2 signed-session

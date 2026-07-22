@@ -5,9 +5,13 @@
 The verdict applies to that commit: RustScale is moving quickly, so every cited API and line should
 be rechecked when the dependency revision changes.
 
-**Current consumer validation (2026-07-21):** Spurfire pins merged RustScale main revision
-`7139bf384045a7e398320ae853e751c61c8218b9` (v0.1.5), including PR #101's randomized, STUN-only
-periodic endpoint refresh. The temporary v0.1.4-compatible PR #103 backport passed RustScale's
+**Current consumer validation (2026-07-21):** The Alpha validation branch temporarily pins
+RustScale mainline candidate `30a3996749c90ab868139da04dbf614dd15dbca0` from PR #105. Merged
+v0.1.5 revision `7139bf384045a7e398320ae853e751c61c8218b9` retained PR #101's randomized,
+STUN-only refresh schedule but still launched a whole-DERP-map probe burst; two exact 15-minute
+consumer runs reproduced 239–462 ms gameplay gaps and are tracked in RustScale #104. PR #105 limits
+periodic publication to one home-region probe and must pass the full live gate before merge and
+final consumer promotion. The temporary v0.1.4-compatible PR #103 backport passed RustScale's
 netcheck/tsnet gates, Spurfire's hosted all-platform consumer matrix, and the full 15-minute live
 eight-Godot soak before the consumer returned to main. A Windows exit-139 failure originally filed
 against RustScale later reproduced at the exact backport and completed every standalone
