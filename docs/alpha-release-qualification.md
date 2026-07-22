@@ -13,12 +13,15 @@ Linux and macOS Godot qualification must emit each marker exactly once:
 - `SPURFIRE_POLISH_SMOKE_OK`
 - `SPURFIRE_COMBAT_UI_SMOKE_OK`
 - `SPURFIRE_ALPHA_LOBBY_SMOKE_OK`
+- `SPURFIRE_OFFLINE_ALPHA_SMOKE_OK`
 
 `scripts/check-alpha-smoke-log.sh` rejects missing or duplicate markers and engine errors. The macOS
 jobs permit only Godot 4.7.1's exact headless `RendererDummy` shader-RID teardown signature with the
 observed allocation counts 1–3 tracked in
 issue #17; every other engine, script, parse, ObjectDB, or smoke error remains fatal. These forced
-scenarios protect the build from regressions. They do not pretend to measure whether the game is fun.
+scenarios protect the build from regressions. The offline marker launches the actual title-screen
+Bounty Run, advances four M3/M5 actors, and requires all three opponent presentations. It does not
+pretend to measure whether the game is fun.
 
 The ordinary `Client Preflight` path builds and launch-smokes:
 
@@ -73,6 +76,11 @@ Human review should additionally record camera comfort, animation and reversal q
 sickness, control clarity, match pacing, and whether another round is desirable. Failing a target is
 an Alpha finding and a reason to iterate—not evidence that the tester should never have received the
 Alpha.
+
+The default one-person path is the 15-minute offline Bounty Run with three deterministic practice
+opponents. It makes the complete M2–M5 loop available for immediate mechanics and usability testing.
+Its bot behavior is test pressure, not natural multiplayer evidence; coordinated multiplayer sessions
+remain necessary for network, social, and human-versus-human conclusions.
 
 ## Multiplayer paths
 

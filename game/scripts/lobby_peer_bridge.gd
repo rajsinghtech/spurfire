@@ -42,6 +42,9 @@ var _m5_metrics: Dictionary = {}
 var _m5_result_logged := false
 var _m5_choice_recorded := false
 var _migration_election_bound := false
+var _practice_mode := false
+var _practice_bot_ids: Array[String] = []
+var _local_spook_dismount_requested := false
 
 const M3_INPUT_JUMP := 1 << 0
 const M3_INPUT_INTERACT := 1 << 1
@@ -57,6 +60,14 @@ const M3_RETURN_SPAWN_DISTANCE_M := 60.0
 const M3_RETURN_STOP_DISTANCE_M := 3.0
 const M3_GALLOP_IN_TICKS := 180
 const M3_MOUNT_WINDOW_TICKS := 90
+const PRACTICE_LOBBY_ID := "00000000-0000-4000-8000-0000000000a1"
+const PRACTICE_BOT_IDS: Array[String] = [
+	"00000000-0000-4000-8000-0000000000b1",
+	"00000000-0000-4000-8000-0000000000b2",
+	"00000000-0000-4000-8000-0000000000b3",
+]
+const PRACTICE_BOT_FIRE_INTERVAL_TICKS := 120
+const PRACTICE_BOT_FIRE_START_TICK := 300
 
 func configure(nodes: Dictionary, player_id: String) -> bool:
 	peer_session = nodes.get("peer_session") as Node
@@ -77,6 +88,60 @@ func configure(nodes: Dictionary, player_id: String) -> bool:
 		peer_session.route_updated.connect(_on_route_updated)
 	_open_m3_telemetry()
 	return true
+
+func configure_offline_practice(nodes: Dictionary, player_id: String) -> bool:
+	if not configure(nodes, player_id):
+		return false
+	_practice_mode = true
+	_practice_bot_ids.clear()
+	for bot_id in PRACTICE_BOT_IDS:
+		_practice_bot_ids.append(bot_id)
+	peer_session.call("set_insecure_demo_mode", true)
+	var roster: Array[Dictionary] = [{
+		"player_id": player_id,
+		"display_name": "YOU",
+		"horse_selection": "courser",
+	}]
+	var horse_classes := ["mustang", "warhorse", "courser"]
+	for index in range(_practice_bot_ids.size()):
+		roster.append({
+			"player_id": _practice_bot_ids[index],
+			"display_name": "BOT %d" % (index + 1),
+			"horse_selection": horse_classes[index],
+		})
+	if not apply_projection({
+		"lobby": {
+			"lobby_id": PRACTICE_LOBBY_ID,
+			"authority": {"candidate_player_id": player_id},
+			"roster": roster,
+		},
+	}):
+		return false
+	var base_y := local_horse.global_position.y
+	var starts := [
+		Vector3(-28.0, base_y, -34.0),
+		Vector3(32.0, base_y, -18.0),
+		Vector3(8.0, base_y, 38.0),
+	]
+	for index in range(_practice_bot_ids.size()):
+		var bot_id := _practice_bot_ids[index]
+		var position := starts[index]
+		_actor_states[bot_id] = {
+			"tick": 0, "position": position, "velocity": Vector3.ZERO,
+			"yaw_degrees": float(index * 120), "stance_id": 1,
+			"previous_stance_id": 1, "dive_id": -1,
+			"horse_position": position, "horse_velocity": Vector3.ZERO,
+			"horse_yaw_degrees": float(index * 120),
+			"horse_state_id": 0, "recall_state_id": 0,
+		}
+	print("SPURFIRE_OFFLINE_ALPHA_READY bots=%d milestones=M2-M5" % _practice_bot_ids.size())
+	return true
+
+func is_offline_practice() -> bool:
+	return _practice_mode
+
+func practice_bot_count() -> int:
+	return _practice_bot_ids.size()
 
 func apply_projection(response: Dictionary) -> bool:
 	var lobby_value = response.get("lobby", response)
@@ -261,7 +326,9 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 	local_state["horse_position"] = local_horse.global_position
 	local_state["horse_velocity"] = local_horse.velocity
 	local_state["horse_yaw_degrees"] = rad_to_deg(local_horse.rotation.y)
-	for player_id: String in _peers:
+	for bot_id in _practice_bot_ids:
+		_latest_inputs[bot_id] = _practice_bot_input(bot_id, tick)
+	for player_id: String in _simulated_player_ids():
 		var input := _latest_inputs.get(player_id, _zero_m3_input()) as Dictionary
 		if _m5_player_alive(player_id):
 			_simulate_remote_actor(player_id, input, tick)
@@ -321,6 +388,10 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 				)
 				state["velocity"] = resolved_velocity
 		_update_authority_horse_presentation(player_id, state, actor_tick, tick)
+		if player_id == local_player_id:
+			_apply_local_m3_presentation(state, actor_tick, tick)
+		else:
+			_present_authority_remote_actor(player_id, state, tick)
 		_record_m4_movement_style(player_id, state, tick)
 		_record_m3_actor_tick(player_id, actor_tick, state, input, tick)
 		_record_authority_combat_state(player_id, state)
@@ -334,6 +405,7 @@ func _advance_m3_tick(tick: int, stance_changed: bool) -> void:
 			)
 			if not snapshot.is_empty():
 				_send_to_all(snapshot)
+	_advance_practice_bot_combat(tick)
 	var match_tick := peer_session.advance_m5_match(tick) as Dictionary
 	if bool(match_tick.get("advanced", false)):
 		_install_m5_state_json(str(match_tick.get("state_json", "")))
@@ -816,6 +888,48 @@ func _update_authority_horse_presentation(
 	)
 	state["horse_yaw_degrees"] = float(state.yaw_degrees)
 
+func _apply_local_m3_presentation(
+	state: Dictionary, actor_tick: Dictionary, _tick: int
+) -> void:
+	var horse_state := int(actor_tick.get("horse_state_id", 0))
+	var recall_state := int(actor_tick.get("recall_state_id", 0))
+	if horse_state == 1 and int(local_rider.get("stance_id")) == 1:
+		if not _local_spook_dismount_requested:
+			_local_spook_dismount_requested = true
+			var gameplay := local_rider.get_parent().get_node_or_null("M2Gameplay")
+			if gameplay and gameplay.has_method("request_forced_dismount"):
+				gameplay.call("request_forced_dismount")
+	if int(local_rider.get("stance_id")) != 1:
+		_local_spook_dismount_requested = false
+	if bool(actor_tick.get("on_foot_active", false)):
+		var corrected_velocity := state.get("velocity", Vector3.ZERO) as Vector3
+		local_rider.velocity = corrected_velocity
+		local_rider.global_position += corrected_velocity / 60.0
+		state["position"] = local_rider.global_position
+		state["velocity"] = corrected_velocity
+	var horse_present := horse_state in [0, 1] or recall_state >= 4
+	local_horse.visible = horse_present
+	if horse_present:
+		local_horse.global_position = state.horse_position as Vector3
+		local_horse.velocity = state.horse_velocity as Vector3
+		local_horse.rotation.y = deg_to_rad(float(state.horse_yaw_degrees))
+
+func _present_authority_remote_actor(player_id: String, state: Dictionary, tick: int) -> void:
+	var rider := _remote_rider_for(player_id)
+	if rider and rider.has_method("push_snapshot"):
+		rider.call(
+			"push_snapshot", tick, state.position, state.velocity,
+			float(state.yaw_degrees), int(state.stance_id)
+		)
+	state["horse_state"] = ["available", "bolting", "despawned"][clampi(
+		int(state.get("horse_state_id", 2)), 0, 2
+	)]
+	state["recall_state"] = [
+		"horse_present", "cooling_down", "ready", "hoofbeats",
+		"dust_reveal", "gallop_in", "mount_window", "waiting_mount",
+	][clampi(int(state.get("recall_state_id", 0)), 0, 7)]
+	_apply_remote_horse_snapshot(player_id, tick, state)
+
 func _open_m3_telemetry() -> void:
 	var logs_path := ProjectSettings.globalize_path("user://logs")
 	var error := DirAccess.make_dir_recursive_absolute(logs_path)
@@ -1138,6 +1252,73 @@ func _zero_m3_input() -> Dictionary:
 		"move_x_milli": 0, "move_z_milli": 0, "buttons": 0,
 	}
 
+func _simulated_player_ids() -> Array[String]:
+	var ids: Array[String] = []
+	for player_id: String in _peers:
+		ids.append(player_id)
+	for bot_id in _practice_bot_ids:
+		if bot_id not in ids:
+			ids.append(bot_id)
+	ids.sort()
+	return ids
+
+func _practice_bot_input(bot_id: String, tick: int) -> Dictionary:
+	var state := _actor_states.get(bot_id, {}) as Dictionary
+	var index := _practice_bot_ids.find(bot_id)
+	var angle := float(tick) / 720.0 + float(index) * TAU / float(_practice_bot_ids.size())
+	var target := Vector3(cos(angle) * 48.0, 0.0, sin(angle) * 48.0)
+	var position := state.get("position", Vector3.ZERO) as Vector3
+	target.y = position.y
+	var delta := target - position
+	var desired_yaw := rad_to_deg(atan2(-delta.x, -delta.z)) if delta.length_squared() > 0.01 else float(state.get("yaw_degrees", 0.0))
+	var yaw_error := wrapf(desired_yaw - float(state.get("yaw_degrees", 0.0)), -180.0, 180.0)
+	var steer := roundi(clampf(yaw_error / 55.0, -1.0, 1.0) * 1000.0)
+	var move := Vector2(delta.x, delta.z).normalized() * 1000.0 if delta.length_squared() > 0.01 else Vector2.ZERO
+	var buttons := 0
+	if (tick + index * 97) % 480 == 0:
+		buttons |= M3_INPUT_JUMP
+	if int(state.get("spur_meter", 0)) >= 100 and (tick + index * 13) % 60 == 0:
+		buttons |= M3_INPUT_SPUR
+	var recall_state := int(state.get("recall_state_id", 0))
+	if recall_state in [2, 6, 7] and (tick + index * 7) % 30 == 0:
+		buttons |= M3_INPUT_INTERACT
+	var combat := peer_session.combat_checkpoint_state(bot_id) as Dictionary
+	if not combat.is_empty() and int(combat.get("ammo_magazine", 1)) <= 0:
+		buttons |= M3_INPUT_RELOAD
+	if int(state.get("stance_id", 1)) == 6:
+		buttons |= M3_INPUT_SPRINT
+	return {
+		"tick": tick, "throttle_milli": 850, "steer_milli": steer,
+		"move_x_milli": roundi(move.x), "move_z_milli": roundi(move.y),
+		"buttons": buttons,
+	}
+
+func _advance_practice_bot_combat(tick: int) -> void:
+	if not _practice_mode or tick < PRACTICE_BOT_FIRE_START_TICK:
+		return
+	for index in range(_practice_bot_ids.size()):
+		if (tick - PRACTICE_BOT_FIRE_START_TICK - index * 15) % PRACTICE_BOT_FIRE_INTERVAL_TICKS != 0:
+			continue
+		var bot_id := _practice_bot_ids[index]
+		if not _m5_player_alive(bot_id):
+			continue
+		var state := _actor_states.get(bot_id, {}) as Dictionary
+		if not state.has("position"):
+			continue
+		var muzzle_offset := Vector3(0.52, 1.12, -0.18).rotated(
+			Vector3.UP, deg_to_rad(float(state.get("yaw_degrees", 0.0)))
+		)
+		var origin := (state.position as Vector3) + muzzle_offset
+		var target := local_horse.global_position + Vector3.UP * 0.9
+		var direction := (target - origin).normalized()
+		if not direction.is_finite() or direction.length_squared() < 0.99:
+			continue
+		var command_json := str(peer_session.call(
+			"make_m3_practice_shot_command", bot_id, tick, origin, direction
+		))
+		if not command_json.is_empty():
+			_resolve_and_broadcast_command({"tick": tick, "command_json": command_json})
+
 func _remember_local_input(tick: int, input: Dictionary) -> void:
 	_local_input_history[tick] = input.duplicate(true)
 	var oldest_tick := tick - M3_INPUT_REPLAY_TICKS
@@ -1233,6 +1414,12 @@ func get_peer_status() -> Array:
 			"endpoint": "%s:%d" % [str(peer.address), int(peer.port)],
 			"rtt_ms": -1 if peer.rtt_ms == null else int(peer.rtt_ms),
 			"last_seen_ms": -1 if int(peer.last_seen_ms) <= 0 else now - int(peer.last_seen_ms),
+		})
+	for index in range(_practice_bot_ids.size()):
+		rows.append({
+			"player_id": _practice_bot_ids[index], "name": "bot %d" % (index + 1),
+			"you": false, "authority": false, "route": "LOCAL BOT",
+			"endpoint": "offline", "rtt_ms": 0, "last_seen_ms": 0,
 		})
 	return rows
 

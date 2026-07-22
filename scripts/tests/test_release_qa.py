@@ -697,6 +697,7 @@ class CommandTests(unittest.TestCase):
                         "SPURFIRE_POLISH_SMOKE_OK",
                         "SPURFIRE_COMBAT_UI_SMOKE_OK",
                         "SPURFIRE_ALPHA_LOBBY_SMOKE_OK",
+                        "SPURFIRE_OFFLINE_ALPHA_SMOKE_OK",
                     ]
                 )
                 + "\n",

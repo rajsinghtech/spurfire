@@ -49,6 +49,7 @@ var _session_closed := false
 var _persisted_dive_keys: Dictionary = {}
 var _presentation_input_enabled := false
 var _capture_button_blocked := false
+var _forced_dismount_requested := false
 
 func _ready() -> void:
 	process_physics_priority = -100
@@ -70,6 +71,8 @@ func _physics_process(_delta: float) -> void:
 	if _capture_button_blocked and not Input.is_action_pressed(&"combat_fire"):
 		_capture_button_blocked = false
 	var accepts_input := _presentation_input_enabled and not _capture_button_blocked
+	var force_dismount := _forced_dismount_requested and int(rider.get("stance_id")) == 1
+	_forced_dismount_requested = false
 
 	if (accepts_input and Input.is_action_just_pressed(&"reset_horse")) or _course_reset_requested:
 		_course_reset_requested = false
@@ -89,6 +92,8 @@ func _physics_process(_delta: float) -> void:
 			Input.get_axis(&"move_back", &"move_forward")
 		)
 	var weapon_id := int(weapon_controller.get("weapon_id"))
+	if force_dismount:
+		horse.velocity = Vector3.ZERO
 	# Install current horse handling while combat still holds the previous
 	# authoritative stance. The Rust rider transition then opens/closes dive
 	# context atomically before same-tick fire or reload.
@@ -98,7 +103,7 @@ func _physics_process(_delta: float) -> void:
 	rider.call(
 		"advance_tick",
 		simulation_tick,
-		accepts_input and Input.is_action_just_pressed(&"combat_interact"),
+		force_dismount or (accepts_input and Input.is_action_just_pressed(&"combat_interact")),
 		chosen_direction,
 		move_input,
 		weapon_id
@@ -167,6 +172,9 @@ func _update_dive_preview(chosen_direction: Vector3) -> void:
 
 func request_course_reset() -> void:
 	_course_reset_requested = true
+
+func request_forced_dismount() -> void:
+	_forced_dismount_requested = true
 
 func set_presentation_input_enabled(enabled: bool, suppress_button := false) -> void:
 	_presentation_input_enabled = enabled

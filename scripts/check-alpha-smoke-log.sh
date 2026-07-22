@@ -40,6 +40,7 @@ required=(
   SPURFIRE_POLISH_SMOKE_OK
   SPURFIRE_COMBAT_UI_SMOKE_OK
   SPURFIRE_ALPHA_LOBBY_SMOKE_OK
+  SPURFIRE_OFFLINE_ALPHA_SMOKE_OK
 )
 for marker in "${required[@]}"; do
   count=$(grep -Fxc "$marker" "$log" || true)

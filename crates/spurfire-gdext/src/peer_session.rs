@@ -1597,6 +1597,66 @@ impl PeerSession {
         }
     }
 
+    /// Build one authority-owned opponent shot for the offline Alpha practice
+    /// loop. This is deliberately unavailable to secure/live sessions: normal
+    /// peers must continue to originate commands through their own native
+    /// weapon controller and signed wire identity.
+    #[func]
+    fn make_m3_practice_shot_command(
+        &self,
+        shooter_player_id: GString,
+        tick: i64,
+        origin: Vector3,
+        direction: Vector3,
+    ) -> GString {
+        if !self.insecure_demo_mode
+            || !self.m3_wire_active
+            || self.secure_session.is_some()
+            || self.m3_secure_session.is_some()
+            || self.local_player_id.to_string() != self.authority_player_id.to_string()
+        {
+            return GString::new();
+        }
+        let (Ok(shooter), Ok(tick), Ok(origin), Ok(direction)) = (
+            PlayerId::parse(&shooter_player_id.to_string()),
+            u64::try_from(tick).map(SimulationTick::new),
+            QuantizedOrigin::from_meters(
+                f64::from(origin.x),
+                f64::from(origin.y),
+                f64::from(origin.z),
+            ),
+            QuantizedDirection::from_components(
+                f64::from(direction.x),
+                f64::from(direction.y),
+                f64::from(direction.z),
+            ),
+        ) else {
+            return GString::new();
+        };
+        if shooter.to_string() == self.local_player_id.to_string() || !direction.is_normalized() {
+            return GString::new();
+        }
+        let Some(authority) = self.m3_combat_authority.as_ref() else {
+            return GString::new();
+        };
+        let (Some(kernel), Some(spread_seed)) = (
+            authority.combat().shooter_kernel(shooter),
+            authority.combat().expected_spread_seed(shooter),
+        ) else {
+            return GString::new();
+        };
+        let command = ShotCommand {
+            tick,
+            shooter_peer_id: shooter,
+            weapon_id: kernel.equipped_weapon(),
+            origin,
+            direction,
+            spread_seed,
+            claimed_target: None,
+        };
+        GString::from(&serde_json::to_string(&command).unwrap_or_default())
+    }
+
     /// Build complete wire-v2 mounted/on-foot intent. All milli axes and
     /// assigned button bits are validated by the native codec.
     #[func]

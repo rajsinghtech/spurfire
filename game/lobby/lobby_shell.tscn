@@ -164,7 +164,7 @@ text = "JOIN LOBBY"
 
 [node name="Practice" type="Button" parent="Screens/Title/Card/Margin/VBox"]
 layout_mode = 2
-text = "Practice Range (offline)"
+text = "PLAY ALPHA • OFFLINE BOUNTY RUN"
 flat = true
 
 [node name="Status" type="Label" parent="Screens/Title/Card/Margin/VBox"]
