@@ -37,6 +37,33 @@ helm template validate "$chart" \
   --set persistence.enabled=true \
   --set persistence.storageClass=standard-rwo \
   > "$tmp/protected-prepare.yaml"
+helm template validate "$chart" \
+  --set fullnameOverride=spurfire \
+  --set config.dryRun=false \
+  --set config.provisioningMode=tailnet_per_lobby \
+  --set config.maxPlayers=2 \
+  --set persistence.enabled=true \
+  --set persistence.existingClaim=spurfire-alpha-state-fixture \
+  --set protectedAlpha.enabled=true \
+  --set protectedAlpha.installationId=ottawa-alpha-installation-0001 \
+  --set protectedAlpha.authorizedLobbyId=00000000-0000-4000-8000-000000000022 \
+  --set protectedAlpha.publicOrigin=https://spurfire.rajsingh.info \
+  --set protectedAlpha.internalListener=spurfire-broker.spurfire.svc:9443 \
+  --set protectedAlpha.sourceSha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set protectedAlpha.provenanceSha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set protectedAlpha.artifactSetSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --set protectedAlpha.policyProfileSha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --set protectedAlpha.runtimeImageDigest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set protectedAlpha.brokerImageDigest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set protectedAlpha.receiptSopsSecret=spurfire-alpha-receipt \
+  --set protectedAlpha.brokerCredentialSopsSecret=spurfire-alpha-broker-oauth \
+  --set protectedAlpha.brokerVaultKeySopsSecret=spurfire-alpha-vault-key \
+  --set protectedAlpha.runtimeTlsSecret=spurfire-alpha-runtime-tls \
+  --set protectedAlpha.brokerTlsSecret=spurfire-alpha-broker-tls \
+  --set protectedAlpha.brokerMacSecret=spurfire-alpha-broker-mac \
+  --set protectedAlpha.publicConfigMap=spurfire-alpha-public \
+  --set 'protectedAlpha.kubernetesApiServerCidrs[0]=10.2.0.1/32' \
+  > "$tmp/protected-live.yaml"
 helm package "$chart" --destination "$tmp" >/dev/null
 
 grep -q 'replicas: 1' "$tmp/default.yaml"
@@ -99,6 +126,17 @@ grep -q 'command: \["/usr/local/bin/spurfire-alpha-bootstrap"\]' "$tmp/protected
 grep -q 'automountServiceAccountToken: false' "$tmp/protected-prepare.yaml"
 if grep -q '^kind: Secret$\|TS_CLIENT_ID\|TS_CLIENT_SECRET\|organization-oauth' "$tmp/protected-prepare.yaml"; then
   echo "error: credential-free protected preparation referenced secret material" >&2
+  exit 1
+fi
+
+grep -q 'command: \["/usr/local/bin/spurfire-alpha-launcher"\]' "$tmp/protected-live.yaml"
+grep -q 'command: \["/usr/local/bin/spurfire-provider-broker"\]' "$tmp/protected-live.yaml"
+grep -Eq 'name: "?spurfire-protected-alpha"?$' "$tmp/protected-live.yaml"
+grep -q 'cidr: "10.2.0.1/32"' "$tmp/protected-live.yaml"
+if awk 'BEGIN { RS="---" } /app.kubernetes.io\/component: control-plane/ && /app.kubernetes.io\/component: provider-broker/ { exit 1 }' "$tmp/protected-live.yaml"; then
+  :
+else
+  echo "error: protected resource contains conflicting component labels" >&2
   exit 1
 fi
 

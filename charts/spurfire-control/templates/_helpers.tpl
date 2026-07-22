@@ -38,6 +38,16 @@ app.kubernetes.io/component: control-plane
 app.kubernetes.io/part-of: spurfire
 {{- end -}}
 
+{{/* Broker labels use one unambiguous component value. */}}
+{{- define "spurfire-control.brokerLabels" -}}
+helm.sh/chart: {{ include "spurfire-control.chart" . }}
+{{ include "spurfire-control.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: provider-broker
+app.kubernetes.io/part-of: spurfire
+{{- end -}}
+
 {{/* Service account name. */}}
 {{- define "spurfire-control.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
