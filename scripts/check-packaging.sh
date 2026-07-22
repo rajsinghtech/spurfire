@@ -29,6 +29,14 @@ helm template validate "$chart" \
 helm template validate "$chart" \
   --set image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   > "$tmp/digest.yaml"
+helm template validate "$chart" \
+  --set fullnameOverride=spurfire \
+  --set protectedAlpha.prepare=true \
+  --set protectedAlpha.installationId=ottawa-alpha-preparation-0001 \
+  --set protectedAlpha.runtimeImageDigest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --set persistence.enabled=true \
+  --set persistence.storageClass=standard-rwo \
+  > "$tmp/protected-prepare.yaml"
 helm package "$chart" --destination "$tmp" >/dev/null
 
 grep -q 'replicas: 1' "$tmp/default.yaml"
@@ -84,6 +92,16 @@ if grep -q 'TS_CLIENT_ID\|TS_CLIENT_SECRET' "$tmp/public-dry-run.yaml"; then
 fi
 grep -q 'ghcr.io/rajsinghtech/spurfire-server@sha256:' "$tmp/digest.yaml"
 
+grep -q '^kind: Lease$' "$tmp/protected-prepare.yaml"
+grep -q '^kind: Job$' "$tmp/protected-prepare.yaml"
+grep -q 'spurfire-alpha-bootstrap' "$tmp/protected-prepare.yaml"
+grep -q 'command: \["/usr/local/bin/spurfire-alpha-bootstrap"\]' "$tmp/protected-prepare.yaml"
+grep -q 'automountServiceAccountToken: false' "$tmp/protected-prepare.yaml"
+if grep -q '^kind: Secret$\|TS_CLIENT_ID\|TS_CLIENT_SECRET\|organization-oauth' "$tmp/protected-prepare.yaml"; then
+  echo "error: credential-free protected preparation referenced secret material" >&2
+  exit 1
+fi
+
 expect_failure() {
   local name="$1"
   shift
@@ -138,6 +156,13 @@ expect_failure reserved-config-checksum \
   --set-string 'podAnnotations.checksum/config=bad'
 expect_failure reserved-pvc-policy \
   --set-string 'persistence.annotations.helm\.sh/resource-policy=delete'
+expect_failure protected-prepare-without-persistence \
+  --set protectedAlpha.prepare=true \
+  --set protectedAlpha.installationId=ottawa-alpha-preparation-0001 \
+  --set protectedAlpha.runtimeImageDigest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+expect_failure protected-prepare-and-enabled \
+  --set protectedAlpha.prepare=true \
+  --set protectedAlpha.enabled=true
 
 if find "$repo_root" -maxdepth 3 \( -name '*.tgz' -o -name '*.prov' \) -print -quit | grep -q .; then
   echo "error: generated Helm packages must not be committed" >&2
