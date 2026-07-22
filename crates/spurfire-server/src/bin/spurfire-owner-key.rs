@@ -49,9 +49,6 @@ mod macos {
     fn run() -> Result<(), &'static str> {
         match Args::parse().command {
             Command::Init => {
-                if get_generic_password(SERVICE, OWNER_KEY_ID).is_ok() {
-                    return Err("KEYCHAIN_BLOCKED: owner key already exists");
-                }
                 let mut seed = Zeroizing::new([0_u8; 32]);
                 getrandom::getrandom(seed.as_mut())
                     .map_err(|_| "KEYCHAIN_BLOCKED: secure randomness unavailable")?;
@@ -78,10 +75,11 @@ mod macos {
             get_generic_password(SERVICE, OWNER_KEY_ID)
                 .map_err(|_| "KEYCHAIN_BLOCKED: Security.framework read failed")?,
         );
-        let bytes: [u8; 32] = seed
-            .as_slice()
-            .try_into()
-            .map_err(|_| "KEYCHAIN_BLOCKED: Keychain owner seed is invalid")?;
+        let bytes = Zeroizing::new(
+            seed.as_slice()
+                .try_into()
+                .map_err(|_| "KEYCHAIN_BLOCKED: Keychain owner seed is invalid")?,
+        );
         let key = SigningKey::from_bytes(&bytes);
         let result = action(&key);
         seed.zeroize();
