@@ -257,7 +257,10 @@ pub fn spawn_protected(
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // The measured worker is credential-free by construction. Preserve
+        // its bounded Rust error output so a fail-closed startup identifies
+        // the rejected stage instead of collapsing to an opaque child exit.
+        .stderr(Stdio::inherit());
     // SAFETY: only async-signal-safe syscalls run between fork and exec.
     unsafe {
         command.pre_exec(move || {
