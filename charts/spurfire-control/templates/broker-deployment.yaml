@@ -39,6 +39,96 @@ spec:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # kubelet applies fsGroup before init containers. Reassert the vault's
+        # owner-only custody boundary after that recursive permission pass.
+        - name: custody-permissions
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.brokerImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - >-
+              chown 10001:10001 /var/lib/spurfire &&
+              chmod 0700 /var/lib/spurfire &&
+              touch /var/lib/spurfire/child-vault.json.lock &&
+              chown 10001:10001 /var/lib/spurfire/child-vault.json.lock &&
+              chmod 0600 /var/lib/spurfire/child-vault.json.lock;
+              if [ -e /var/lib/spurfire/child-vault.json ]; then
+                chown 10001:10001 /var/lib/spurfire/child-vault.json &&
+                chmod 0600 /var/lib/spurfire/child-vault.json;
+              fi
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          volumeMounts:
+            - { name: broker-state, mountPath: /var/lib/spurfire }
+        # Secret volumes are symlink farms. Copy the vault key to a private,
+        # regular file so the broker's O_NOFOLLOW reader can accept it.
+        - name: vault-key-copy
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.brokerImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - >-
+              cp /source/vault.key /target/vault.key &&
+              chown 10001:10001 /target/vault.key &&
+              chmod 0400 /target/vault.key &&
+              chown 10001:10001 /target &&
+              chmod 0700 /target
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          volumeMounts:
+            - { name: broker-vault-key-source, mountPath: /source, readOnly: true }
+            - { name: broker-vault-key, mountPath: /target }
+        # Run last as the unprivileged broker identity. This closes the lock
+        # mode after any inherited fsGroup/default-ACL behavior and verifies
+        # that only a 32-byte regular key reaches the broker container.
+        - name: custody-fence
+          image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.brokerImageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - >-
+              umask 077;
+              exec 9<>/var/lib/spurfire/child-vault.json.lock;
+              chmod 0600 /var/lib/spurfire/child-vault.json.lock;
+              test ! -L /run/private-vault-key/vault.key;
+              test "$(wc -c < /run/private-vault-key/vault.key)" -eq 32;
+              test "$(stat -c %a /var/lib/spurfire)" = 700;
+              test "$(stat -c %a /var/lib/spurfire/child-vault.json.lock)" = 600;
+              test "$(stat -c %a /run/private-vault-key/vault.key)" = 400
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          volumeMounts:
+            - { name: broker-state, mountPath: /var/lib/spurfire }
+            - { name: broker-vault-key, mountPath: /run/private-vault-key, readOnly: true }
       containers:
         - name: provider-broker
           image: {{ printf "%s@%s" .Values.image.repository .Values.protectedAlpha.brokerImageDigest | quote }}
@@ -87,6 +177,8 @@ spec:
                 path: organization-oauth.json
                 mode: 0400
         - name: broker-vault-key
+          emptyDir: { sizeLimit: 1Mi }
+        - name: broker-vault-key-source
           secret:
             secretName: {{ .Values.protectedAlpha.brokerVaultKeySopsSecret | quote }}
             defaultMode: 0400
