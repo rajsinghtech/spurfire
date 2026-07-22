@@ -6,14 +6,16 @@ The verdict applies to that commit: RustScale is moving quickly, so every cited 
 be rechecked when the dependency revision changes.
 
 **Current consumer validation (2026-07-21):** The Alpha validation branch temporarily pins
-RustScale mainline candidate `c11ab11ad61d6972d9c29bee87a53e9bd5514009` from PR #105. Merged
+RustScale mainline candidate `06e9b50a6db49980fe84e943a472ccdc0734acbc` from PR #105. Merged
 v0.1.5 revision `7139bf384045a7e398320ae853e751c61c8218b9` retained PR #101's randomized,
 STUN-only refresh schedule but still launched a whole-DERP-map probe burst; two exact 15-minute
 consumer runs reproduced 239–462 ms gameplay gaps and are tracked in RustScale #104. PR #105 first
 limited periodic publication to one home-region probe; a six-minute exact consumer run improved the
-cluster to 103–208 ms but still failed one follower. The current candidate also isolates that
-bounded maintenance from the data-plane runtime and must pass the live gates before merge and final
-consumer promotion. The temporary v0.1.4-compatible PR #103 backport passed RustScale's
+cluster to 103–208 ms but still failed one follower. An isolated-runtime revision passed its short
+run at 145 ms, then failed the full run's second cycle at 206–325 ms. RustScale #106 showed that the
+generic netcheck address belongs to a temporary socket, so the current candidate publishes only
+changed Magicsock-owned endpoints and must pass the live gates before merge and final consumer
+promotion. The temporary v0.1.4-compatible PR #103 backport passed RustScale's
 netcheck/tsnet gates, Spurfire's hosted all-platform consumer matrix, and the full 15-minute live
 eight-Godot soak before the consumer returned to main. A Windows exit-139 failure originally filed
 against RustScale later reproduced at the exact backport and completed every standalone

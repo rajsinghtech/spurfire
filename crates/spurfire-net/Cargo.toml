@@ -20,8 +20,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "c11ab11ad61d6972d9c29bee87a53e9bd5514009", optional = true }
-rustscale-netstack = { git = "https://github.com/rajsinghtech/rustscale", rev = "c11ab11ad61d6972d9c29bee87a53e9bd5514009", optional = true }
+rustscale-tsnet = { git = "https://github.com/rajsinghtech/rustscale", rev = "06e9b50a6db49980fe84e943a472ccdc0734acbc", optional = true }
+rustscale-netstack = { git = "https://github.com/rajsinghtech/rustscale", rev = "06e9b50a6db49980fe84e943a472ccdc0734acbc", optional = true }
 tempfile = { version = "3", optional = true }
 zeroize.workspace = true
 
