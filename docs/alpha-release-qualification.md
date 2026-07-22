@@ -15,7 +15,8 @@ Linux and macOS Godot qualification must emit each marker exactly once:
 - `SPURFIRE_ALPHA_LOBBY_SMOKE_OK`
 
 `scripts/check-alpha-smoke-log.sh` rejects missing or duplicate markers and engine errors. The macOS
-jobs permit only Godot 4.7.1's exact headless `RendererDummy` shader-RID teardown line tracked in
+jobs permit only Godot 4.7.1's exact headless `RendererDummy` shader-RID teardown signature with the
+observed allocation counts 1–3 tracked in
 issue #17; every other engine, script, parse, ObjectDB, or smoke error remains fatal. These forced
 scenarios protect the build from regressions. They do not pretend to measure whether the game is fun.
 
@@ -32,7 +33,8 @@ The normal Rust CI matrix likewise covers Linux and macOS for this phase.
 ## Invited Alpha bundle
 
 The `alpha-candidate-<sha>` artifact contains the three client archives, `SHA256SUMS`, deterministic
-SPDX metadata, platform launch-smoke records, and `candidate-manifest.json`. A valid ordinary
+SPDX metadata, platform launch-smoke records, `candidate-manifest.json`, `PLAYTEST.md`, and the local
+telemetry collector. A valid ordinary
 manifest says:
 
 - `candidate_mode: alpha-playtest`;
@@ -47,15 +49,21 @@ who understand its test status. Linux archives are unsigned, and the macOS archi
 no Apple Developer ID, notarization, Authenticode, Windows build, release tag, or public publisher is
 required to start Alpha.
 
+Each exported client stamps the manifest's full source SHA into the Godot project before its native
+build and archive are produced. The title screen shows the short build ID, and the final archive
+launch smoke verifies the full `SPURFIRE_BUILD_COMMIT=<sha>` marker. Playtest records therefore bind
+directly to the candidate source instead of the development placeholder.
+
 ## Human and gameplay testing happens here
 
 Alpha testers should play naturally before tuning against the forced smoke scenarios. The client
 records secret-free schema-v1 JSONL in its log directory. Aggregate sessions locally with:
 
 ```bash
-scripts/aggregate-playtest.py --strict user-logs/*.jsonl > alpha-playtest-summary.json
+scripts/aggregate-playtest.py --strict user-logs > alpha-playtest-summary.json
 ```
 
+Passing a log directory selects `m2-*.jsonl` and `m3-*.jsonl` and ignores presentation-only logs.
 The summary measures M2 dives, airborne accuracy, landing danger, notifications, M3 remount and duel
 behavior, M4 Spur/Charge use, M5 scoring pace and diversity, convergence gaps, and play-again rate.
 Malformed or incomplete strict sessions and prohibited credential/topology fields fail closed.

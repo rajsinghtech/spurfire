@@ -20,6 +20,7 @@ enum Screen { TITLE, WAITING, TEARDOWN, MATCH }
 @onready var create_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Create
 @onready var join_button: Button = $Screens/Title/Card/Margin/VBox/Actions/Join
 @onready var title_status: Label = $Screens/Title/Card/Margin/VBox/Status
+@onready var build_label: Label = $Screens/Title/Card/Margin/VBox/Build
 @onready var lobby_name_label: Label = $Screens/Waiting/Card/Margin/VBox/LobbyName
 @onready var share_status: Label = $Screens/Waiting/Card/Margin/VBox/ShareStatus
 @onready var roster_box: VBoxContainer = $Screens/Waiting/Card/Margin/VBox/Roster/Rows
@@ -53,6 +54,13 @@ var _match_fade: ColorRect
 
 func _ready() -> void:
 	get_tree().auto_accept_quit = false
+	var build_commit := str(ProjectSettings.get_setting(
+		"application/config/build_commit", "development"
+	))
+	var build_version := str(ProjectSettings.get_setting("application/config/version", "unknown"))
+	var build_display := build_commit.left(8).to_upper() if build_commit != "development" else "DEV"
+	build_label.text = "ALPHA %s • %s" % [build_version, build_display]
+	print("SPURFIRE_BUILD_COMMIT=%s" % build_commit)
 	name_edit.text = RANDOM_NAMES[randi() % RANDOM_NAMES.size()]
 	_player_id = SpurfireLobbyContract.new_uuid_v4()
 	_connect_signals()
