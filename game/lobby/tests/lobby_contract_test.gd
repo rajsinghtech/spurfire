@@ -74,7 +74,11 @@ func _check_offline_alpha_loop(failures: Array[String]) -> void:
 		]:
 			var combat := bridge.peer_session.combat_checkpoint_state(bot_id) as Dictionary
 			if int(combat.get("last_shot_tick", -1)) < 300:
-				failures.append("offline Alpha practice opponent did not fire through authority")
+				var shot_status := bridge.practice_shot_status().get(bot_id, {}) as Dictionary
+				failures.append(
+					"offline Alpha practice opponent did not fire through authority: %s"
+					% JSON.stringify(shot_status)
+				)
 	shell.queue_free()
 	await get_tree().process_frame
 

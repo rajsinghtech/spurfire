@@ -44,6 +44,7 @@ var _m5_choice_recorded := false
 var _migration_election_bound := false
 var _practice_mode := false
 var _practice_bot_ids: Array[String] = []
+var _practice_shot_status: Dictionary = {}
 var _local_spook_dismount_requested := false
 
 const M3_INPUT_JUMP := 1 << 0
@@ -142,6 +143,9 @@ func is_offline_practice() -> bool:
 
 func practice_bot_count() -> int:
 	return _practice_bot_ids.size()
+
+func practice_shot_status() -> Dictionary:
+	return _practice_shot_status.duplicate(true)
 
 func apply_projection(response: Dictionary) -> bool:
 	var lobby_value = response.get("lobby", response)
@@ -1316,8 +1320,16 @@ func _advance_practice_bot_combat(tick: int) -> void:
 		var command_json := str(peer_session.call(
 			"make_m3_practice_shot_command", bot_id, tick, origin, direction
 		))
-		if not command_json.is_empty():
-			_resolve_and_broadcast_command({"tick": tick, "command_json": command_json})
+		if command_json.is_empty():
+			_practice_shot_status[bot_id] = {"tick": tick, "stage": "compose_failed"}
+			continue
+		var resolution := _resolve_and_broadcast_command({
+			"tick": tick, "command_json": command_json,
+		})
+		_practice_shot_status[bot_id] = {
+			"tick": tick, "stage": "resolved" if not resolution.is_empty() else "resolve_failed",
+			"result_json": str(resolution.get("result_json", "")),
+		}
 
 func _remember_local_input(tick: int, input: Dictionary) -> void:
 	_local_input_history[tick] = input.duplicate(true)
@@ -1540,7 +1552,7 @@ func _on_local_shot_command(tick: int, command_json: String) -> void:
 		if not packet.is_empty():
 			_send_to_all(packet)
 
-func _resolve_and_broadcast_command(payload: Dictionary) -> void:
+func _resolve_and_broadcast_command(payload: Dictionary) -> Dictionary:
 	var result_json := ""
 	var m3_resolution := {}
 	if peer_session.is_m3_wire_active():
@@ -1551,11 +1563,11 @@ func _resolve_and_broadcast_command(payload: Dictionary) -> void:
 	else:
 		result_json = str(peer_session.resolve_shot_command(str(payload.get("command_json", ""))))
 	if result_json.is_empty():
-		return
+		return {}
 	var tick := int(payload.get("tick", 0))
 	var result_packet: PackedByteArray = peer_session.make_shot_result(tick, result_json)
 	if result_packet.is_empty():
-		return
+		return {}
 	_send_to_all(result_packet)
 	var decoded = JSON.parse_string(result_json)
 	var shooter := ""
@@ -1575,6 +1587,7 @@ func _resolve_and_broadcast_command(payload: Dictionary) -> void:
 		"tick": tick, "result_json": result_json,
 		"shooter_player_id": shooter,
 	})
+	return m3_resolution
 
 func _record_m4_near_misses(
 	shooter: String, resolved: Dictionary, authority: Dictionary, tick: int
