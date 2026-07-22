@@ -79,6 +79,17 @@ func _check_offline_alpha_loop(failures: Array[String]) -> void:
 					"offline Alpha practice opponent did not fire through authority: %s"
 					% JSON.stringify(shot_status)
 				)
+		for tick in range(331, 3601):
+			bridge.advance_shared_tick(tick)
+		var local_actor_value = JSON.parse_string(str(
+			bridge.peer_session.m3_actor_state_json(bridge.local_player_id)
+		))
+		if (
+			not local_actor_value is Dictionary
+			or int((local_actor_value as Dictionary).get("horse_health", 1)) != 0
+			or str((local_actor_value as Dictionary).get("actor_mode", "mounted")) == "mounted"
+		):
+			failures.append("offline Alpha opponents did not drive the horse-loss/on-foot loop")
 	shell.queue_free()
 	await get_tree().process_frame
 
