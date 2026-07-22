@@ -473,8 +473,9 @@ and independently confirmed its absence. Packaged-client health-UI agreement rem
   `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
   `7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 15-minute consumer runs reproduced
   239–462 ms refresh-boundary gaps on that merge; RustScale #104 and mainline PR #105 track the
-  correction, and the Alpha validation branch temporarily pins PR #105 revision
-  `30a3996749c90ab868139da04dbf614dd15dbca0`. The exact backport passed the
+  correction. Its first one-region candidate reduced an exact six-minute run to 103–208 ms but
+  still failed one follower; the current isolated-maintenance candidate is
+  `c11ab11ad61d6972d9c29bee87a53e9bd5514009`. The exact backport passed the
   six-minute refresh-boundary regression and full 900,000 ms run across all eight clients and 56
   directed routes at a 131 ms peak snapshot gap and 1 ms peak presentation desync. The exact final
   child was deleted and absent afterward, but an older inert provider record remains, so the

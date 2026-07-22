@@ -2,11 +2,13 @@
 
 Spurfire's native gameplay data plane uses application UDP through embedded RustScale. The Alpha
 validation branch temporarily pins both direct dependencies to RustScale mainline candidate
-`30a3996749c90ab868139da04dbf614dd15dbca0` from
+`c11ab11ad61d6972d9c29bee87a53e9bd5514009` from
 [#105](https://github.com/rajsinghtech/rustscale/pull/105). Merged v0.1.5 revision
 `7139bf384045a7e398320ae853e751c61c8218b9` reproduced the refresh-time stall tracked in
-[#104](https://github.com/rajsinghtech/rustscale/issues/104); promote only after the candidate passes
-the full live gate and merges to RustScale's default branch. The temporary v0.1.4-compatible
+[#104](https://github.com/rajsinghtech/rustscale/issues/104). The first one-region PR #105 candidate
+reduced a six-minute exact consumer run to 103–208 ms but still failed one follower; this revision
+also isolates periodic maintenance from the data-plane runtime. Promote only after it passes the
+live gates and merges to RustScale's default branch. The temporary v0.1.4-compatible
 backport [#103](https://github.com/rajsinghtech/rustscale/pull/103) was useful for isolating and
 live-qualifying that fix, but is no longer the consumer pin. A Windows exit-139 failure initially
 attributed to post-v0.1.4 RustScale later reproduced on the exact backport, moved between the

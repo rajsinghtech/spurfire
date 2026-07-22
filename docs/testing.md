@@ -259,9 +259,12 @@ RustScale PR #101 was isolated onto v0.1.4 as backport PR #103 revision
 `ad92ab56474ac37adff5c48da1ae8eaaa50efb43`, then merged to main revision
 `7139bf384045a7e398320ae853e751c61c8218b9`. Two later exact 900,000 ms consumer runs reproduced
 239–462 ms refresh-boundary gaps on that merge. The Alpha validation branch now pins RustScale
-mainline PR #105 revision `30a3996749c90ab868139da04dbf614dd15dbca0` while #104 is open; final
-promotion requires the full live gate and a merged default-branch revision. A Windows exit 139
-initially attributed to the broader dependency state later reproduced on the backport and is tracked
+mainline PR #105 revision `c11ab11ad61d6972d9c29bee87a53e9bd5514009` while #104 is open. Its first
+one-region candidate reduced an exact six-minute run to 103–208 ms but still failed one follower;
+the current revision additionally isolates maintenance from the data-plane runtime. Final promotion
+requires the shortened boundary check, full live gate, and a merged default-branch revision. A
+Windows exit 139 initially attributed to the broader dependency state later reproduced on the
+backport and is tracked
 as [Spurfire issue #14](https://github.com/rajsinghtech/spurfire/issues/14). The exact backport passed
 a 360,000 ms refresh-boundary run with all eight Godot clients and all 56 directed routes. The
 authority received at least 21,599 inputs from each follower; peak snapshot gap was 131 ms and peak
