@@ -11,7 +11,13 @@ Linux Godot qualification must emit each marker exactly once:
 - `SPURFIRE_COMBAT_UI_SMOKE_OK`
 - `SPURFIRE_ALPHA_LOBBY_SMOKE_OK`
 
-`scripts/check-alpha-smoke-log.sh` rejects missing/duplicate markers and engine errors. The integrated source now emits the one-lobby contract marker, while that marker remains a fixture/source contract—not HTTP, provider, two-download, coherent multiplayer, cleanup, or human qualification evidence. Existing gameplay smoke remains the regression gate for M0–M2.
+`scripts/check-alpha-smoke-log.sh` rejects missing/duplicate markers and engine errors on every
+client-preflight platform. The macOS jobs permit only Godot 4.7.1's exact headless
+`RendererDummy` shader-RID teardown line tracked in issue #17; every other engine, script, parse,
+or smoke error remains fatal. The integrated source now emits the one-lobby contract marker, while
+that marker remains a fixture/source contract—not HTTP, provider, two-download, coherent
+multiplayer, cleanup, or human qualification evidence. Existing gameplay smoke remains the
+regression gate for M0–M2.
 
 Release/check tooling has credential-free unit tests under `scripts/tests/`. Tests cover deterministic playtest aggregation, secret canaries, simulated versus private-live lifecycle evidence, exact cleanup ordering, platform trust blockers, and no-overwrite candidate metadata.
 

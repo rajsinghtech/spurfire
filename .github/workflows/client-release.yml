@@ -119,10 +119,7 @@ jobs:
           set -euo pipefail
           scripts/build-gdext.sh debug
           scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
+          scripts/check-alpha-smoke-log.sh "$RUNNER_TEMP/godot-smoke.log"
           scripts/build-gdext.sh release
           mkdir -p dist/linux
           godot4 --headless --path game --export-release Linux
@@ -213,10 +210,7 @@ jobs:
           set -euo pipefail
           scripts/build-gdext.sh debug
           scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
-          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke.log"
+          scripts/check-alpha-smoke-log.sh "$RUNNER_TEMP/godot-smoke.log"
           scripts/build-gdext.sh release
           mkdir -p dist/linux-arm64
           godot4 --headless --path game --export-release "Linux ARM64"
@@ -313,10 +307,7 @@ jobs:
             scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
           smoke_log="$(mktemp)"
           tr -d '\r' < "$RUNNER_TEMP/godot-smoke.log" > "$smoke_log"
-          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$smoke_log"
-          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$smoke_log"
-          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$smoke_log"
-          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$smoke_log"
+          scripts/check-alpha-smoke-log.sh "$smoke_log"
           scripts/build-gdext.sh release
           mkdir -p dist/windows
           ./godot4.exe --headless --path game --export-release Windows
@@ -423,10 +414,8 @@ jobs:
           # gates; a bootstrap-scene launch alone cannot catch ABI, loader,
           # input, or exported-method regressions.
           GODOT_BIN="$PWD/Godot.app/Contents/MacOS/Godot" scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke-arm64.log"
-          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
-          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
-          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
-          grep -Fqx SPURFIRE_ALPHA_LOBBY_SMOKE_OK "$RUNNER_TEMP/godot-smoke-arm64.log"
+          scripts/check-alpha-smoke-log.sh --allow-macos-dummy-shader-leak \
+            "$RUNNER_TEMP/godot-smoke-arm64.log"
 
       - name: Execute the x86_64 slice under Rosetta
         shell: bash
@@ -440,9 +429,8 @@ jobs:
           printf '#!/bin/bash\nexec arch -x86_64 "%s" "$@"\n' "$PWD/Godot.app/Contents/MacOS/Godot" > "$shim"
           chmod +x "$shim"
           GODOT_BIN="$shim" scripts/test-godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke-x86_64.log"
-          grep -Fqx SPURFIRE_GODOT_SMOKE_OK "$RUNNER_TEMP/godot-smoke-x86_64.log"
-          grep -Fqx SPURFIRE_POLISH_SMOKE_OK "$RUNNER_TEMP/godot-smoke-x86_64.log"
-          grep -Fqx SPURFIRE_COMBAT_UI_SMOKE_OK "$RUNNER_TEMP/godot-smoke-x86_64.log"
+          scripts/check-alpha-smoke-log.sh --allow-macos-dummy-shader-leak \
+            "$RUNNER_TEMP/godot-smoke-x86_64.log"
 
       - name: Launch final archive and record Apple trust blockers
         shell: bash

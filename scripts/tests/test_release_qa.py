@@ -665,6 +665,44 @@ class CommandTests(unittest.TestCase):
                 encoding="utf-8",
             )
             subprocess.run([ROOT / "scripts/check-alpha-smoke-log.sh", log], check=True)
+            valid = log.read_text(encoding="utf-8")
+            log.write_text(valid + "SCRIPT ERROR: broken fixture\n", encoding="utf-8")
+            failed = subprocess.run([ROOT / "scripts/check-alpha-smoke-log.sh", log], check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            log.write_text(
+                valid + "WARNING: 1 ObjectDB instance was leaked at exit\n",
+                encoding="utf-8",
+            )
+            failed = subprocess.run([ROOT / "scripts/check-alpha-smoke-log.sh", log], check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            dummy_shader_error = (
+                "ERROR: 1 RID allocations of type "
+                "'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit.\n"
+            )
+            log.write_text(valid + dummy_shader_error, encoding="utf-8")
+            failed = subprocess.run([ROOT / "scripts/check-alpha-smoke-log.sh", log], check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            subprocess.run(
+                [
+                    ROOT / "scripts/check-alpha-smoke-log.sh",
+                    "--allow-macos-dummy-shader-leak",
+                    log,
+                ],
+                check=True,
+            )
+            log.write_text(
+                valid + dummy_shader_error + "ERROR: unrelated renderer failure\n",
+                encoding="utf-8",
+            )
+            failed = subprocess.run(
+                [
+                    ROOT / "scripts/check-alpha-smoke-log.sh",
+                    "--allow-macos-dummy-shader-leak",
+                    log,
+                ],
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
             log.write_text("SPURFIRE_GODOT_SMOKE_OK\n", encoding="utf-8")
             failed = subprocess.run([ROOT / "scripts/check-alpha-smoke-log.sh", log], check=False)
             self.assertNotEqual(failed.returncode, 0)
@@ -786,12 +824,8 @@ class CommandTests(unittest.TestCase):
         # Linux x86_64, Linux ARM64, Windows, macOS arm64, and the macOS
         # x86_64 slice under Rosetta all run the full smoke suite.
         self.assertGreaterEqual(preflight.count("scripts/test-godot.sh"), 5)
-        for marker in (
-            "SPURFIRE_GODOT_SMOKE_OK",
-            "SPURFIRE_POLISH_SMOKE_OK",
-            "SPURFIRE_COMBAT_UI_SMOKE_OK",
-        ):
-            self.assertGreaterEqual(preflight.count(marker), 5, marker)
+        self.assertGreaterEqual(preflight.count("scripts/check-alpha-smoke-log.sh"), 5)
+        self.assertEqual(preflight.count("--allow-macos-dummy-shader-leak"), 2)
         self.assertIn('GODOT_BIN="$PWD/godot4.exe"', preflight)
         self.assertIn('GODOT_BIN="$PWD/Godot.app/Contents/MacOS/Godot"', preflight)
         # The macOS x86_64 slice must execute, not merely cross-compile.
